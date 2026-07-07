@@ -1315,7 +1315,7 @@ pub fn run() {
                 retry_count: 0,
                 force_notify_auth_error: false,
                 auth_error_paused_polling: false,
-                auth_watch_mode: poller::CredentialWatchMode::ActiveSource,
+                auth_watch_mode: poller::CredentialWatchMode::active_claude_source(),
                 auth_watch_snapshot: Vec::new(),
                 last_poll_ok: false,
                 update_status: UpdateStatus::Idle,
@@ -1604,6 +1604,7 @@ fn render_layered() {
 }
 
 /// Paint all widget content onto a DC with a given background color.
+#[allow(clippy::too_many_arguments)]
 fn paint_content(
     hdc: HDC,
     width: i32,
@@ -1811,7 +1812,7 @@ fn do_poll(send_hwnd: SendHwnd) {
                 }
                 s.force_notify_auth_error = false;
                 s.auth_error_paused_polling = false;
-                s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
+                s.auth_watch_mode = poller::CredentialWatchMode::active_claude_source();
                 s.auth_watch_snapshot.clear();
             }
 
@@ -1819,26 +1820,10 @@ fn do_poll(send_hwnd: SendHwnd) {
                 let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
             }
         }
-        Err(e) => {
-            let auth_watch = match e {
-                poller::PollError::AuthRequired | poller::PollError::TokenExpired
-                    if show_antigravity && !show_claude_code && !show_codex =>
-                {
-                    Some((
-                        poller::CredentialWatchMode::Antigravity,
-                        poller::credential_watch_snapshot(poller::CredentialWatchMode::Antigravity),
-                    ))
-                }
-                poller::PollError::AuthRequired | poller::PollError::TokenExpired => Some((
-                    poller::CredentialWatchMode::ActiveSource,
-                    poller::credential_watch_snapshot(poller::CredentialWatchMode::ActiveSource),
-                )),
-                poller::PollError::NoCredentials => Some((
-                    poller::CredentialWatchMode::AllSources,
-                    poller::credential_watch_snapshot(poller::CredentialWatchMode::AllSources),
-                )),
-                poller::PollError::RequestFailed => None,
-            };
+        Err(failure) => {
+            let auth_watch = failure.credential_watch_mode.map(|watch_mode| {
+                (watch_mode, poller::credential_watch_snapshot(watch_mode))
+            });
             // Distinguish auth-required errors from transient errors.
             let notify_auth_error = {
                 let mut state = lock_state();
@@ -1873,7 +1858,7 @@ fn do_poll(send_hwnd: SendHwnd) {
                             // Transient network / credential-missing errors: exponential backoff.
                             s.force_notify_auth_error = false;
                             s.auth_error_paused_polling = false;
-                            s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
+                            s.auth_watch_mode = poller::CredentialWatchMode::active_claude_source();
                             s.auth_watch_snapshot.clear();
                             s.session_text = "...".to_string();
                             s.weekly_text = "...".to_string();
@@ -2609,10 +2594,12 @@ unsafe extern "system" fn wnd_proc(
                                         s.show_codex = !s.show_codex;
                                     }
                                 }
-                                IDM_MODEL_ANTIGRAVITY => {
-                                    if s.show_claude_code || s.show_codex || !s.show_antigravity {
-                                        s.show_antigravity = !s.show_antigravity;
-                                    }
+                                IDM_MODEL_ANTIGRAVITY
+                                    if s.show_claude_code
+                                        || s.show_codex
+                                        || !s.show_antigravity =>
+                                {
+                                    s.show_antigravity = !s.show_antigravity;
                                 }
                                 _ => {}
                             }
@@ -3083,6 +3070,7 @@ fn paint(hdc: HDC, hwnd: HWND) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row(
     hdc: HDC,
     x: i32,
@@ -3191,6 +3179,7 @@ fn model_usage_width(segment_count: i32) -> i32 {
         + sc(TEXT_WIDTH)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_usage_bar(
     hdc: HDC,
     bar_x: i32,

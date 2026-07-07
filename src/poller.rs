@@ -34,11 +34,83 @@ pub enum PollError {
     RequestFailed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CredentialWatchProviders {
+    claude_code: bool,
+    codex: bool,
+    antigravity: bool,
+}
+
+impl CredentialWatchProviders {
+    const fn none() -> Self {
+        Self {
+            claude_code: false,
+            codex: false,
+            antigravity: false,
+        }
+    }
+
+    pub const fn claude_code() -> Self {
+        Self {
+            claude_code: true,
+            codex: false,
+            antigravity: false,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.claude_code || self.codex || self.antigravity
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CredentialWatchMode {
+    active_sources: CredentialWatchProviders,
+    all_sources: CredentialWatchProviders,
+}
+
+impl CredentialWatchMode {
+    pub const fn active_sources(providers: CredentialWatchProviders) -> Self {
+        Self {
+            active_sources: providers,
+            all_sources: CredentialWatchProviders::none(),
+        }
+    }
+
+    pub const fn all_sources(providers: CredentialWatchProviders) -> Self {
+        Self {
+            active_sources: CredentialWatchProviders::none(),
+            all_sources: providers,
+        }
+    }
+
+    fn combined(active_sources: CredentialWatchProviders, all_sources: CredentialWatchProviders) -> Self {
+        Self {
+            active_sources,
+            all_sources,
+        }
+    }
+
+    pub const fn active_claude_source() -> Self {
+        Self::active_sources(CredentialWatchProviders::claude_code())
+    }
+
+    fn any(self) -> bool {
+        self.active_sources.any() || self.all_sources.any()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialWatchMode {
-    ActiveSource,
-    AllSources,
-    Antigravity,
+pub struct PollFailure {
+    pub error: PollError,
+    pub credential_watch_mode: Option<CredentialWatchMode>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ProviderErrors {
+    claude_code: Option<PollError>,
+    codex: Option<PollError>,
+    antigravity: Option<PollError>,
 }
 
 pub type CredentialWatchSnapshot = Vec<String>;
@@ -66,6 +138,17 @@ struct CodexTokenData {
     account_id: Option<String>,
 }
 
+struct CodexCredentials {
+    tokens: CodexTokenData,
+    source: CodexCredentialSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexCredentialSource {
+    Windows(PathBuf),
+    Wsl { distro: String },
+}
+
 #[derive(Deserialize)]
 struct CodexUsageResponse {
     rate_limit: Option<Option<Box<CodexRateLimitDetails>>>,
@@ -88,9 +171,20 @@ struct AntigravityAuthFile {
     token: AntigravityTokenData,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct AntigravityTokenData {
     access_token: String,
+}
+
+struct AntigravityCredentials {
+    token: AntigravityTokenData,
+    source: AntigravityCredentialSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AntigravityCredentialSource {
+    Windows,
+    Wsl { distro: String },
 }
 
 #[derive(Deserialize)]
@@ -175,7 +269,7 @@ pub fn poll(
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
-) -> Result<AppUsageData, PollError> {
+) -> Result<AppUsageData, PollFailure> {
     poll_with(
         show_claude_code,
         show_codex,
@@ -193,15 +287,17 @@ fn poll_with(
     mut poll_claude_code: impl FnMut() -> Result<UsageData, PollError>,
     mut poll_codex: impl FnMut() -> Result<UsageData, PollError>,
     mut poll_antigravity: impl FnMut() -> Result<UsageData, PollError>,
-) -> Result<AppUsageData, PollError> {
+) -> Result<AppUsageData, PollFailure> {
     let mut data = AppUsageData::default();
     let mut first_error = None;
+    let mut provider_errors = ProviderErrors::default();
     let active_provider_count = show_claude_code as u8 + show_codex as u8 + show_antigravity as u8;
 
     if show_claude_code {
         match poll_claude_code() {
             Ok(claude_code) => data.claude_code = Some(claude_code),
             Err(error) => {
+                provider_errors.claude_code = Some(error);
                 if active_provider_count > 1 {
                     diagnose::log(format!("Claude Code usage poll failed: {error:?}"));
                 }
@@ -214,6 +310,7 @@ fn poll_with(
         match poll_codex() {
             Ok(codex) => data.codex = Some(codex),
             Err(error) => {
+                provider_errors.codex = Some(error);
                 if active_provider_count > 1 {
                     diagnose::log(format!("Codex usage poll failed: {error:?}"));
                 }
@@ -226,6 +323,7 @@ fn poll_with(
         match poll_antigravity() {
             Ok(antigravity) => data.antigravity = Some(antigravity),
             Err(error) => {
+                provider_errors.antigravity = Some(error);
                 if active_provider_count > 1 {
                     diagnose::log(format!("Antigravity usage poll failed: {error:?}"));
                 }
@@ -235,7 +333,11 @@ fn poll_with(
     }
 
     if data.claude_code.is_none() && data.codex.is_none() && data.antigravity.is_none() {
-        Err(first_error.unwrap_or(PollError::RequestFailed))
+        let error = first_error.unwrap_or(PollError::RequestFailed);
+        Err(PollFailure {
+            error,
+            credential_watch_mode: credential_watch_mode_for_errors(error, provider_errors),
+        })
     } else {
         Ok(data)
     }
@@ -256,7 +358,7 @@ fn poll_claude_code() -> Result<UsageData, PollError> {
 }
 
 fn poll_codex() -> Result<UsageData, PollError> {
-    let creds = match read_codex_credentials() {
+    let mut creds = match read_first_codex_credentials() {
         Some(creds) => creds,
         None => {
             diagnose::log("Codex usage poll failed: no Codex credentials found");
@@ -264,19 +366,41 @@ fn poll_codex() -> Result<UsageData, PollError> {
         }
     };
 
-    match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
-        Ok(data) => Ok(data),
-        Err(PollError::AuthRequired) => {
-            cli_refresh_codex_token();
-            let refreshed = read_codex_credentials().ok_or(PollError::TokenExpired)?;
-            fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
+    loop {
+        match fetch_codex_usage(&creds.tokens.access_token, creds.tokens.account_id.as_deref()) {
+            Ok(data) => return Ok(data),
+            Err(PollError::AuthRequired) => {
+                let source = creds.source.clone();
+                cli_refresh_codex(&source);
+
+                match read_codex_credentials_from_source(&source) {
+                    Some(refreshed) => {
+                        match fetch_codex_usage(
+                            &refreshed.tokens.access_token,
+                            refreshed.tokens.account_id.as_deref(),
+                        ) {
+                            Ok(data) => return Ok(data),
+                            Err(PollError::AuthRequired) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None => diagnose::log(format!(
+                        "Codex credentials from {source:?} unavailable after refresh attempt"
+                    )),
+                }
+
+                match read_next_codex_credentials_after(&source) {
+                    Some(next) => creds = next,
+                    None => return Err(PollError::TokenExpired),
+                }
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => Err(error),
     }
 }
 
 fn poll_antigravity() -> Result<UsageData, PollError> {
-    let creds = match read_antigravity_credentials() {
+    let creds = match read_first_antigravity_credentials() {
         Some(creds) => creds,
         None => {
             diagnose::log("Antigravity usage poll failed: no Antigravity credentials found");
@@ -284,7 +408,15 @@ fn poll_antigravity() -> Result<UsageData, PollError> {
         }
     };
 
-    fetch_antigravity_usage(&creds.access_token)
+    match fetch_antigravity_usage(&creds.token.access_token) {
+        Ok(data) => Ok(data),
+        Err(PollError::AuthRequired) => match read_next_antigravity_credentials_after(&creds.source)
+        {
+            Some(next) => fetch_antigravity_usage(&next.token.access_token),
+            None => Err(PollError::AuthRequired),
+        },
+        Err(error) => Err(error),
+    }
 }
 
 fn refresh_or_fallback(mut creds: Credentials) -> Result<Credentials, PollError> {
@@ -319,6 +451,13 @@ fn cli_refresh_token(source: &CredentialSource) {
     match source {
         CredentialSource::Windows(_) => cli_refresh_windows_token(),
         CredentialSource::Wsl { distro } => cli_refresh_wsl_token(distro),
+    }
+}
+
+fn cli_refresh_codex(source: &CodexCredentialSource) {
+    match source {
+        CodexCredentialSource::Windows(_) => cli_refresh_codex_token(),
+        CodexCredentialSource::Wsl { distro } => cli_refresh_codex_wsl_token(distro),
     }
 }
 
@@ -445,6 +584,33 @@ fn cli_refresh_codex_token() {
     wait_for_refresh(&mut child);
 }
 
+fn cli_refresh_codex_wsl_token(distro: &str) {
+    diagnose::log(format!(
+        "attempting WSL Codex token refresh in distro {distro}"
+    ));
+    let mut cmd = Command::new("wsl.exe");
+    cmd.arg("-d")
+        .arg(distro)
+        .arg("--")
+        .arg("bash")
+        .arg("-lic")
+        .arg("if command -v codex >/dev/null 2>&1; then codex exec .; elif [ -x \"$HOME/.local/bin/codex\" ]; then \"$HOME/.local/bin/codex\" exec .; else exit 127; fi")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(error) => {
+            diagnose::log_error("unable to spawn WSL Codex token refresh", error);
+            return;
+        }
+    };
+
+    wait_for_refresh(&mut child);
+}
+
 /// Spawn a command and wait up to `timeout` for it to finish.
 /// Returns None if the process fails to start or exceeds the deadline.
 fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::Output> {
@@ -563,26 +729,85 @@ fn build_agent() -> Result<ureq::Agent, PollError> {
         .build())
 }
 
-pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSnapshot {
-    if mode == CredentialWatchMode::Antigravity {
-        return vec![antigravity_credential_watch_signature()];
+fn credential_watch_mode_for_errors(
+    error: PollError,
+    errors: ProviderErrors,
+) -> Option<CredentialWatchMode> {
+    if error == PollError::RequestFailed {
+        return None;
     }
 
-    let sources = match mode {
-        CredentialWatchMode::ActiveSource => read_first_credentials()
-            .map(|creds| vec![creds.source])
-            .unwrap_or_else(all_known_credential_sources),
-        CredentialWatchMode::AllSources => all_known_credential_sources(),
-        CredentialWatchMode::Antigravity => unreachable!(),
+    let active_sources = CredentialWatchProviders {
+        claude_code: matches!(
+            errors.claude_code,
+            Some(PollError::AuthRequired | PollError::TokenExpired)
+        ),
+        codex: matches!(
+            errors.codex,
+            Some(PollError::AuthRequired | PollError::TokenExpired)
+        ),
+        antigravity: matches!(
+            errors.antigravity,
+            Some(PollError::AuthRequired | PollError::TokenExpired)
+        ),
     };
+    let all_sources = CredentialWatchProviders {
+        claude_code: matches!(errors.claude_code, Some(PollError::NoCredentials)),
+        codex: matches!(errors.codex, Some(PollError::NoCredentials)),
+        antigravity: matches!(errors.antigravity, Some(PollError::NoCredentials)),
+    };
+    let mode = if active_sources.any() {
+        CredentialWatchMode::combined(active_sources, all_sources)
+    } else {
+        CredentialWatchMode::all_sources(all_sources)
+    };
+    mode.any().then_some(mode)
+}
 
-    let mut snapshot: CredentialWatchSnapshot = sources
-        .into_iter()
-        .filter_map(|source| credential_watch_signature(&source))
-        .collect();
+pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSnapshot {
+    let mut snapshot = Vec::new();
+
+    if mode.active_sources.claude_code {
+        snapshot.extend(
+            active_claude_credential_sources()
+                .into_iter()
+                .filter_map(|source| claude_credential_watch_signature(&source)),
+        );
+    }
+
+    if mode.all_sources.claude_code {
+        snapshot.extend(
+            all_known_credential_sources()
+                .into_iter()
+                .filter_map(|source| claude_credential_watch_signature(&source)),
+        );
+    }
+
+    if mode.active_sources.codex || mode.all_sources.codex {
+        snapshot.extend(
+            all_known_codex_credential_sources()
+                .into_iter()
+                .filter_map(|source| codex_credential_watch_signature(&source)),
+        );
+    }
+
+    if mode.active_sources.antigravity || mode.all_sources.antigravity {
+        snapshot.extend(
+            all_known_antigravity_credential_sources()
+                .into_iter()
+                .filter_map(|source| antigravity_credential_watch_signature(&source)),
+        );
+    }
+
     snapshot.sort();
     snapshot.dedup();
     snapshot
+}
+
+fn active_claude_credential_sources() -> Vec<CredentialSource> {
+    read_first_credentials()
+        .map(|creds| vec![creds.source])
+        .unwrap_or_else(all_known_credential_sources)
 }
 
 fn all_known_credential_sources() -> Vec<CredentialSource> {
@@ -603,10 +828,45 @@ fn windows_credential_source() -> Option<CredentialSource> {
     ))
 }
 
-fn credential_watch_signature(source: &CredentialSource) -> Option<String> {
+fn all_known_codex_credential_sources() -> Vec<CodexCredentialSource> {
+    let mut sources = Vec::new();
+    if let Some(path) = codex_auth_path() {
+        sources.push(CodexCredentialSource::Windows(path));
+    }
+    for distro in list_wsl_distros() {
+        sources.push(CodexCredentialSource::Wsl { distro });
+    }
+    sources
+}
+
+fn all_known_antigravity_credential_sources() -> Vec<AntigravityCredentialSource> {
+    let mut sources = vec![AntigravityCredentialSource::Windows];
+    for distro in list_wsl_distros() {
+        sources.push(AntigravityCredentialSource::Wsl { distro });
+    }
+    sources
+}
+
+fn claude_credential_watch_signature(source: &CredentialSource) -> Option<String> {
     match source {
         CredentialSource::Windows(path) => Some(windows_credential_watch_signature(path)),
         CredentialSource::Wsl { distro } => wsl_credential_watch_signature(distro),
+    }
+}
+
+fn codex_credential_watch_signature(source: &CodexCredentialSource) -> Option<String> {
+    match source {
+        CodexCredentialSource::Windows(path) => Some(windows_credential_watch_signature(path)),
+        CodexCredentialSource::Wsl { distro } => wsl_codex_credential_watch_signature(distro),
+    }
+}
+
+fn antigravity_credential_watch_signature(source: &AntigravityCredentialSource) -> Option<String> {
+    match source {
+        AntigravityCredentialSource::Windows => Some(windows_antigravity_credential_watch_signature()),
+        AntigravityCredentialSource::Wsl { distro } => {
+            wsl_antigravity_credential_watch_signature(distro)
+        }
     }
 }
 
@@ -627,6 +887,39 @@ fn windows_credential_watch_signature(path: &PathBuf) -> String {
 }
 
 fn wsl_credential_watch_signature(distro: &str) -> Option<String> {
+    wsl_path_watch_signature(
+        distro,
+        "claude-wsl",
+        "if [ -f ~/.claude/.credentials.json ]; then \
+         stat -c 'present|%s|%Y' ~/.claude/.credentials.json; \
+         else echo missing; fi",
+    )
+}
+
+fn wsl_codex_credential_watch_signature(distro: &str) -> Option<String> {
+    wsl_path_watch_signature(
+        distro,
+        "codex-wsl",
+        // No shell locals or embedded double quotes: wsl.exe hands this string
+        // through the distro's default shell, which expands `$var` and strips
+        // `\"` before `sh -c` runs it (locals like `$p` come back empty).
+        "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
+         stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; \
+         else echo missing; fi",
+    )
+}
+
+fn wsl_antigravity_credential_watch_signature(distro: &str) -> Option<String> {
+    wsl_path_watch_signature(
+        distro,
+        "antigravity-wsl",
+        "if [ -f ~/.gemini/antigravity-cli/antigravity-oauth-token ]; then \
+         stat -c 'present|%s|%Y' ~/.gemini/antigravity-cli/antigravity-oauth-token; \
+         else echo missing; fi",
+    )
+}
+
+fn wsl_path_watch_signature(distro: &str, key: &str, shell: &str) -> Option<String> {
     let output = run_with_timeout(
         Command::new("wsl.exe")
             .arg("-d")
@@ -634,12 +927,9 @@ fn wsl_credential_watch_signature(distro: &str) -> Option<String> {
             .arg("--")
             .arg("sh")
             .arg("-lc")
-            .arg(
-                "if [ -f ~/.claude/.credentials.json ]; then \
-                 stat -c 'present|%s|%Y' ~/.claude/.credentials.json; \
-                 else echo missing; fi",
-            )
+            .arg(shell)
             .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(5),
@@ -651,29 +941,26 @@ fn wsl_credential_watch_signature(distro: &str) -> Option<String> {
         format!("status-{}", output.status)
     };
 
-    Some(format!("wsl:{distro}|{state}"))
+    Some(format!("{key}:{distro}|{state}"))
 }
 
 fn fetch_usage_with_fallback(token: &str) -> Result<UsageData, PollError> {
     // Try the dedicated usage endpoint first
-    match try_usage_endpoint(token)? {
-        Some(data) => {
-            // If reset timers are missing, fill them in from the Messages API
-            if data.session.resets_at.is_none() || data.weekly.resets_at.is_none() {
-                if let Ok(fallback) = fetch_usage_via_messages(token) {
-                    let mut merged = data;
-                    if merged.session.resets_at.is_none() {
-                        merged.session.resets_at = fallback.session.resets_at;
-                    }
-                    if merged.weekly.resets_at.is_none() {
-                        merged.weekly.resets_at = fallback.weekly.resets_at;
-                    }
-                    return Ok(merged);
+    if let Some(data) = try_usage_endpoint(token)? {
+        // If reset timers are missing, fill them in from the Messages API
+        if data.session.resets_at.is_none() || data.weekly.resets_at.is_none() {
+            if let Ok(fallback) = fetch_usage_via_messages(token) {
+                let mut merged = data;
+                if merged.session.resets_at.is_none() {
+                    merged.session.resets_at = fallback.session.resets_at;
                 }
+                if merged.weekly.resets_at.is_none() {
+                    merged.weekly.resets_at = fallback.weekly.resets_at;
+                }
+                return Ok(merged);
             }
-            return Ok(data);
         }
-        None => {}
+        return Ok(data);
     }
 
     // Fall back to Messages API with rate limit headers
@@ -858,7 +1145,7 @@ fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
     }
 }
 
-fn antigravity_credential_watch_signature() -> String {
+fn windows_antigravity_credential_watch_signature() -> String {
     let Some(content) = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET) else {
         return format!("{ANTIGRAVITY_CREDENTIAL_TARGET}|missing");
     };
@@ -1232,7 +1519,21 @@ fn codex_auth_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("auth.json"))
 }
 
-fn read_codex_credentials() -> Option<CodexTokenData> {
+fn read_first_codex_credentials() -> Option<CodexCredentials> {
+    if let Some(creds) = read_windows_codex_credentials() {
+        return Some(creds);
+    }
+
+    for distro in list_wsl_distros() {
+        if let Some(creds) = read_wsl_codex_credentials(&distro) {
+            return Some(creds);
+        }
+    }
+
+    None
+}
+
+fn read_windows_codex_credentials() -> Option<CodexCredentials> {
     let auth_path = codex_auth_path()?;
     let content = match std::fs::read_to_string(&auth_path) {
         Ok(content) => content,
@@ -1248,18 +1549,36 @@ fn read_codex_credentials() -> Option<CodexTokenData> {
         }
     };
 
-    let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
-    auth.tokens.filter(|tokens| !tokens.access_token.is_empty())
+    parse_codex_credentials(&content, CodexCredentialSource::Windows(auth_path))
 }
 
-fn read_antigravity_credentials() -> Option<AntigravityTokenData> {
-    let content = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET)?;
-    let auth: AntigravityAuthFile = serde_json::from_str(&content).ok()?;
-    if auth.token.access_token.is_empty() {
-        None
-    } else {
-        Some(auth.token)
+fn read_codex_credentials_from_source(source: &CodexCredentialSource) -> Option<CodexCredentials> {
+    match source {
+        CodexCredentialSource::Windows(path) => {
+            let content = std::fs::read_to_string(path).ok()?;
+            parse_codex_credentials(&content, source.clone())
+        }
+        CodexCredentialSource::Wsl { distro } => read_wsl_codex_credentials(distro),
     }
+}
+
+fn read_first_antigravity_credentials() -> Option<AntigravityCredentials> {
+    if let Some(creds) = read_windows_antigravity_credentials() {
+        return Some(creds);
+    }
+
+    for distro in list_wsl_distros() {
+        if let Some(creds) = read_wsl_antigravity_credentials(&distro) {
+            return Some(creds);
+        }
+    }
+
+    None
+}
+
+fn read_windows_antigravity_credentials() -> Option<AntigravityCredentials> {
+    let content = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET)?;
+    parse_antigravity_credentials(&content, AntigravityCredentialSource::Windows)
 }
 
 fn read_windows_generic_credential(target: &str) -> Option<String> {
@@ -1310,6 +1629,7 @@ fn read_wsl_credentials(distro: &str) -> Option<Credentials> {
             .arg("-lc")
             .arg("cat ~/.claude/.credentials.json")
             .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(5),
@@ -1323,10 +1643,78 @@ fn read_wsl_credentials(distro: &str) -> Option<Credentials> {
         return None;
     }
 
-    let content = String::from_utf8(output.stdout).ok()?;
+    let content = decode_wsl_text(&output.stdout);
     parse_credentials(
         &content,
         CredentialSource::Wsl {
+            distro: distro.to_string(),
+        },
+    )
+}
+
+fn read_wsl_codex_credentials(distro: &str) -> Option<CodexCredentials> {
+    let output = run_with_timeout(
+        Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .arg("--")
+            .arg("sh")
+            .arg("-lc")
+            // No shell locals or embedded double quotes (see
+            // wsl_codex_credential_watch_signature for why).
+            .arg("cat ${CODEX_HOME:-$HOME/.codex}/auth.json")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(5),
+    )?;
+
+    if !output.status.success() {
+        diagnose::log(format!(
+            "WSL Codex credentials probe failed for distro {distro} with status {}",
+            output.status
+        ));
+        return None;
+    }
+
+    let content = decode_wsl_text(&output.stdout);
+    parse_codex_credentials(
+        &content,
+        CodexCredentialSource::Wsl {
+            distro: distro.to_string(),
+        },
+    )
+}
+
+fn read_wsl_antigravity_credentials(distro: &str) -> Option<AntigravityCredentials> {
+    let output = run_with_timeout(
+        Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .arg("--")
+            .arg("sh")
+            .arg("-lc")
+            .arg("cat ~/.gemini/antigravity-cli/antigravity-oauth-token")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(5),
+    )?;
+
+    if !output.status.success() {
+        diagnose::log(format!(
+            "WSL Antigravity credentials probe failed for distro {distro} with status {}",
+            output.status
+        ));
+        return None;
+    }
+
+    let content = decode_wsl_text(&output.stdout);
+    parse_antigravity_credentials(
+        &content,
+        AntigravityCredentialSource::Wsl {
             distro: distro.to_string(),
         },
     )
@@ -1349,22 +1737,38 @@ fn parse_credentials(content: &str, source: CredentialSource) -> Option<Credenti
     })
 }
 
+fn parse_codex_credentials(content: &str, source: CodexCredentialSource) -> Option<CodexCredentials> {
+    let auth: CodexAuthFile = serde_json::from_str(content).ok()?;
+    let tokens = auth.tokens.filter(|tokens| !tokens.access_token.is_empty())?;
+    Some(CodexCredentials { tokens, source })
+}
+
+fn parse_antigravity_credentials(
+    content: &str,
+    source: AntigravityCredentialSource,
+) -> Option<AntigravityCredentials> {
+    let auth: AntigravityAuthFile = serde_json::from_str(content).ok()?;
+    if auth.token.access_token.is_empty() {
+        None
+    } else {
+        Some(AntigravityCredentials {
+            token: auth.token,
+            source,
+        })
+    }
+}
+
 fn read_next_credentials_after(source: &CredentialSource) -> Option<Credentials> {
     match source {
         CredentialSource::Windows(_) => {
-            for distro in list_wsl_distros() {
+            for distro in remaining_wsl_distros(&list_wsl_distros(), None) {
                 if let Some(creds) = read_wsl_credentials(&distro) {
                     return Some(creds);
                 }
             }
         }
         CredentialSource::Wsl { distro } => {
-            let mut past_current = false;
-            for candidate_distro in list_wsl_distros() {
-                if !past_current {
-                    past_current = candidate_distro == *distro;
-                    continue;
-                }
+            for candidate_distro in remaining_wsl_distros(&list_wsl_distros(), Some(distro)) {
                 if let Some(creds) = read_wsl_credentials(&candidate_distro) {
                     return Some(creds);
                 }
@@ -1375,11 +1779,74 @@ fn read_next_credentials_after(source: &CredentialSource) -> Option<Credentials>
     None
 }
 
+fn read_next_codex_credentials_after(source: &CodexCredentialSource) -> Option<CodexCredentials> {
+    match source {
+        CodexCredentialSource::Windows(_) => {
+            for distro in remaining_wsl_distros(&list_wsl_distros(), None) {
+                if let Some(creds) = read_wsl_codex_credentials(&distro) {
+                    return Some(creds);
+                }
+            }
+        }
+        CodexCredentialSource::Wsl { distro } => {
+            for candidate_distro in remaining_wsl_distros(&list_wsl_distros(), Some(distro)) {
+                if let Some(creds) = read_wsl_codex_credentials(&candidate_distro) {
+                    return Some(creds);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_next_antigravity_credentials_after(
+    source: &AntigravityCredentialSource,
+) -> Option<AntigravityCredentials> {
+    match source {
+        AntigravityCredentialSource::Windows => {
+            for distro in remaining_wsl_distros(&list_wsl_distros(), None) {
+                if let Some(creds) = read_wsl_antigravity_credentials(&distro) {
+                    return Some(creds);
+                }
+            }
+        }
+        AntigravityCredentialSource::Wsl { distro } => {
+            for candidate_distro in remaining_wsl_distros(&list_wsl_distros(), Some(distro)) {
+                if let Some(creds) = read_wsl_antigravity_credentials(&candidate_distro) {
+                    return Some(creds);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn remaining_wsl_distros(distros: &[String], current: Option<&str>) -> Vec<String> {
+    let mut remaining = Vec::new();
+    let mut past_current = current.is_none();
+
+    for distro in distros {
+        if !past_current {
+            if current == Some(distro.as_str()) {
+                past_current = true;
+            }
+            continue;
+        }
+
+        remaining.push(distro.clone());
+    }
+
+    remaining
+}
+
 fn list_wsl_distros() -> Vec<String> {
     let output = match run_with_timeout(
         Command::new("wsl.exe")
             .args(["-l", "-q"])
             .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
         Duration::from_secs(5),
@@ -1413,7 +1880,7 @@ fn decode_wsl_text(bytes: &[u8]) -> String {
 }
 
 fn decode_utf16le(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return None;
     }
 
@@ -1518,7 +1985,7 @@ fn parse_datetime_to_unix(s: &str, _fmt: &str) -> Result<u64, ()> {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Format a usage section as "X% · Yh" style text
@@ -1648,7 +2115,7 @@ mod tests {
 
     #[test]
     fn returns_first_error_when_no_enabled_provider_succeeds() {
-        let error = poll_with(
+        let failure = poll_with(
             true,
             true,
             true,
@@ -1658,7 +2125,22 @@ mod tests {
         )
         .expect_err("all-provider failure should return an error");
 
-        assert_eq!(error, PollError::AuthRequired);
+        assert_eq!(failure.error, PollError::AuthRequired);
+        assert_eq!(
+            failure.credential_watch_mode,
+            Some(CredentialWatchMode::combined(
+                CredentialWatchProviders {
+                    claude_code: true,
+                    codex: false,
+                    antigravity: false,
+                },
+                CredentialWatchProviders {
+                    claude_code: false,
+                    codex: false,
+                    antigravity: true,
+                },
+            ))
+        );
     }
 
     #[test]
@@ -1731,5 +2213,88 @@ mod tests {
         assert!((usage.session.percentage - 4.17425).abs() < 0.000001);
         assert!(usage.weekly.resets_at.is_some());
         assert!(usage.session.resets_at.is_some());
+    }
+
+    #[test]
+    fn codex_auth_file_deserializes_real_shape() {
+        let auth: CodexAuthFile = serde_json::from_str(
+            r#"{
+                "auth_mode":"device_code",
+                "tokens":{
+                    "id_token":"fake",
+                    "access_token":"fake-at",
+                    "refresh_token":"fake-rt",
+                    "account_id":"fake-acct"
+                },
+                "last_refresh":"2026-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("Codex auth file should deserialize");
+
+        let tokens = auth.tokens.expect("Codex auth file should include tokens");
+        assert_eq!(tokens.access_token, "fake-at");
+        assert_eq!(tokens.account_id.as_deref(), Some("fake-acct"));
+    }
+
+    #[test]
+    fn antigravity_auth_file_deserializes_real_shape() {
+        let auth: AntigravityAuthFile = serde_json::from_str(
+            r#"{
+                "token":{
+                    "access_token":"fake-at",
+                    "token_type":"Bearer",
+                    "refresh_token":"fake-rt",
+                    "expiry":"2026-01-01T00:00:00Z"
+                },
+                "auth_method":"oauth"
+            }"#,
+        )
+        .expect("Antigravity auth file should deserialize");
+
+        assert_eq!(auth.token.access_token, "fake-at");
+    }
+
+    #[test]
+    fn remaining_wsl_distros_preserves_windows_first_walk_order() {
+        let distros = vec![
+            "Ubuntu".to_string(),
+            "Debian".to_string(),
+            "Arch".to_string(),
+        ];
+
+        assert_eq!(remaining_wsl_distros(&distros, None), distros.clone());
+        assert_eq!(
+            remaining_wsl_distros(&distros, Some("Ubuntu")),
+            vec!["Debian".to_string(), "Arch".to_string()]
+        );
+        assert_eq!(
+            remaining_wsl_distros(&distros, Some("Debian")),
+            vec!["Arch".to_string()]
+        );
+        assert!(remaining_wsl_distros(&distros, Some("Arch")).is_empty());
+        assert!(remaining_wsl_distros(&distros, Some("Missing")).is_empty());
+    }
+
+    #[test]
+    fn no_credentials_failure_watches_all_missing_provider_sources() {
+        let failure = poll_with(
+            false,
+            true,
+            true,
+            || unreachable!("claude code is disabled"),
+            || Err(PollError::NoCredentials),
+            || Err(PollError::NoCredentials),
+        )
+        .expect_err("missing credentials should return an error");
+
+        assert_eq!(failure.error, PollError::NoCredentials);
+        assert_eq!(
+            failure.credential_watch_mode,
+            Some(CredentialWatchMode::all_sources(CredentialWatchProviders {
+                claude_code: false,
+                codex: true,
+                antigravity: true,
+            }))
+        );
     }
 }
