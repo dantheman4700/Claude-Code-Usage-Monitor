@@ -13,7 +13,9 @@ fn main() {
         .set_version_info(VersionInfo::FILEVERSION, numeric_version)
         .set_version_info(VersionInfo::PRODUCTVERSION, numeric_version);
 
-    res.compile().expect("Failed to compile Windows resources");
+    if let Err(err) = res.compile() {
+        println!("cargo:warning=Skipping Windows resource embedding (icon/version info): {err}");
+    }
 }
 
 fn pack_version(version: &str) -> u64 {
