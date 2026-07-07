@@ -413,7 +413,23 @@ fn poll_antigravity() -> Result<UsageData, PollError> {
         match fetch_antigravity_usage(&creds.token.access_token) {
             Ok(data) => return Ok(data),
             Err(PollError::AuthRequired) => {
-                match read_next_antigravity_credentials_after(&creds.source) {
+                let source = creds.source.clone();
+                cli_refresh_antigravity(&source);
+
+                match read_antigravity_credentials_from_source(&source) {
+                    Some(refreshed) => {
+                        match fetch_antigravity_usage(&refreshed.token.access_token) {
+                            Ok(data) => return Ok(data),
+                            Err(PollError::AuthRequired) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None => diagnose::log(format!(
+                        "Antigravity credentials from {source:?} unavailable after refresh attempt"
+                    )),
+                }
+
+                match read_next_antigravity_credentials_after(&source) {
                     Some(next) => creds = next,
                     None => return Err(PollError::AuthRequired),
                 }
@@ -421,6 +437,59 @@ fn poll_antigravity() -> Result<UsageData, PollError> {
             Err(error) => return Err(error),
         }
     }
+}
+
+fn read_antigravity_credentials_from_source(
+    source: &AntigravityCredentialSource,
+) -> Option<AntigravityCredentials> {
+    match source {
+        AntigravityCredentialSource::Windows => read_windows_antigravity_credentials(),
+        AntigravityCredentialSource::Wsl { distro } => read_wsl_antigravity_credentials(distro),
+    }
+}
+
+fn cli_refresh_antigravity(source: &AntigravityCredentialSource) {
+    match source {
+        // The Windows credential is written by the Antigravity IDE, which
+        // manages its own refresh; there is no reliable headless CLI hook.
+        AntigravityCredentialSource::Windows => {
+            diagnose::log("Antigravity Windows credential expired; waiting for IDE refresh");
+        }
+        AntigravityCredentialSource::Wsl { distro } => cli_refresh_antigravity_wsl_token(distro),
+    }
+}
+
+/// Run `agy models` in the WSL distro to force the Antigravity CLI to
+/// refresh its cached OAuth token. Unlike `agy -p`, the `models`
+/// subcommand completes without a TTY and consumes no model quota.
+fn cli_refresh_antigravity_wsl_token(distro: &str) {
+    diagnose::log(format!(
+        "attempting WSL Antigravity token refresh in distro {distro}"
+    ));
+    let mut cmd = Command::new("wsl.exe");
+    cmd.arg("-d")
+        .arg(distro)
+        .arg("--")
+        .arg("bash")
+        .arg("-lic")
+        // Quote-free on purpose: wsl.exe routes this through the distro's
+        // default shell first, which strips escaped quotes and expands $vars
+        // before bash -c runs (see the WSL credential read scripts above).
+        .arg("if command -v agy >/dev/null 2>&1; then agy models; elif [ -x $HOME/.local/bin/agy ]; then $HOME/.local/bin/agy models; else exit 127; fi")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(error) => {
+            diagnose::log_error("unable to spawn WSL Antigravity token refresh", error);
+            return;
+        }
+    };
+
+    wait_for_refresh(&mut child);
 }
 
 fn refresh_or_fallback(mut creds: Credentials) -> Result<Credentials, PollError> {
