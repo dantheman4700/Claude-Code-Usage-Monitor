@@ -336,7 +336,7 @@ fn poll_with(
         let error = first_error.unwrap_or(PollError::RequestFailed);
         Err(PollFailure {
             error,
-            credential_watch_mode: credential_watch_mode_for_errors(error, provider_errors),
+            credential_watch_mode: credential_watch_mode_for_errors(provider_errors),
         })
     } else {
         Ok(data)
@@ -408,14 +408,18 @@ fn poll_antigravity() -> Result<UsageData, PollError> {
         }
     };
 
-    match fetch_antigravity_usage(&creds.token.access_token) {
-        Ok(data) => Ok(data),
-        Err(PollError::AuthRequired) => match read_next_antigravity_credentials_after(&creds.source)
-        {
-            Some(next) => fetch_antigravity_usage(&next.token.access_token),
-            None => Err(PollError::AuthRequired),
-        },
-        Err(error) => Err(error),
+    let mut creds = creds;
+    loop {
+        match fetch_antigravity_usage(&creds.token.access_token) {
+            Ok(data) => return Ok(data),
+            Err(PollError::AuthRequired) => {
+                match read_next_antigravity_credentials_after(&creds.source) {
+                    Some(next) => creds = next,
+                    None => return Err(PollError::AuthRequired),
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -729,11 +733,16 @@ fn build_agent() -> Result<ureq::Agent, PollError> {
         .build())
 }
 
-fn credential_watch_mode_for_errors(
-    error: PollError,
-    errors: ProviderErrors,
-) -> Option<CredentialWatchMode> {
-    if error == PollError::RequestFailed {
+fn credential_watch_mode_for_errors(errors: ProviderErrors) -> Option<CredentialWatchMode> {
+    // Pausing the poll loop to watch credentials is only safe when every
+    // enabled provider failed for credential reasons. A transient failure
+    // (network) must keep the backoff retry loop running, or that provider
+    // would stay stuck until an unrelated credential change.
+    let any_transient = [errors.claude_code, errors.codex, errors.antigravity]
+        .into_iter()
+        .flatten()
+        .any(|e| e == PollError::RequestFailed);
+    if any_transient {
         return None;
     }
 
@@ -2126,21 +2135,9 @@ mod tests {
         .expect_err("all-provider failure should return an error");
 
         assert_eq!(failure.error, PollError::AuthRequired);
-        assert_eq!(
-            failure.credential_watch_mode,
-            Some(CredentialWatchMode::combined(
-                CredentialWatchProviders {
-                    claude_code: true,
-                    codex: false,
-                    antigravity: false,
-                },
-                CredentialWatchProviders {
-                    claude_code: false,
-                    codex: false,
-                    antigravity: true,
-                },
-            ))
-        );
+        // Codex failed transiently, so the poll loop must keep backoff
+        // retries running rather than pause to watch credential sources.
+        assert_eq!(failure.credential_watch_mode, None);
     }
 
     #[test]
@@ -2296,5 +2293,51 @@ mod tests {
                 antigravity: true,
             }))
         );
+    }
+
+    #[test]
+    fn auth_failure_still_watched_when_transient_error_came_first() {
+        let failure = poll_with(
+            true,
+            true,
+            false,
+            || Err(PollError::TokenExpired),
+            || Err(PollError::NoCredentials),
+            || unreachable!("antigravity is disabled"),
+        )
+        .expect_err("all providers failing should return an error");
+
+        assert_eq!(failure.error, PollError::TokenExpired);
+        assert_eq!(
+            failure.credential_watch_mode,
+            Some(CredentialWatchMode::combined(
+                CredentialWatchProviders {
+                    claude_code: true,
+                    codex: false,
+                    antigravity: false,
+                },
+                CredentialWatchProviders {
+                    claude_code: false,
+                    codex: true,
+                    antigravity: false,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn any_transient_failure_keeps_backoff_instead_of_credential_watch() {
+        let failure = poll_with(
+            true,
+            true,
+            false,
+            || Err(PollError::RequestFailed),
+            || Err(PollError::TokenExpired),
+            || unreachable!("antigravity is disabled"),
+        )
+        .expect_err("all providers failing should return an error");
+
+        assert_eq!(failure.error, PollError::RequestFailed);
+        assert_eq!(failure.credential_watch_mode, None);
     }
 }
