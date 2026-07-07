@@ -160,7 +160,7 @@ struct CredentialW {
     user_name: *mut u16,
 }
 
-#[link(name = "Advapi32")]
+#[link(name = "advapi32")]
 extern "system" {
     fn CredReadW(
         target_name: *const u16,
