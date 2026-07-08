@@ -18,6 +18,8 @@ pub(super) const STRINGS: Strings = Strings {
     settings: "Settings",
     start_with_windows: "Start with Windows",
     reset_position: "Reset Position",
+    show_on_display: "Show on display",
+    display: "Display",
     language: "Language",
     system_default: "System Default",
     check_for_updates: "Check for Updates",

@@ -18,6 +18,8 @@ pub(super) const STRINGS: Strings = Strings {
     settings: "Instellingen",
     start_with_windows: "Opstarten met Windows",
     reset_position: "Positie herstellen",
+    show_on_display: "Op scherm tonen",
+    display: "Scherm",
     language: "Taal",
     system_default: "Systeemstandaard",
     check_for_updates: "Controleren op updates",

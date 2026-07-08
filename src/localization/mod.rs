@@ -152,6 +152,8 @@ pub struct Strings {
     pub settings: &'static str,
     pub start_with_windows: &'static str,
     pub reset_position: &'static str,
+    pub show_on_display: &'static str,
+    pub display: &'static str,
     pub language: &'static str,
     pub system_default: &'static str,
     pub check_for_updates: &'static str,

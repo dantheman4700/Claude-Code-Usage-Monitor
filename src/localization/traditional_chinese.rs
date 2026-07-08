@@ -18,6 +18,8 @@ pub(super) const STRINGS: Strings = Strings {
     settings: "設定",
     start_with_windows: "開機時啟動",
     reset_position: "重置位置",
+    show_on_display: "顯示在螢幕上",
+    display: "螢幕",
     language: "語言",
     system_default: "系統預設",
     check_for_updates: "檢查更新",

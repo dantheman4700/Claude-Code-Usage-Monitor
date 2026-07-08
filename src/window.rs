@@ -135,6 +135,10 @@ const IDM_MODEL_CLAUDE_CODE: u16 = 60;
 const IDM_MODEL_CODEX: u16 = 61;
 const IDM_MODEL_ANTIGRAVITY: u16 = 62;
 const IDM_MODEL_CURSOR: u16 = 63;
+// Display picker: one item per taskbar, id = IDM_DISPLAY_BASE + taskbar index.
+// Kept clear of tray_icon::IDM_TOGGLE_WIDGET (70) and all other IDM_* ids.
+const IDM_DISPLAY_BASE: u16 = 100;
+const IDM_DISPLAY_LIMIT: u16 = 120;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -2704,6 +2708,25 @@ unsafe extern "system" fn wnd_proc(
                     save_state_settings();
                     position_at_taskbar();
                 }
+                id if (IDM_DISPLAY_BASE..IDM_DISPLAY_LIMIT).contains(&id) => {
+                    let target_index = (id - IDM_DISPLAY_BASE) as usize;
+                    let current_index = { lock_state().as_ref().map(|s| s.taskbar_index) };
+                    if current_index != Some(target_index) {
+                        {
+                            let mut state = lock_state();
+                            if let Some(s) = state.as_mut() {
+                                // Land flush against the new taskbar's tray; the user
+                                // can then drag to fine-tune the offset.
+                                s.tray_offset = 0;
+                            }
+                        }
+                        if attach_to_taskbar(hwnd, target_index) {
+                            position_at_taskbar();
+                            render_layered();
+                            save_state_settings();
+                        }
+                    }
+                }
                 IDM_START_WITH_WINDOWS => {
                     set_startup_enabled(!is_startup_enabled());
                 }
@@ -2870,6 +2893,7 @@ fn show_context_menu(hwnd: HWND) {
             show_codex,
             show_antigravity,
             show_cursor,
+            current_taskbar_index,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -2885,6 +2909,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.show_codex,
                     s.show_antigravity,
                     s.show_cursor,
+                    s.taskbar_index,
                 ),
                 None => (
                     POLL_15_MIN,
@@ -2898,6 +2923,7 @@ fn show_context_menu(hwnd: HWND) {
                     false,
                     false,
                     false,
+                    0,
                 ),
             }
         };
@@ -3028,6 +3054,35 @@ fn show_context_menu(hwnd: HWND) {
             IDM_RESET_POSITION as usize,
             PCWSTR::from_raw(reset_pos_str.as_ptr()),
         );
+
+        // Show-on-display submenu — only meaningful when more than one taskbar exists.
+        let taskbars = native_interop::find_taskbars();
+        if taskbars.len() > 1 {
+            let display_menu = CreatePopupMenu().unwrap();
+            let max_items = (IDM_DISPLAY_LIMIT - IDM_DISPLAY_BASE) as usize;
+            for (i, _taskbar) in taskbars.iter().enumerate().take(max_items) {
+                let label = format!("{} {}", strings.display, i + 1);
+                let label_str = native_interop::wide_str(&label);
+                let flags = if i == current_taskbar_index {
+                    MF_CHECKED
+                } else {
+                    MENU_ITEM_FLAGS(0)
+                };
+                let _ = AppendMenuW(
+                    display_menu,
+                    flags,
+                    IDM_DISPLAY_BASE as usize + i,
+                    PCWSTR::from_raw(label_str.as_ptr()),
+                );
+            }
+            let display_label = native_interop::wide_str(strings.show_on_display);
+            let _ = AppendMenuW(
+                settings_menu,
+                MF_POPUP,
+                display_menu.0 as usize,
+                PCWSTR::from_raw(display_label.as_ptr()),
+            );
+        }
 
         let language_menu = CreatePopupMenu().unwrap();
         let system_label = native_interop::wide_str(strings.system_default);
