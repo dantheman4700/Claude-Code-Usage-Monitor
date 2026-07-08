@@ -5,9 +5,9 @@
 
 ![Screenshot](.github/animation.gif)
 
-A lightweight Windows taskbar widget for people already using Claude Code, with optional Codex and Google Antigravity usage display.
+A lightweight Windows taskbar widget for people already using Claude Code, with optional Codex, Google Antigravity, and Cursor usage display.
 
-It sits in your taskbar and shows how much of your Claude Code, Codex, and/or Antigravity usage window you have left, without needing to open the terminal or the provider site.
+It sits in your taskbar and shows how much of your Claude Code, Codex, Antigravity, and/or Cursor usage window you have left, without needing to open the terminal or the provider site.
 
 ## What You Get
 
@@ -15,6 +15,7 @@ It sits in your taskbar and shows how much of your Claude Code, Codex, and/or An
 - A **7d** bar for your current 7-day window
 - Optional Codex usage bars alongside Claude Code
 - Optional Antigravity model usage bars for Google's 5-hour and weekly Gemini quota windows
+- Optional Cursor usage as a single monthly bar (Cursor bills on a monthly cycle, so it has no 5h/7d windows)
 - A live countdown until each limit resets
 - A small native widget that lives directly in the Windows taskbar
 - System tray icon badges showing your enabled model usage percentage
@@ -74,6 +75,7 @@ Use the right-click **Models** menu to choose what the widget displays:
 - **Claude Code** is enabled by default
 - **Codex** can be enabled alongside Claude Code or shown by itself
 - **Antigravity** can be enabled alongside the other providers or shown by itself as its own model column
+- **Cursor** can be enabled alongside the other providers or shown by itself. Because Cursor bills monthly rather than on rolling windows, it appears as a single bar (its included-usage percentage) that resets on your Cursor billing date
 
 When multiple models are shown, each model has its own usage bar and matching usage text color. Antigravity prefers Google's Gemini quota summary when available and falls back to model quota data when needed.
 
@@ -83,7 +85,7 @@ The tray icon shows your current 5-hour usage as a percentage badge.
 
 If multiple providers are enabled, the app shows one tray icon per provider. If only one model is enabled, it shows one tray icon.
 
-The Claude Code tray icon uses the same warm usage colors as the Claude bar. The Codex tray icon uses a black and white badge style. The Antigravity tray icon uses a blue badge style.
+The Claude Code tray icon uses the same warm usage colors as the Claude bar. The Codex tray icon uses a teal badge style. The Antigravity tray icon uses a blue badge style. The Cursor tray icon uses a white/monochrome badge style.
 
 Hovering over a tray icon shows the usage values for that model.
 

@@ -22,6 +22,7 @@ const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.sandbox.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
 ];
+const CURSOR_ENDPOINTS: &[&str] = &["https://api2.cursor.sh"];
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const MODEL_FALLBACK_CHAIN: &[&str] = &["claude-3-haiku-20240307", "claude-haiku-4-5-20251001"];
@@ -39,6 +40,7 @@ pub struct CredentialWatchProviders {
     claude_code: bool,
     codex: bool,
     antigravity: bool,
+    cursor: bool,
 }
 
 impl CredentialWatchProviders {
@@ -47,6 +49,7 @@ impl CredentialWatchProviders {
             claude_code: false,
             codex: false,
             antigravity: false,
+            cursor: false,
         }
     }
 
@@ -55,11 +58,12 @@ impl CredentialWatchProviders {
             claude_code: true,
             codex: false,
             antigravity: false,
+            cursor: false,
         }
     }
 
     fn any(self) -> bool {
-        self.claude_code || self.codex || self.antigravity
+        self.claude_code || self.codex || self.antigravity || self.cursor
     }
 }
 
@@ -84,7 +88,10 @@ impl CredentialWatchMode {
         }
     }
 
-    fn combined(active_sources: CredentialWatchProviders, all_sources: CredentialWatchProviders) -> Self {
+    fn combined(
+        active_sources: CredentialWatchProviders,
+        all_sources: CredentialWatchProviders,
+    ) -> Self {
         Self {
             active_sources,
             all_sources,
@@ -111,6 +118,7 @@ struct ProviderErrors {
     claude_code: Option<PollError>,
     codex: Option<PollError>,
     antigravity: Option<PollError>,
+    cursor: Option<PollError>,
 }
 
 pub type CredentialWatchSnapshot = Vec<String>;
@@ -145,6 +153,28 @@ struct CodexCredentials {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CodexCredentialSource {
+    Windows(PathBuf),
+    Wsl { distro: String },
+}
+
+#[derive(Deserialize)]
+struct CursorAuthFile {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+}
+
+#[derive(Clone)]
+struct CursorTokenData {
+    access_token: String,
+}
+
+struct CursorCredentials {
+    token: CursorTokenData,
+    source: CursorCredentialSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CursorCredentialSource {
     Windows(PathBuf),
     Wsl { distro: String },
 }
@@ -238,6 +268,22 @@ struct AntigravityQuotaSummaryBucket {
     reset_time: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CursorUsageResponse {
+    #[serde(rename = "billingCycleEnd")]
+    billing_cycle_end: Option<String>,
+    #[serde(rename = "planUsage")]
+    plan_usage: Option<CursorPlanUsage>,
+}
+
+#[derive(Deserialize)]
+struct CursorPlanUsage {
+    #[serde(rename = "totalPercentUsed")]
+    total_percent_used: Option<f64>,
+    remaining: Option<f64>,
+    limit: Option<f64>,
+}
+
 #[repr(C)]
 struct CredentialW {
     flags: u32,
@@ -265,33 +311,40 @@ extern "system" {
     fn CredFree(buffer: *mut c_void);
 }
 
-pub fn poll(
+pub fn poll_with_cursor(
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
+    show_cursor: bool,
 ) -> Result<AppUsageData, PollFailure> {
     poll_with(
         show_claude_code,
         show_codex,
         show_antigravity,
+        show_cursor,
         poll_claude_code,
         poll_codex,
         poll_antigravity,
+        poll_cursor,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_with(
     show_claude_code: bool,
     show_codex: bool,
     show_antigravity: bool,
+    show_cursor: bool,
     mut poll_claude_code: impl FnMut() -> Result<UsageData, PollError>,
     mut poll_codex: impl FnMut() -> Result<UsageData, PollError>,
     mut poll_antigravity: impl FnMut() -> Result<UsageData, PollError>,
+    mut poll_cursor: impl FnMut() -> Result<UsageData, PollError>,
 ) -> Result<AppUsageData, PollFailure> {
     let mut data = AppUsageData::default();
     let mut first_error = None;
     let mut provider_errors = ProviderErrors::default();
-    let active_provider_count = show_claude_code as u8 + show_codex as u8 + show_antigravity as u8;
+    let active_provider_count =
+        show_claude_code as u8 + show_codex as u8 + show_antigravity as u8 + show_cursor as u8;
 
     if show_claude_code {
         match poll_claude_code() {
@@ -332,7 +385,24 @@ fn poll_with(
         }
     }
 
-    if data.claude_code.is_none() && data.codex.is_none() && data.antigravity.is_none() {
+    if show_cursor {
+        match poll_cursor() {
+            Ok(cursor) => data.cursor = Some(cursor),
+            Err(error) => {
+                provider_errors.cursor = Some(error);
+                if active_provider_count > 1 {
+                    diagnose::log(format!("Cursor usage poll failed: {error:?}"));
+                }
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
+    if data.claude_code.is_none()
+        && data.codex.is_none()
+        && data.antigravity.is_none()
+        && data.cursor.is_none()
+    {
         let error = first_error.unwrap_or(PollError::RequestFailed);
         Err(PollFailure {
             error,
@@ -367,7 +437,10 @@ fn poll_codex() -> Result<UsageData, PollError> {
     };
 
     loop {
-        match fetch_codex_usage(&creds.tokens.access_token, creds.tokens.account_id.as_deref()) {
+        match fetch_codex_usage(
+            &creds.tokens.access_token,
+            creds.tokens.account_id.as_deref(),
+        ) {
             Ok(data) => return Ok(data),
             Err(PollError::AuthRequired) => {
                 let source = creds.source.clone();
@@ -439,12 +512,62 @@ fn poll_antigravity() -> Result<UsageData, PollError> {
     }
 }
 
+fn poll_cursor() -> Result<UsageData, PollError> {
+    let creds = match read_first_cursor_credentials() {
+        Some(creds) => creds,
+        None => {
+            diagnose::log("Cursor usage poll failed: no Cursor credentials found");
+            return Err(PollError::NoCredentials);
+        }
+    };
+
+    let mut creds = creds;
+    loop {
+        match fetch_cursor_usage(&creds.token.access_token) {
+            Ok(data) => return Ok(data),
+            Err(PollError::AuthRequired) => {
+                let source = creds.source.clone();
+                cli_refresh_cursor(&source);
+
+                match read_cursor_credentials_from_source(&source) {
+                    Some(refreshed) => match fetch_cursor_usage(&refreshed.token.access_token) {
+                        Ok(data) => return Ok(data),
+                        Err(PollError::AuthRequired) => {}
+                        Err(error) => return Err(error),
+                    },
+                    None => diagnose::log(format!(
+                        "Cursor credentials from {source:?} unavailable after refresh attempt"
+                    )),
+                }
+
+                match read_next_cursor_credentials_after(&source) {
+                    Some(next) => creds = next,
+                    None => return Err(PollError::AuthRequired),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn read_antigravity_credentials_from_source(
     source: &AntigravityCredentialSource,
 ) -> Option<AntigravityCredentials> {
     match source {
         AntigravityCredentialSource::Windows => read_windows_antigravity_credentials(),
         AntigravityCredentialSource::Wsl { distro } => read_wsl_antigravity_credentials(distro),
+    }
+}
+
+fn read_cursor_credentials_from_source(
+    source: &CursorCredentialSource,
+) -> Option<CursorCredentials> {
+    match source {
+        CursorCredentialSource::Windows(path) => {
+            let content = std::fs::read_to_string(path).ok()?;
+            parse_cursor_credentials(&content, source.clone())
+        }
+        CursorCredentialSource::Wsl { distro } => read_wsl_cursor_credentials(distro),
     }
 }
 
@@ -456,6 +579,17 @@ fn cli_refresh_antigravity(source: &AntigravityCredentialSource) {
             diagnose::log("Antigravity Windows credential expired; waiting for IDE refresh");
         }
         AntigravityCredentialSource::Wsl { distro } => cli_refresh_antigravity_wsl_token(distro),
+    }
+}
+
+fn cli_refresh_cursor(source: &CursorCredentialSource) {
+    match source {
+        CursorCredentialSource::Windows(_) => {
+            diagnose::log("cursor credential expired; re-auth needed");
+        }
+        CursorCredentialSource::Wsl { distro: _ } => {
+            diagnose::log("cursor credential expired; re-auth needed");
+        }
     }
 }
 
@@ -807,7 +941,13 @@ fn credential_watch_mode_for_errors(errors: ProviderErrors) -> Option<Credential
     // enabled provider failed for credential reasons. A transient failure
     // (network) must keep the backoff retry loop running, or that provider
     // would stay stuck until an unrelated credential change.
-    let any_transient = [errors.claude_code, errors.codex, errors.antigravity]
+    let provider_errors = [
+        errors.claude_code,
+        errors.codex,
+        errors.antigravity,
+        errors.cursor,
+    ];
+    let any_transient = provider_errors
         .into_iter()
         .flatten()
         .any(|e| e == PollError::RequestFailed);
@@ -828,11 +968,16 @@ fn credential_watch_mode_for_errors(errors: ProviderErrors) -> Option<Credential
             errors.antigravity,
             Some(PollError::AuthRequired | PollError::TokenExpired)
         ),
+        cursor: matches!(
+            errors.cursor,
+            Some(PollError::AuthRequired | PollError::TokenExpired)
+        ),
     };
     let all_sources = CredentialWatchProviders {
         claude_code: matches!(errors.claude_code, Some(PollError::NoCredentials)),
         codex: matches!(errors.codex, Some(PollError::NoCredentials)),
         antigravity: matches!(errors.antigravity, Some(PollError::NoCredentials)),
+        cursor: matches!(errors.cursor, Some(PollError::NoCredentials)),
     };
     let mode = if active_sources.any() {
         CredentialWatchMode::combined(active_sources, all_sources)
@@ -877,6 +1022,14 @@ pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSn
         );
     }
 
+    if mode.active_sources.cursor || mode.all_sources.cursor {
+        snapshot.extend(
+            all_known_cursor_credential_sources()
+                .into_iter()
+                .filter_map(|source| cursor_credential_watch_signature(&source)),
+        );
+    }
+
     snapshot.sort();
     snapshot.dedup();
     snapshot
@@ -917,6 +1070,17 @@ fn all_known_codex_credential_sources() -> Vec<CodexCredentialSource> {
     sources
 }
 
+fn all_known_cursor_credential_sources() -> Vec<CursorCredentialSource> {
+    let mut sources = Vec::new();
+    if let Some(path) = cursor_auth_path() {
+        sources.push(CursorCredentialSource::Windows(path));
+    }
+    for distro in list_wsl_distros() {
+        sources.push(CursorCredentialSource::Wsl { distro });
+    }
+    sources
+}
+
 fn all_known_antigravity_credential_sources() -> Vec<AntigravityCredentialSource> {
     let mut sources = vec![AntigravityCredentialSource::Windows];
     for distro in list_wsl_distros() {
@@ -939,9 +1103,18 @@ fn codex_credential_watch_signature(source: &CodexCredentialSource) -> Option<St
     }
 }
 
+fn cursor_credential_watch_signature(source: &CursorCredentialSource) -> Option<String> {
+    match source {
+        CursorCredentialSource::Windows(path) => Some(windows_credential_watch_signature(path)),
+        CursorCredentialSource::Wsl { distro } => wsl_cursor_credential_watch_signature(distro),
+    }
+}
+
 fn antigravity_credential_watch_signature(source: &AntigravityCredentialSource) -> Option<String> {
     match source {
-        AntigravityCredentialSource::Windows => Some(windows_antigravity_credential_watch_signature()),
+        AntigravityCredentialSource::Windows => {
+            Some(windows_antigravity_credential_watch_signature())
+        }
         AntigravityCredentialSource::Wsl { distro } => {
             wsl_antigravity_credential_watch_signature(distro)
         }
@@ -983,6 +1156,16 @@ fn wsl_codex_credential_watch_signature(distro: &str) -> Option<String> {
         // `\"` before `sh -c` runs it (locals like `$p` come back empty).
         "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
          stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; \
+         else echo missing; fi",
+    )
+}
+
+fn wsl_cursor_credential_watch_signature(distro: &str) -> Option<String> {
+    wsl_path_watch_signature(
+        distro,
+        "cursor-wsl",
+        "if [ -f ${CURSOR_CONFIG_DIR:-$HOME/.config/cursor}/auth.json ]; then \
+         stat -c 'present|%s|%Y' ${CURSOR_CONFIG_DIR:-$HOME/.config/cursor}/auth.json; \
          else echo missing; fi",
     )
 }
@@ -1221,6 +1404,95 @@ fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageSection {
         percentage: window.used_percent,
         resets_at: unix_to_system_time(Some(window.reset_at)),
     }
+}
+
+fn fetch_cursor_usage(token: &str) -> Result<UsageData, PollError> {
+    let mut auth_error = false;
+    let mut last_error = PollError::RequestFailed;
+
+    for base_url in CURSOR_ENDPOINTS {
+        match fetch_cursor_usage_from_endpoint(base_url, token) {
+            Ok(data) => return Ok(data),
+            Err(PollError::AuthRequired) => auth_error = true,
+            Err(error) => last_error = error,
+        }
+    }
+
+    if auth_error {
+        Err(PollError::AuthRequired)
+    } else {
+        Err(last_error)
+    }
+}
+
+fn fetch_cursor_usage_from_endpoint(base_url: &str, token: &str) -> Result<UsageData, PollError> {
+    let agent = build_agent()?;
+
+    let resp = match agent
+        .post(&format!(
+            "{base_url}/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
+        ))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json")
+        .set("Connect-Protocol-Version", "1")
+        .send_json(serde_json::json!({}))
+    {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            diagnose::log(format!(
+                "Cursor usage endpoint returned auth error status {code}"
+            ));
+            return Err(PollError::AuthRequired);
+        }
+        Err(error) => {
+            diagnose::log_error("Cursor usage endpoint request failed", error);
+            return Err(PollError::RequestFailed);
+        }
+    };
+
+    let response: CursorUsageResponse = match resp.into_json() {
+        Ok(response) => response,
+        Err(error) => {
+            diagnose::log_error("unable to parse Cursor usage response", error);
+            return Err(PollError::RequestFailed);
+        }
+    };
+
+    let session = UsageSection::default();
+    let weekly = match cursor_section_from_response(response) {
+        Some(section) => section,
+        None => {
+            diagnose::log("Cursor usage response had no usable planUsage");
+            return Err(PollError::RequestFailed);
+        }
+    };
+
+    Ok(UsageData { session, weekly })
+}
+
+/// Build the monthly usage section from a Cursor response. Returns `None` when the
+/// response carries no usable usage data, so the caller surfaces an error instead of
+/// a misleading 0% (a genuine 0% with a present `planUsage` returns `Some`).
+fn cursor_section_from_response(resp: CursorUsageResponse) -> Option<UsageSection> {
+    let plan = resp.plan_usage?;
+
+    let pct = match plan.total_percent_used {
+        Some(p) if p.is_finite() => {
+            if p > 100.5 {
+                diagnose::log(format!("cursor totalPercentUsed anomalous: {p}"));
+            }
+            p.clamp(0.0, 100.0)
+        }
+        _ => match (plan.limit, plan.remaining) {
+            (Some(l), Some(r)) if l > 0.0 => (((l - r) / l) * 100.0).clamp(0.0, 100.0),
+            _ => return None,
+        },
+    };
+
+    Some(UsageSection {
+        percentage: pct,
+        resets_at: parse_cursor_billing_cycle_end(resp.billing_cycle_end.as_deref()),
+    })
 }
 
 fn windows_antigravity_credential_watch_signature() -> String {
@@ -1528,7 +1800,16 @@ fn unix_to_system_time(unix_secs: Option<i64>) -> Option<SystemTime> {
     if secs < 0 {
         return None;
     }
-    Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
+}
+
+fn parse_cursor_billing_cycle_end(s: Option<&str>) -> Option<SystemTime> {
+    let ms: i64 = s?.trim().parse().ok()?;
+    if ms <= 0 {
+        return None;
+    }
+    let secs = ms / 1000;
+    unix_to_system_time(Some(secs))
 }
 
 struct Credentials {
@@ -1597,6 +1878,19 @@ fn codex_auth_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("auth.json"))
 }
 
+fn cursor_auth_path() -> Option<PathBuf> {
+    if let Some(cursor_config_dir) = std::env::var_os("CURSOR_CONFIG_DIR").map(PathBuf::from) {
+        return Some(cursor_config_dir.join("auth.json"));
+    }
+
+    Some(
+        dirs::home_dir()?
+            .join(".config")
+            .join("cursor")
+            .join("auth.json"),
+    )
+}
+
 fn read_first_codex_credentials() -> Option<CodexCredentials> {
     if let Some(creds) = read_windows_codex_credentials() {
         return Some(creds);
@@ -1604,6 +1898,20 @@ fn read_first_codex_credentials() -> Option<CodexCredentials> {
 
     for distro in list_wsl_distros() {
         if let Some(creds) = read_wsl_codex_credentials(&distro) {
+            return Some(creds);
+        }
+    }
+
+    None
+}
+
+fn read_first_cursor_credentials() -> Option<CursorCredentials> {
+    if let Some(creds) = read_windows_cursor_credentials() {
+        return Some(creds);
+    }
+
+    for distro in list_wsl_distros() {
+        if let Some(creds) = read_wsl_cursor_credentials(&distro) {
             return Some(creds);
         }
     }
@@ -1628,6 +1936,25 @@ fn read_windows_codex_credentials() -> Option<CodexCredentials> {
     };
 
     parse_codex_credentials(&content, CodexCredentialSource::Windows(auth_path))
+}
+
+fn read_windows_cursor_credentials() -> Option<CursorCredentials> {
+    let auth_path = cursor_auth_path()?;
+    let content = match std::fs::read_to_string(&auth_path) {
+        Ok(content) => content,
+        Err(error) => {
+            diagnose::log_error(
+                &format!(
+                    "unable to read Cursor credentials at {}",
+                    auth_path.display()
+                ),
+                error,
+            );
+            return None;
+        }
+    };
+
+    parse_cursor_credentials(&content, CursorCredentialSource::Windows(auth_path))
 }
 
 fn read_codex_credentials_from_source(source: &CodexCredentialSource) -> Option<CodexCredentials> {
@@ -1765,6 +2092,41 @@ fn read_wsl_codex_credentials(distro: &str) -> Option<CodexCredentials> {
     )
 }
 
+fn read_wsl_cursor_credentials(distro: &str) -> Option<CursorCredentials> {
+    let output = run_with_timeout(
+        Command::new("wsl.exe")
+            .arg("-d")
+            .arg(distro)
+            .arg("--")
+            .arg("sh")
+            .arg("-lc")
+            // No shell locals or embedded double quotes (see
+            // wsl_codex_credential_watch_signature for why).
+            .arg("cat ${CURSOR_CONFIG_DIR:-$HOME/.config/cursor}/auth.json")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(5),
+    )?;
+
+    if !output.status.success() {
+        diagnose::log(format!(
+            "WSL Cursor credentials probe failed for distro {distro} with status {}",
+            output.status
+        ));
+        return None;
+    }
+
+    let content = decode_wsl_text(&output.stdout);
+    parse_cursor_credentials(
+        &content,
+        CursorCredentialSource::Wsl {
+            distro: distro.to_string(),
+        },
+    )
+}
+
 fn read_wsl_antigravity_credentials(distro: &str) -> Option<AntigravityCredentials> {
     let output = run_with_timeout(
         Command::new("wsl.exe")
@@ -1815,10 +2177,32 @@ fn parse_credentials(content: &str, source: CredentialSource) -> Option<Credenti
     })
 }
 
-fn parse_codex_credentials(content: &str, source: CodexCredentialSource) -> Option<CodexCredentials> {
+fn parse_codex_credentials(
+    content: &str,
+    source: CodexCredentialSource,
+) -> Option<CodexCredentials> {
     let auth: CodexAuthFile = serde_json::from_str(content).ok()?;
-    let tokens = auth.tokens.filter(|tokens| !tokens.access_token.is_empty())?;
+    let tokens = auth
+        .tokens
+        .filter(|tokens| !tokens.access_token.is_empty())?;
     Some(CodexCredentials { tokens, source })
+}
+
+fn parse_cursor_credentials(
+    content: &str,
+    source: CursorCredentialSource,
+) -> Option<CursorCredentials> {
+    let auth: CursorAuthFile = serde_json::from_str(content).ok()?;
+    if auth.access_token.is_empty() {
+        None
+    } else {
+        Some(CursorCredentials {
+            token: CursorTokenData {
+                access_token: auth.access_token,
+            },
+            source,
+        })
+    }
 }
 
 fn parse_antigravity_credentials(
@@ -1869,6 +2253,29 @@ fn read_next_codex_credentials_after(source: &CodexCredentialSource) -> Option<C
         CodexCredentialSource::Wsl { distro } => {
             for candidate_distro in remaining_wsl_distros(&list_wsl_distros(), Some(distro)) {
                 if let Some(creds) = read_wsl_codex_credentials(&candidate_distro) {
+                    return Some(creds);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_next_cursor_credentials_after(
+    source: &CursorCredentialSource,
+) -> Option<CursorCredentials> {
+    match source {
+        CursorCredentialSource::Windows(_) => {
+            for distro in remaining_wsl_distros(&list_wsl_distros(), None) {
+                if let Some(creds) = read_wsl_cursor_credentials(&distro) {
+                    return Some(creds);
+                }
+            }
+        }
+        CursorCredentialSource::Wsl { distro } => {
+            for candidate_distro in remaining_wsl_distros(&list_wsl_distros(), Some(distro)) {
+                if let Some(creds) = read_wsl_cursor_credentials(&candidate_distro) {
                     return Some(creds);
                 }
             }
@@ -2143,6 +2550,7 @@ pub fn app_is_past_reset(data: &AppUsageData) -> bool {
     data.claude_code.as_ref().is_some_and(is_past_reset)
         || data.codex.as_ref().is_some_and(is_past_reset)
         || data.antigravity.as_ref().is_some_and(is_past_reset)
+        || data.cursor.as_ref().is_some_and(is_past_reset)
 }
 
 #[cfg(test)]
@@ -2165,9 +2573,11 @@ mod tests {
             true,
             true,
             false,
+            false,
             || Err(PollError::AuthRequired),
             || Ok(usage_with_session_percent(42.0)),
             || unreachable!("antigravity is disabled"),
+            || unreachable!("cursor is disabled"),
         )
         .expect("codex data should keep the poll successful");
 
@@ -2181,9 +2591,11 @@ mod tests {
             true,
             true,
             false,
+            false,
             || Ok(usage_with_session_percent(64.0)),
             || Err(PollError::RequestFailed),
             || unreachable!("antigravity is disabled"),
+            || unreachable!("cursor is disabled"),
         )
         .expect("claude data should keep the poll successful");
 
@@ -2197,9 +2609,11 @@ mod tests {
             true,
             true,
             true,
+            false,
             || Err(PollError::AuthRequired),
             || Err(PollError::RequestFailed),
             || Err(PollError::NoCredentials),
+            || unreachable!("cursor is disabled"),
         )
         .expect_err("all-provider failure should return an error");
 
@@ -2215,9 +2629,11 @@ mod tests {
             false,
             true,
             true,
+            false,
             || unreachable!("claude code is disabled"),
             || Ok(usage_with_session_percent(42.0)),
             || Err(PollError::NoCredentials),
+            || unreachable!("cursor is disabled"),
         )
         .expect("codex data should keep the poll successful");
 
@@ -2321,6 +2737,35 @@ mod tests {
     }
 
     #[test]
+    fn cursor_auth_file_deserializes_real_shape() {
+        let auth: CursorAuthFile = serde_json::from_str(
+            r#"{
+                "accessToken":"fake-at",
+                "refreshToken":"fake-rt"
+            }"#,
+        )
+        .expect("Cursor auth file should deserialize");
+
+        assert_eq!(auth.access_token, "fake-at");
+    }
+
+    #[test]
+    fn cursor_billing_cycle_end_parses_epoch_millis_string() {
+        let parsed = parse_cursor_billing_cycle_end(Some("1788000000000"))
+            .expect("epoch milliseconds should parse");
+        let secs = parsed
+            .duration_since(UNIX_EPOCH)
+            .expect("timestamp should be after unix epoch")
+            .as_secs();
+
+        assert_eq!(secs, 1_788_000_000);
+        assert_eq!(parse_cursor_billing_cycle_end(Some("0")), None);
+        assert_eq!(parse_cursor_billing_cycle_end(Some("")), None);
+        assert_eq!(parse_cursor_billing_cycle_end(Some("abc")), None);
+        assert_eq!(parse_cursor_billing_cycle_end(None), None);
+    }
+
+    #[test]
     fn remaining_wsl_distros_preserves_windows_first_walk_order() {
         let distros = vec![
             "Ubuntu".to_string(),
@@ -2347,9 +2792,11 @@ mod tests {
             false,
             true,
             true,
+            false,
             || unreachable!("claude code is disabled"),
             || Err(PollError::NoCredentials),
             || Err(PollError::NoCredentials),
+            || unreachable!("cursor is disabled"),
         )
         .expect_err("missing credentials should return an error");
 
@@ -2360,6 +2807,7 @@ mod tests {
                 claude_code: false,
                 codex: true,
                 antigravity: true,
+                cursor: false,
             }))
         );
     }
@@ -2370,9 +2818,11 @@ mod tests {
             true,
             true,
             false,
+            false,
             || Err(PollError::TokenExpired),
             || Err(PollError::NoCredentials),
             || unreachable!("antigravity is disabled"),
+            || unreachable!("cursor is disabled"),
         )
         .expect_err("all providers failing should return an error");
 
@@ -2384,11 +2834,13 @@ mod tests {
                     claude_code: true,
                     codex: false,
                     antigravity: false,
+                    cursor: false,
                 },
                 CredentialWatchProviders {
                     claude_code: false,
                     codex: true,
                     antigravity: false,
+                    cursor: false,
                 },
             ))
         );
@@ -2400,9 +2852,11 @@ mod tests {
             true,
             true,
             false,
+            false,
             || Err(PollError::RequestFailed),
             || Err(PollError::TokenExpired),
             || unreachable!("antigravity is disabled"),
+            || unreachable!("cursor is disabled"),
         )
         .expect_err("all providers failing should return an error");
 
