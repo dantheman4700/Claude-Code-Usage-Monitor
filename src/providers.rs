@@ -88,7 +88,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Grok",
         settings_description: "Collect usage from xAI",
         native_menu_command_id: 65,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::Fireworks,
@@ -242,7 +242,7 @@ mod tests {
     fn default_provider_set_comes_from_descriptors() {
         assert_eq!(
             ProviderSet::default(),
-            ProviderSet::from_enabled([ProviderId::Claude])
+            ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Grok])
         );
     }
 

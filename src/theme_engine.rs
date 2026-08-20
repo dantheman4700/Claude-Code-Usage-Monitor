@@ -1325,7 +1325,10 @@ impl DataContext {
                 active.map(|(_, usage)| usage),
                 active.is_some_and(|(provider, _)| provider == ProviderId::Codex),
             );
+            let fleet = Self::fleet_summary(data, runtime);
+            context.insert_provider("fleet", fleet.as_ref(), false);
         } else {
+            context.insert_provider("fleet", None, false);
             for descriptor in PROVIDER_DESCRIPTORS {
                 context.insert_provider(descriptor.key, None, descriptor.id == ProviderId::Codex);
             }
@@ -1333,6 +1336,37 @@ impl DataContext {
         }
         context
     }
+
+/// The worst reading across every switched-on provider.
+///
+/// One tray icon can only show one number, and the only number worth showing is
+/// the one closest to stopping work -- an average would hide a provider sitting
+/// at 100% behind three that are idle.
+fn fleet_summary(
+    data: &crate::models::AppUsageData,
+    runtime: ThemeRuntime,
+) -> Option<crate::models::UsageData> {
+    let mut worst: Option<crate::models::UsageData> = None;
+    for provider in ProviderId::ALL {
+        if !runtime.provider_enabled(provider) {
+            continue;
+        }
+        let Some(usage) = data.get(provider) else {
+            continue;
+        };
+        let score = |usage: &crate::models::UsageData| {
+            usage
+                .credits
+                .as_ref()
+                .map(|credits| credits.percentage)
+                .unwrap_or_else(|| usage.session.percentage.max(usage.weekly.percentage))
+        };
+        if worst.as_ref().is_none_or(|held| score(usage) > score(held)) {
+            worst = Some(usage.clone());
+        }
+    }
+    worst
+}
 
     fn insert_provider(
         &mut self,
@@ -1581,6 +1615,9 @@ fn set_mouse_property_expression(
         MouseActionProperty::Rotation => &mut object.rotation,
     } = expression;
 }
+
+/// The one tray icon the fleet panel is opened from.
+pub const FLEET_TRAY_SURFACE_ID: &str = "fleet-tray-icon";
 
 pub fn validate_mouse_action_script(
     source: &str,
@@ -1924,6 +1961,47 @@ impl ThemeDocument {
             }
         }
         theme
+    }
+
+    /// Fold a per-provider tray-icon row into the single fleet icon.
+    ///
+    /// Saved themes are user-owned copies, so a change to the built-in never
+    /// reaches an install that already has one. Without this, upgrading leaves
+    /// the old column of one-icon-per-provider in place and the single icon the
+    /// panel is reached from never appears.
+    ///
+    /// Only the untouched generated icons are replaced: a tray surface the user
+    /// has renamed or re-parented is left exactly where it is.
+    pub fn migrate_tray_icons_to_fleet(&mut self) -> bool {
+        if self
+            .surfaces
+            .iter()
+            .any(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
+        {
+            return false;
+        }
+        let generated: Vec<String> = PROVIDER_DESCRIPTORS
+            .iter()
+            .map(|descriptor| format!("{}-tray-icon", descriptor.key))
+            .collect();
+        if !self
+            .surfaces
+            .iter()
+            .any(|surface| generated.contains(&surface.id))
+        {
+            return false;
+        }
+        self.surfaces
+            .retain(|surface| !generated.contains(&surface.id));
+        let starter = Self::starter();
+        if let Some(fleet) = starter
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
+        {
+            self.surfaces.push(fleet.clone());
+        }
+        true
     }
 
     pub fn prepare_runtime(&mut self) {

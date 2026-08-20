@@ -114,6 +114,27 @@ unsafe fn append_context_menu_items(
                     PCWSTR::from_raw(label.as_ptr()),
                 );
             }
+            ContextMenuItemKind::DisplayList => {
+                let taskbars = native_interop::find_taskbars();
+                // With a single display there is nothing to choose between, so
+                // the entry stays out of the menu rather than showing one
+                // permanently-ticked option.
+                if taskbars.len() < 2 {
+                    continue;
+                }
+                for index in 0..taskbars.len() {
+                    let action = ContextMenuAction::SetDisplay { index };
+                    let id = 1_000 + actions.len();
+                    let label = native_interop::wide_str(&format!(
+                        "{} {}",
+                        language.text("Display"),
+                        index + 1
+                    ));
+                    let flags = context_menu_action_flags(&action, origin);
+                    let _ = AppendMenuW(menu, flags, id, PCWSTR::from_raw(label.as_ptr()));
+                    actions.push(action);
+                }
+            }
             ContextMenuItemKind::Action { action } => {
                 let id = 1_000 + actions.len();
                 let label = native_interop::wide_str(&context_menu::rendered_label(
@@ -143,6 +164,9 @@ pub(super) fn context_menu_action_flags(
         }
         ContextMenuAction::ToggleProvider { provider } => state.providers.contains(*provider),
         ContextMenuAction::ToggleStartup => is_startup_enabled(),
+        ContextMenuAction::SetDisplay { index } => lock_state()
+            .as_ref()
+            .is_some_and(|state| state.taskbar_index == *index),
         ContextMenuAction::ToggleWidget => state
             .active_theme
             .as_ref()
@@ -273,7 +297,8 @@ pub(super) fn execute_context_menu_action(
         }
         ContextMenuAction::CheckForUpdates => Some(IDM_VERSION_ACTION),
         ContextMenuAction::Exit => Some(2),
-        ContextMenuAction::ToggleWidget
+        ContextMenuAction::SetDisplay { .. }
+        | ContextMenuAction::ToggleWidget
         | ContextMenuAction::LegacyResetPosition
         | ContextMenuAction::ToggleLayerRender { .. }
         | ContextMenuAction::LayerActions { .. }
@@ -286,6 +311,9 @@ pub(super) fn execute_context_menu_action(
         return;
     }
     match action {
+        ContextMenuAction::SetDisplay { index } => {
+            super::attach_to_taskbar(hwnd, index);
+        }
         ContextMenuAction::ToggleWidget => {
             let target = lock_state()
                 .as_ref()

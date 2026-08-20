@@ -266,6 +266,9 @@ pub(super) fn preview_context_menu_items(
     ));
     for item in items {
         match &item.kind {
+            // The preview cannot enumerate the desktop's taskbars, so it shows
+            // the entry as an ordinary submenu row.
+            ContextMenuItemKind::DisplayList => {}
             ContextMenuItemKind::Separator => {
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), state.appearance.separator_height),

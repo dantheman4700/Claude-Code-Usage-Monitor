@@ -73,6 +73,10 @@ pub struct SettingsFile {
 
 impl Default for SettingsFile {
     fn default() -> Self {
+        // Taken from the provider descriptors rather than written out again, so
+        // a provider's shipped default cannot disagree with itself depending on
+        // which of the two a caller happens to ask.
+        let providers = ProviderSet::default();
         Self {
             tray_offset: 0,
             taskbar_index: 0,
@@ -82,14 +86,14 @@ impl Default for SettingsFile {
             poll_interval_ms: default_poll_interval(),
             language: None,
             last_update_check_unix: None,
-            show_claude_code: true,
-            show_codex: false,
-            show_antigravity: false,
-            show_opencode: false,
-            show_cursor: false,
-            show_grok: false,
-            show_fireworks: false,
-            show_devin: false,
+            show_claude_code: providers.contains(ProviderId::Claude),
+            show_codex: providers.contains(ProviderId::Codex),
+            show_antigravity: providers.contains(ProviderId::Antigravity),
+            show_opencode: providers.contains(ProviderId::OpenCode),
+            show_cursor: providers.contains(ProviderId::Cursor),
+            show_grok: providers.contains(ProviderId::Grok),
+            show_fireworks: providers.contains(ProviderId::Fireworks),
+            show_devin: providers.contains(ProviderId::Devin),
             custom_theme_enabled: true,
             active_theme_path: None,
             dashboard_width: None,
@@ -372,12 +376,12 @@ mod tests {
 
     #[test]
     fn settings_never_disable_every_provider() {
-        let mut settings = SettingsFile {
-            show_claude_code: false,
-            show_codex: false,
-            show_antigravity: false,
-            ..Default::default()
-        };
+        // Switch every provider off, whichever ones ship enabled, so the test
+        // exercises the empty case it is named for rather than depending on the
+        // shipped set.
+        let mut settings = SettingsFile::default();
+        settings.set_enabled_providers(ProviderSet::empty());
+        assert!(settings.enabled_providers().is_empty());
         settings.normalize();
         assert_eq!(settings.enabled_providers(), ProviderSet::default());
     }
@@ -406,8 +410,19 @@ mod tests {
     #[test]
     fn provider_toggle_keeps_the_last_provider_enabled() {
         let mut settings = SettingsFile::default();
+        // More than one provider ships enabled, so switching one off is allowed
+        // and it is only the final one that must be refused.
+        assert!(settings.toggle_provider(ProviderId::Grok));
+        assert_eq!(
+            settings.enabled_providers(),
+            ProviderSet::from_enabled([ProviderId::Claude])
+        );
         assert!(!settings.toggle_provider(ProviderId::Claude));
-        assert_eq!(settings.enabled_providers(), ProviderSet::default());
+        assert!(!settings.enabled_providers().is_empty());
+        assert_eq!(
+            settings.enabled_providers(),
+            ProviderSet::from_enabled([ProviderId::Claude])
+        );
     }
 
     #[test]

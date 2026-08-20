@@ -1530,6 +1530,26 @@ pub fn run() {
                     .or_else(|| Some(ThemeDocument::starter()));
                 (path, theme)
             });
+        // A saved theme is a user-owned copy, so it does not inherit changes to
+        // the built-in. Fold its per-provider tray icons into the single fleet
+        // icon and write the result back, or upgrading would silently leave the
+        // old icon column in place.
+        let active_theme = active_theme.map(|mut theme| {
+            if theme.migrate_tray_icons_to_fleet() {
+                // A built-in is read-only, and it already ships the fleet icon,
+                // so only a user-owned copy needs writing back.
+                match theme_engine::save_theme(&theme) {
+                    Ok(path) => diagnose::log(format!(
+                        "migrated per-provider tray icons to the single fleet icon in {}",
+                        path.display()
+                    )),
+                    Err(error) => diagnose::log(format!(
+                        "unable to persist the fleet tray icon migration: {error}"
+                    )),
+                }
+            }
+            theme
+        });
         let custom_theme_enabled = true;
         if let Some(path) = &active_theme_path {
             let path = path.to_string_lossy().into_owned();
@@ -1883,19 +1903,17 @@ fn poll_worker(send_hwnd: SendHwnd) {
 }
 
 fn do_poll_once(hwnd: HWND) {
-    let enabled_providers = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|state| state.providers)
-            .unwrap_or_default()
-    };
+    // Poll everything, not just what the widget draws. The provider toggles
+    // choose which bars appear on the taskbar; the fleet panel is meant to show
+    // the whole picture, and it can only do that for providers that were asked.
+    // One with no credentials answers immediately and without a request.
+    let polled_providers = ProviderSet::from_enabled(ProviderId::ALL);
 
-    match poller::poll(enabled_providers) {
+    match poller::poll(polled_providers) {
         Ok(data) => {
             let mut state = lock_state();
             let data = match state.as_ref().and_then(|s| s.data.as_ref()) {
-                Some(previous) => poller::carry_forward_failures(data, previous, enabled_providers),
+                Some(previous) => poller::carry_forward_failures(data, previous, polled_providers),
                 None => data,
             };
             let cache_data = data.clone();

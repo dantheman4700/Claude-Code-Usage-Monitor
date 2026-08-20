@@ -10,7 +10,7 @@ use super::*;
 use std::time::{Duration, SystemTime};
 
 use crate::insights::{self, Constraint, Headroom, Insights, Projection, Severity};
-use crate::providers::ProviderId;
+use crate::providers::{ProviderId, ProviderSet};
 use crate::ui::theme::{danger, muted, section_border, section_surface, success};
 
 /// Height of a usage meter, matching the widget's own bar proportions.
@@ -21,7 +21,11 @@ const PROVIDER_LABEL_WIDTH: f32 = 110.0;
 impl StudioApp {
     pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
         let language = self.language();
-        let enabled = self.settings.enabled_providers();
+        // Every provider, not just the ones drawn on the taskbar. The
+        // toggles choose which bars appear in the widget; this page exists
+        // to show the whole fleet, and a provider left off there is exactly
+        // the one whose limit goes unnoticed.
+        let enabled = ProviderSet::from_enabled(ProviderId::ALL);
         let now = SystemTime::now();
         let Some(usage) = self.usage.clone() else {
             settings_scroll_area(ui, |ui| {
@@ -126,7 +130,7 @@ impl StudioApp {
     fn fleet_providers(&self, ui: &mut egui::Ui, insights: &Insights, now: SystemTime) {
         let language = self.language();
         section(ui, language.text("Providers"), |ui| {
-            let enabled = self.settings.enabled_providers();
+            let enabled = ProviderSet::from_enabled(ProviderId::ALL);
             let mut drew_any = false;
             for descriptor in PROVIDER_DESCRIPTORS {
                 if !enabled.contains(descriptor.id) {

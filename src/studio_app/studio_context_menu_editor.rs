@@ -93,6 +93,7 @@ pub(super) fn flatten_context_menu_items(
                 ContextMenuItemKind::Text => "text",
                 ContextMenuItemKind::Separator => "separator",
                 ContextMenuItemKind::Submenu { .. } => "submenu",
+                ContextMenuItemKind::DisplayList => "displays",
             };
             rows.push((path.clone(), depth, item.label.clone(), kind));
             if let ContextMenuItemKind::Submenu { items } = &item.kind {
@@ -314,6 +315,7 @@ pub(super) fn context_menu_action_script(action: &ContextMenuAction) -> String {
     let string_arg = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
     match action {
         ContextMenuAction::OpenDashboard => "open_dashboard()".into(),
+        ContextMenuAction::SetDisplay { index } => format!("set_display({index})"),
         ContextMenuAction::Refresh => "refresh()".into(),
         ContextMenuAction::SetUpdateFrequency { seconds } => {
             format!("set_update_frequency({seconds})")

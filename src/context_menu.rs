@@ -44,6 +44,9 @@ pub enum ContextMenuItemKind {
     Submenu {
         items: Vec<ContextMenuItem>,
     },
+    /// Expanded when the menu opens into one entry per taskbar. Monitors come
+    /// and go, so this cannot be baked into the saved document.
+    DisplayList,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +66,11 @@ pub enum ContextMenuAction {
     },
     ToggleStartup,
     ToggleWidget,
+    /// Move the widget to a given taskbar, counted in the order
+    /// `find_taskbars` reports them.
+    SetDisplay {
+        index: usize,
+    },
     /// Accepted only so menus saved by older versions can be loaded and
     /// cleaned up. New menus cannot create or execute this legacy action.
     #[serde(rename = "reset_position")]
@@ -139,6 +147,14 @@ impl ContextMenuItem {
             kind: ContextMenuItemKind::Submenu { items },
         }
     }
+
+    pub fn display_list(id: &str, label: &str) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            kind: ContextMenuItemKind::DisplayList,
+        }
+    }
 }
 
 impl ContextMenuDocument {
@@ -207,7 +223,7 @@ fn validate_items(
             errors.push(format!("Menu item '{}' needs a unique id", item.label));
         }
         match &item.kind {
-            ContextMenuItemKind::Separator => {}
+            ContextMenuItemKind::Separator | ContextMenuItemKind::DisplayList => {}
             ContextMenuItemKind::Text => validate_item_label(item, "Menu text", errors),
             ContextMenuItemKind::Submenu { items } => {
                 validate_item_label(item, "Submenu", errors);
@@ -415,6 +431,11 @@ pub fn classic_context_menu() -> ContextMenuDocument {
                 Action::ToggleStartup,
             ),
             ContextMenuItem::submenu("language", "Language", languages),
+            ContextMenuItem::submenu(
+                "show-on-display",
+                "Show on display",
+                vec![ContextMenuItem::display_list("display-list", "Displays")],
+            ),
             ContextMenuItem::separator("settings-separator"),
             ContextMenuItem::action(
                 "check-updates",

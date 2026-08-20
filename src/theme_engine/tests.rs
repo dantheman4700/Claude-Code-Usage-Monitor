@@ -555,7 +555,11 @@ fn opencode_monthly_window_is_available_to_templates_when_present() {
 #[test]
 fn starter_theme_renders_transparent_pixels_at_declared_size() {
     let theme = ThemeDocument::starter();
-    let rendered = render_theme(&theme, None);
+    // Pinned to a single provider: the sampled row below measures segment gaps
+    // at one specific bar geometry, which shifts if the shipped provider set
+    // changes.
+    let rendered =
+        render_theme_surface_with_runtime(&theme, 0, None, ThemeRuntime::new(true, false, false));
     assert_eq!((rendered.width, rendered.height), (217, 46));
     assert_eq!(rendered.pixels.len(), 217 * 46);
     assert!(rendered.pixels.iter().any(|pixel| pixel >> 24 > 0));
@@ -666,7 +670,7 @@ fn invalid_render_scales_fall_back_to_one() {
             ThemeRuntime::default(),
             scale,
         );
-        assert_eq!((rendered.width, rendered.height), (217, 46));
+        assert_eq!((rendered.width, rendered.height), (285, 46));
     }
 }
 
@@ -991,7 +995,9 @@ fn starter_has_a_taskbar_widget_and_provider_tray_icons() {
         theme.surfaces[0].placement.reference.region,
         ReferenceRegion::SystemTray
     );
-    assert_eq!(theme.surfaces.len(), 9);
+    // One taskbar widget plus one fleet tray icon -- not one icon per provider.
+    assert_eq!(theme.surfaces.len(), 2);
+    assert_eq!(theme.surfaces[1].id, "fleet-tray-icon");
     assert!(theme.surfaces[1..]
         .iter()
         .all(|surface| surface.placement.nest == SurfaceNest::TrayIcon));
@@ -1039,13 +1045,19 @@ fn hidden_legacy_widget_creates_an_unplaced_hidden_copy() {
 }
 
 #[test]
-fn starter_tray_icons_follow_enabled_providers() {
+fn the_single_tray_icon_summarises_whatever_is_enabled() {
     let theme = ThemeDocument::starter();
-    let runtime = ThemeRuntime::new(false, true, false);
-    assert!(!surface_should_render(&theme, 1, None, runtime));
-    assert!(surface_should_render(&theme, 2, None, runtime));
-    assert!(!surface_should_render(&theme, 3, None, runtime));
-    let rendered = render_theme_surface_with_runtime(&theme, 2, None, runtime);
+    // There is one icon for the whole fleet rather than one per provider, so it
+    // renders whichever providers happen to be switched on.
+    for runtime in [
+        ThemeRuntime::new(true, false, false),
+        ThemeRuntime::new(false, true, false),
+        ThemeRuntime::new(true, true, true),
+    ] {
+        assert!(surface_should_render(&theme, 1, None, runtime));
+    }
+    let rendered =
+        render_theme_surface_with_runtime(&theme, 1, None, ThemeRuntime::new(false, true, false));
     assert_eq!((rendered.width, rendered.height), (64, 64));
     assert!(rendered.pixels.iter().any(|pixel| pixel >> 24 > 0));
 }
@@ -1600,4 +1612,66 @@ fn credit_badges_abbreviate_a_balance_too_wide_for_the_tray() {
         format_template("{codex.credits.balance / 1000:0.0}k", &context(1234.0)),
         "1.2k"
     );
+}
+
+/// A saved theme is a user-owned copy that does not inherit built-in changes,
+/// so upgrading has to fold its old per-provider icon column into the single
+/// fleet icon or the icon the panel opens from never appears.
+#[test]
+fn a_saved_theme_folds_its_provider_tray_icons_into_the_fleet_icon() {
+    let mut theme = ThemeDocument::starter();
+    // Recreate the pre-fleet shape: one tray surface per provider, no fleet.
+    let fleet = theme
+        .surfaces
+        .iter()
+        .position(|surface| surface.id == "fleet-tray-icon")
+        .expect("the starter ships the fleet icon");
+    let template = theme.surfaces.remove(fleet);
+    for key in ["claude", "codex", "grok"] {
+        let mut surface = template.clone();
+        surface.id = format!("{key}-tray-icon");
+        theme.surfaces.push(surface);
+    }
+
+    assert!(theme.migrate_tray_icons_to_fleet());
+    let ids: Vec<&str> = theme.surfaces.iter().map(|s| s.id.as_str()).collect();
+    assert!(ids.contains(&"fleet-tray-icon"));
+    assert!(!ids.iter().any(|id| id.ends_with("-tray-icon") && *id != "fleet-tray-icon"));
+}
+
+/// Running twice must not duplicate the icon, and a theme that already has it
+/// is left alone.
+#[test]
+fn the_fleet_icon_migration_is_idempotent() {
+    let mut theme = ThemeDocument::starter();
+    assert!(!theme.migrate_tray_icons_to_fleet());
+    assert_eq!(
+        theme
+            .surfaces
+            .iter()
+            .filter(|surface| surface.id == "fleet-tray-icon")
+            .count(),
+        1
+    );
+}
+
+/// A tray surface the user named themselves is not a generated one, so it stays
+/// exactly where it is.
+#[test]
+fn the_migration_leaves_user_named_tray_surfaces_alone() {
+    let mut theme = ThemeDocument::starter();
+    let fleet = theme
+        .surfaces
+        .iter()
+        .position(|surface| surface.id == "fleet-tray-icon")
+        .expect("the starter ships the fleet icon");
+    let mut custom = theme.surfaces.remove(fleet);
+    custom.id = "my-own-tray-icon".into();
+    theme.surfaces.push(custom);
+
+    assert!(!theme.migrate_tray_icons_to_fleet());
+    assert!(theme
+        .surfaces
+        .iter()
+        .any(|surface| surface.id == "my-own-tray-icon"));
 }

@@ -317,8 +317,11 @@ pub(super) fn format_usage_line(base: &str, context: &DataContext) -> Option<Str
     // Resolved through the provider registry rather than a list repeated here,
     // so registering a provider is enough to make its usage lines work. The
     // synthetic "active" prefix has no descriptor of its own.
-    let known_provider =
-        provider == "active" || crate::providers::ProviderId::from_key(provider).is_some();
+    // "active" and "fleet" are synthesised rather than registered: one follows
+    // whichever provider reported first, the other summarises the worst across
+    // all of them for the single tray badge.
+    let known_provider = matches!(provider, "active" | "fleet")
+        || crate::providers::ProviderId::from_key(provider).is_some();
     if parts.next().is_some()
         || !known_provider
         || !matches!(
