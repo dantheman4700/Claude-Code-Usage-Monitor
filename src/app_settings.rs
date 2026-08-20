@@ -10,6 +10,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 use crate::models::{AppUsageData, CodexCreditsState};
+use crate::usage_history::UsageHistory;
 use crate::providers::{ProviderId, ProviderSet};
 
 pub const POLL_1_MIN_SECONDS: u32 = 60;
@@ -56,6 +57,10 @@ pub struct SettingsFile {
     show_cursor: bool,
     #[serde(default)]
     show_grok: bool,
+    #[serde(default)]
+    show_fireworks: bool,
+    #[serde(default)]
+    show_devin: bool,
     #[serde(default = "default_true")]
     pub custom_theme_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +88,8 @@ impl Default for SettingsFile {
             show_opencode: false,
             show_cursor: false,
             show_grok: false,
+            show_fireworks: false,
+            show_devin: false,
             custom_theme_enabled: true,
             active_theme_path: None,
             dashboard_width: None,
@@ -158,6 +165,8 @@ impl SettingsFile {
             ProviderId::OpenCode => self.show_opencode,
             ProviderId::Cursor => self.show_cursor,
             ProviderId::Grok => self.show_grok,
+            ProviderId::Fireworks => self.show_fireworks,
+            ProviderId::Devin => self.show_devin,
         }
     }
 
@@ -169,6 +178,8 @@ impl SettingsFile {
             ProviderId::OpenCode => self.show_opencode = enabled,
             ProviderId::Cursor => self.show_cursor = enabled,
             ProviderId::Grok => self.show_grok = enabled,
+            ProviderId::Fireworks => self.show_fireworks = enabled,
+            ProviderId::Devin => self.show_devin = enabled,
         }
     }
 
@@ -207,6 +218,9 @@ pub fn settings_path() -> PathBuf {
 }
 pub fn usage_cache_path() -> PathBuf {
     app_data_directory().join("usage-cache.json")
+}
+pub fn usage_history_path() -> PathBuf {
+    app_data_directory().join("usage-history.json")
 }
 
 pub fn load_settings() -> SettingsFile {
@@ -264,6 +278,20 @@ pub fn load_codex_credits() -> Option<CodexCreditsState> {
 
 pub fn save_codex_credits(state: &CodexCreditsState) -> Result<(), String> {
     write_json_atomic(&codex_credits_path(), state)
+}
+
+pub fn load_usage_history() -> UsageHistory {
+    read_json(&usage_history_path()).unwrap_or_default()
+}
+
+/// Fold a poll into the rolling history, writing only when it actually added a
+/// sample -- the store collapses readings that arrive too close together, and
+/// rewriting the file for a discarded sample is pure churn.
+pub fn record_usage_history(data: &AppUsageData, now_unix: u64) {
+    let mut history = load_usage_history();
+    if history.record(data, now_unix) {
+        let _ = write_json_atomic(&usage_history_path(), &history);
+    }
 }
 
 pub fn load_usage_cache() -> Option<UsageCache> {

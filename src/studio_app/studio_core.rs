@@ -70,6 +70,7 @@ impl StudioApp {
         let usage_poll_ok = usage_cache.as_ref().is_some_and(|cache| cache.poll_ok);
         let usage_has_error = usage_cache.as_ref().is_some_and(|cache| !cache.poll_ok);
         let usage = usage_cache.map(|cache| cache.data);
+        let usage_history = app_settings::load_usage_history();
         let next_preview_countdown_refresh = preview_countdown_refresh_delay(usage.as_ref())
             .and_then(|delay| Instant::now().checked_add(delay));
         Self {
@@ -86,6 +87,7 @@ impl StudioApp {
             preview_generation: 0,
             preview_render_key: None,
             usage,
+            usage_history,
             usage_poll_ok,
             usage_has_error,
             last_cache_read: Instant::now(),
@@ -775,6 +777,7 @@ impl StudioApp {
                         })
                         .show(ui, |ui| {
                             ui.set_width(DEFAULT_MENU_WIDTH - 16.0);
+                            nav(ui, &mut self.page, Page::Fleet, language.text("Fleet"));
                             nav(
                                 ui,
                                 &mut self.page,
@@ -828,6 +831,7 @@ impl StudioApp {
                         ui.add_space(8.0);
                     }
                     match self.page {
+                        Page::Fleet => self.fleet_page(ui),
                         Page::Settings => self.settings_page(ui),
                         Page::Studio => self.studio_page(ui),
                         Page::ContextMenus => self.context_menus_page(ui),

@@ -6,6 +6,7 @@ mod dashboard;
 mod desktop_compositor;
 mod diagnose;
 mod font_catalog;
+mod insights;
 mod localization;
 mod models;
 mod native_interop;
@@ -18,6 +19,7 @@ mod theme_package;
 mod tray_icon;
 mod ui;
 mod updater;
+mod usage_history;
 mod window;
 mod winsqlite;
 

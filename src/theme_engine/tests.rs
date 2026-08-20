@@ -370,8 +370,9 @@ fn starter_theme_round_trips_and_validates() {
     // 1.4.9 palette follows the taskbar mode without runtime recolouring:
     // five providers over two windows in two modes, plus a credit overlay on
     // the weekly row of the two providers that report credits, plus Grok,
-    // which bills one weekly window and so contributes a single row.
-    assert_eq!(segments, vec![10; 5 * 2 * 2 + 2 * 2 + 1 * 2]);
+    // Fireworks and Devin, which each bill a single pool and so contribute
+    // one row apiece.
+    assert_eq!(segments, vec![10; 5 * 2 * 2 + 2 * 2 + 3 * 2]);
     assert!(theme.surfaces[0]
         .children
         .iter()
@@ -914,7 +915,7 @@ fn starter_adapts_width_segments_and_collapsed_provider_rows() {
         ),
         (
             ThemeRuntime::from_providers(ProviderSet::from_enabled(ProviderId::ALL)),
-            635,
+            815,
             2,
         ),
     ] {
@@ -990,7 +991,7 @@ fn starter_has_a_taskbar_widget_and_provider_tray_icons() {
         theme.surfaces[0].placement.reference.region,
         ReferenceRegion::SystemTray
     );
-    assert_eq!(theme.surfaces.len(), 7);
+    assert_eq!(theme.surfaces.len(), 9);
     assert!(theme.surfaces[1..]
         .iter()
         .all(|surface| surface.placement.nest == SurfaceNest::TrayIcon));
@@ -998,10 +999,17 @@ fn starter_has_a_taskbar_widget_and_provider_tray_icons() {
         theme.surfaces[0].mouse_events.as_ref().unwrap().right_click,
         "show_context_menu(\"classic-v1\")"
     );
+    // A click anywhere on the widget or its tray icons opens the fleet panel.
+    // Only `click` is bound: with a double-click handler present as well, every
+    // click would be held back by the double-click timer before opening.
+    assert_eq!(
+        theme.surfaces[0].mouse_events.as_ref().unwrap().click,
+        "show_dashboard()"
+    );
     assert!(theme.surfaces[1..].iter().all(|surface| {
         let events = surface.mouse_events.as_ref().unwrap();
-        events.click == "toggle(\"main\", render)"
-            && events.double_click == events.click
+        events.click == "show_dashboard()"
+            && events.double_click.is_empty()
             && events.right_click == "show_context_menu(\"classic-v1\")"
     }));
 }
@@ -1343,12 +1351,7 @@ fn action_overrides_are_runtime_only_and_reset_restores_saved_expression() {
 fn tray_root_can_toggle_the_main_root_on_another_surface() {
     let theme = ThemeDocument::starter();
     let tray_id = theme.surfaces[1].id.clone();
-    let click = theme.surfaces[1]
-        .mouse_events
-        .as_ref()
-        .unwrap()
-        .click
-        .clone();
+    let click = "toggle(\"main\", render)".to_string();
     let mut overrides = HashMap::new();
     execute_mouse_actions(
         &theme,

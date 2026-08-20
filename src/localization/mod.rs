@@ -93,6 +93,14 @@ impl LanguageId {
                 strings.grok_token_expired_title,
                 strings.grok_token_expired_body,
             ),
+            ProviderId::Fireworks => (
+                strings.fireworks_token_expired_title,
+                strings.fireworks_token_expired_body,
+            ),
+            ProviderId::Devin => (
+                strings.devin_token_expired_title,
+                strings.devin_token_expired_body,
+            ),
         }
     }
 
@@ -141,6 +149,8 @@ pub struct Strings {
     pub opencode_model: &'static str,
     pub cursor_model: &'static str,
     pub grok_model: &'static str,
+    pub fireworks_model: &'static str,
+    pub devin_model: &'static str,
     pub settings: &'static str,
     pub start_with_windows: &'static str,
     pub language: &'static str,
@@ -162,6 +172,8 @@ pub struct Strings {
     pub cursor_auto_window: &'static str,
     pub cursor_api_window: &'static str,
     pub grok_weekly_window: &'static str,
+    pub fireworks_balance_window: &'static str,
+    pub devin_acu_window: &'static str,
     pub now: &'static str,
     pub day_suffix: &'static str,
     pub hour_suffix: &'static str,
@@ -179,11 +191,17 @@ pub struct Strings {
     pub cursor_token_expired_body: &'static str,
     pub grok_token_expired_title: &'static str,
     pub grok_token_expired_body: &'static str,
+    pub fireworks_token_expired_title: &'static str,
+    pub fireworks_token_expired_body: &'static str,
+    pub devin_token_expired_title: &'static str,
+    pub devin_token_expired_body: &'static str,
     pub codex_window_title: &'static str,
     pub antigravity_window_title: &'static str,
     pub opencode_window_title: &'static str,
     pub cursor_window_title: &'static str,
     pub grok_window_title: &'static str,
+    pub fireworks_window_title: &'static str,
+    pub devin_window_title: &'static str,
 }
 
 pub fn resolve_language(language_override: Option<LanguageId>) -> LanguageId {

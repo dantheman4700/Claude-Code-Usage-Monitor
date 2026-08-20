@@ -1927,6 +1927,7 @@ fn do_poll_once(hwnd: HWND) {
             }
             drop(state);
             let _ = app_settings::save_usage_cache(&cache_data, true);
+            app_settings::record_usage_history(&cache_data, now_unix_secs());
 
             unsafe {
                 let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));

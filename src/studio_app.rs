@@ -125,8 +125,10 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
     };
     let initial_page = if args.iter().any(|argument| argument == "--theme-studio") {
         Page::Studio
-    } else {
+    } else if args.iter().any(|argument| argument == "--settings") {
         Page::Settings
+    } else {
+        Page::Fleet
     };
     let settings = app_settings::load_settings();
     let dashboard_width = settings.dashboard_width.unwrap_or(DEFAULT_DASHBOARD_WIDTH);
@@ -166,6 +168,7 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
+    Fleet,
     Settings,
     Studio,
     ContextMenus,
@@ -652,6 +655,7 @@ struct StudioApp {
     preview_generation: u64,
     preview_render_key: Option<PreviewRenderKey>,
     usage: Option<AppUsageData>,
+    usage_history: crate::usage_history::UsageHistory,
     usage_poll_ok: bool,
     usage_has_error: bool,
     last_cache_read: Instant,
@@ -695,6 +699,7 @@ struct StudioApp {
 mod studio_assets;
 mod studio_context_menus;
 mod studio_core;
+mod studio_fleet;
 mod studio_settings;
 mod studio_theme_workspace;
 

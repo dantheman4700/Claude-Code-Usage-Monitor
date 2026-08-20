@@ -93,6 +93,8 @@ mod claude;
 mod claude_desktop;
 mod codex;
 mod cursor;
+mod devin;
+mod fireworks;
 mod grok;
 mod opencode;
 mod wsl;
@@ -103,7 +105,7 @@ struct ProviderPoller {
     credential_watch: fn(bool) -> CredentialWatchSnapshot,
 }
 
-const PROVIDER_POLLERS: [ProviderPoller; 6] = [
+const PROVIDER_POLLERS: [ProviderPoller; 8] = [
     ProviderPoller {
         id: ProviderId::Claude,
         poll: claude::poll_claude_code,
@@ -133,6 +135,16 @@ const PROVIDER_POLLERS: [ProviderPoller; 6] = [
         id: ProviderId::Grok,
         poll: grok::poll_grok,
         credential_watch: grok::credential_watch_snapshot,
+    },
+    ProviderPoller {
+        id: ProviderId::Fireworks,
+        poll: fireworks::poll_fireworks,
+        credential_watch: fireworks::credential_watch_snapshot,
+    },
+    ProviderPoller {
+        id: ProviderId::Devin,
+        poll: devin::poll_devin,
+        credential_watch: devin::credential_watch_snapshot,
     },
 ];
 
