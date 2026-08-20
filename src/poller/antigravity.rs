@@ -5,11 +5,29 @@ use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
-use super::{build_agent, parse_iso8601, PollError};
+use super::{build_agent, parse_iso8601, wsl, PollError};
 use crate::diagnose;
 use crate::models::{UsageData, UsageSection};
 
 const ANTIGRAVITY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
+
+/// Quote-free on purpose -- see [`wsl::read_file`].
+const WSL_READ_TOKEN: &str = "cat ~/.gemini/antigravity-cli/antigravity-oauth-token";
+const WSL_WATCH_TOKEN: &str = "if [ -f ~/.gemini/antigravity-cli/antigravity-oauth-token ]; then \
+     stat -c 'present|%s|%Y' ~/.gemini/antigravity-cli/antigravity-oauth-token; \
+     else echo missing; fi";
+/// Listing models is the cheapest call that makes the CLI notice its token has
+/// expired and write a fresh one; there is no dedicated refresh command.
+const WSL_REFRESH: &str = "if command -v agy >/dev/null 2>&1; then agy models; \
+     elif [ -x $HOME/.local/bin/agy ]; then $HOME/.local/bin/agy models; else exit 127; fi";
+
+/// Where an Antigravity token came from. Windows keeps it in the credential
+/// manager; WSL installs keep it in a file under the home directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AntigravityCredentialSource {
+    Windows,
+    Wsl { distro: String },
+}
 const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
     "https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -105,15 +123,61 @@ extern "system" {
 }
 
 pub(super) fn poll_antigravity() -> Result<UsageData, PollError> {
-    let creds = match read_antigravity_credentials() {
-        Some(creds) => creds,
+    let (creds, source) = match read_first_antigravity_credentials() {
+        Some(found) => found,
         None => {
             diagnose::log("Antigravity usage poll failed: no Antigravity credentials found");
             return Err(PollError::NoCredentials);
         }
     };
 
-    fetch_antigravity_usage(&creds.access_token)
+    match fetch_antigravity_usage(&creds.access_token) {
+        Err(PollError::AuthRequired) => {
+            // The Windows CLI refreshes on its own schedule; a WSL install
+            // only rewrites its token when something asks it to.
+            let AntigravityCredentialSource::Wsl { distro } = &source else {
+                return Err(PollError::AuthRequired);
+            };
+            wsl::run_detached(distro, WSL_REFRESH, "Antigravity token refresh");
+            let refreshed = read_wsl_antigravity_credentials(distro).ok_or(PollError::TokenExpired)?;
+            fetch_antigravity_usage(&refreshed.access_token)
+        }
+        result => result,
+    }
+}
+
+/// The first usable Antigravity token, from Windows and then any WSL distro.
+fn read_first_antigravity_credentials(
+) -> Option<(AntigravityTokenData, AntigravityCredentialSource)> {
+    if let Some(token) = read_antigravity_credentials() {
+        return Some((token, AntigravityCredentialSource::Windows));
+    }
+    for distro in wsl::list_distros() {
+        if let Some(token) = read_wsl_antigravity_credentials(&distro) {
+            return Some((token, AntigravityCredentialSource::Wsl { distro }));
+        }
+    }
+    None
+}
+
+fn read_wsl_antigravity_credentials(distro: &str) -> Option<AntigravityTokenData> {
+    let content = wsl::read_file(distro, WSL_READ_TOKEN, "Antigravity credentials")?;
+    let auth: AntigravityAuthFile = serde_json::from_str(&content).ok()?;
+    (!auth.token.access_token.is_empty()).then_some(auth.token)
+}
+
+pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
+    let mut signatures = vec![antigravity_credential_watch_signature()];
+    if all_sources {
+        for distro in wsl::list_distros() {
+            if let Some(signature) =
+                wsl::path_watch_signature(&distro, "antigravity-wsl", WSL_WATCH_TOKEN)
+            {
+                signatures.push(signature);
+            }
+        }
+    }
+    signatures
 }
 
 pub(super) fn antigravity_credential_watch_signature() -> String {

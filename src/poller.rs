@@ -156,12 +156,12 @@ pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSn
         .unwrap_or_default()
 }
 
-fn codex_credential_watch_snapshot(_all_sources: bool) -> CredentialWatchSnapshot {
-    codex::credential_watch_snapshot()
+fn codex_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {
+    codex::credential_watch_snapshot(all_sources)
 }
 
-fn antigravity_credential_watch_snapshot(_all_sources: bool) -> CredentialWatchSnapshot {
-    vec![antigravity::antigravity_credential_watch_signature()]
+fn antigravity_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {
+    antigravity::credential_watch_snapshot(all_sources)
 }
 
 fn build_agent() -> Result<ureq::Agent, PollError> {

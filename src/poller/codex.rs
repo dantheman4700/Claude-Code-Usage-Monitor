@@ -5,13 +5,30 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, unix_to_system_time, PollError};
+use super::{build_agent, unix_to_system_time, wsl, PollError};
 use crate::app_settings;
 use crate::diagnose;
 use crate::models::{CodexCreditsState, CreditsSection, UsageData, UsageSection};
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Quote-free on purpose -- see [`wsl::read_file`].
+const WSL_READ_AUTH: &str = "cat ${CODEX_HOME:-$HOME/.codex}/auth.json";
+const WSL_WATCH_AUTH: &str = "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
+     stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; else echo missing; fi";
+/// `codex exec .` is a no-op run whose only purpose is making the CLI refresh
+/// and rewrite its own credential file.
+const WSL_REFRESH: &str = "if command -v codex >/dev/null 2>&1; then codex exec .; \
+     elif [ -x $HOME/.local/bin/codex ]; then $HOME/.local/bin/codex exec .; else exit 127; fi";
+
+/// Where a Codex token came from, so a refresh runs where the CLI actually
+/// lives instead of assuming the Windows install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexCredentialSource {
+    Windows,
+    Wsl { distro: String },
+}
 
 #[derive(Deserialize)]
 struct CodexAuthFile {
@@ -71,8 +88,8 @@ pub(super) struct CodexRateLimitWindow {
 const WEEKLY_WINDOW_THRESHOLD_SECONDS: i64 = 86_400;
 
 pub(super) fn poll_codex() -> Result<UsageData, PollError> {
-    let creds = match read_codex_credentials() {
-        Some(creds) => creds,
+    let (creds, source) = match read_first_codex_credentials() {
+        Some(found) => found,
         None => {
             diagnose::log("Codex usage poll failed: no Codex credentials found");
             return Err(PollError::NoCredentials);
@@ -82,8 +99,8 @@ pub(super) fn poll_codex() -> Result<UsageData, PollError> {
     match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
         Ok(data) => Ok(data),
         Err(PollError::AuthRequired) => {
-            cli_refresh_codex_token();
-            let refreshed = read_codex_credentials().ok_or(PollError::TokenExpired)?;
+            refresh_codex_token(&source);
+            let refreshed = read_codex_credentials_from(&source).ok_or(PollError::TokenExpired)?;
             fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
         }
         Err(error) => Err(error),
@@ -245,7 +262,20 @@ pub(super) fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageS
     }
 }
 
-pub(super) fn credential_watch_snapshot() -> Vec<String> {
+pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
+    let mut signatures = windows_credential_watch_snapshot();
+    if all_sources {
+        for distro in wsl::list_distros() {
+            if let Some(signature) = wsl::path_watch_signature(&distro, "codex-wsl", WSL_WATCH_AUTH)
+            {
+                signatures.push(signature);
+            }
+        }
+    }
+    signatures
+}
+
+fn windows_credential_watch_snapshot() -> Vec<String> {
     let Some(path) = codex_auth_path() else {
         return vec!["codex:auth-path-missing".into()];
     };
@@ -270,6 +300,44 @@ fn codex_auth_path() -> Option<PathBuf> {
         return Some(codex_home.join("auth.json"));
     }
     Some(dirs::home_dir()?.join(".codex").join("auth.json"))
+}
+
+/// The first usable Codex token, from Windows and then any WSL distro.
+///
+/// The CLI is often only ever signed in inside WSL, so the Linux copy is a
+/// normal source rather than a fallback for a broken install.
+fn read_first_codex_credentials() -> Option<(CodexTokenData, CodexCredentialSource)> {
+    if let Some(tokens) = read_codex_credentials() {
+        return Some((tokens, CodexCredentialSource::Windows));
+    }
+    for distro in wsl::list_distros() {
+        if let Some(tokens) = read_wsl_codex_credentials(&distro) {
+            return Some((tokens, CodexCredentialSource::Wsl { distro }));
+        }
+    }
+    None
+}
+
+fn read_codex_credentials_from(source: &CodexCredentialSource) -> Option<CodexTokenData> {
+    match source {
+        CodexCredentialSource::Windows => read_codex_credentials(),
+        CodexCredentialSource::Wsl { distro } => read_wsl_codex_credentials(distro),
+    }
+}
+
+fn read_wsl_codex_credentials(distro: &str) -> Option<CodexTokenData> {
+    let content = wsl::read_file(distro, WSL_READ_AUTH, "Codex credentials")?;
+    let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
+    auth.tokens.filter(|tokens| !tokens.access_token.is_empty())
+}
+
+fn refresh_codex_token(source: &CodexCredentialSource) {
+    match source {
+        CodexCredentialSource::Windows => cli_refresh_codex_token(),
+        CodexCredentialSource::Wsl { distro } => {
+            wsl::run_detached(distro, WSL_REFRESH, "Codex token refresh")
+        }
+    }
 }
 
 fn read_codex_credentials() -> Option<CodexTokenData> {

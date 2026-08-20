@@ -23,7 +23,7 @@ const GROK_CLIENT_MODE: &str = "cli";
 
 /// Quote-free on purpose — see [`wsl::read_file`].
 const READ_AUTH_SCRIPT: &str = "cat ~/.grok/auth.json";
-const WATCH_AUTH_SCRIPT: &str = "stat -c %Y:%s ~/.grok/auth.json 2>/dev/null";
+const WATCH_AUTH_SCRIPT: &str = "stat -c 'present|%s|%Y' ~/.grok/auth.json 2>/dev/null";
 
 #[derive(Deserialize)]
 struct GrokBillingResponse {
