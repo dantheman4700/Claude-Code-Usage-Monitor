@@ -317,6 +317,7 @@ fn app_with_surfaces(surfaces: Vec<SceneObject>) -> StudioApp {
         preview_render_key: None,
         usage: None,
         usage_history: Default::default(),
+        fleet_insights: None,
         usage_poll_ok: false,
         usage_has_error: false,
         last_cache_read: Instant::now(),

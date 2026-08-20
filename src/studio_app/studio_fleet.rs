@@ -42,7 +42,21 @@ impl StudioApp {
             return;
         };
 
-        let insights = insights::analyze(&usage, enabled, &self.usage_history, now);
+        let stale = self
+            .fleet_insights
+            .as_ref()
+            .is_none_or(|(cached_for, _)| *cached_for != enabled);
+        if stale {
+            self.fleet_insights = Some((
+                enabled,
+                insights::analyze(&usage, enabled, &self.usage_history, now),
+            ));
+        }
+        let insights = self
+            .fleet_insights
+            .as_ref()
+            .map(|(_, insights)| insights.clone())
+            .expect("insights were just computed");
 
         settings_scroll_area(ui, |ui| {
             self.fleet_headline(ui, &insights, now);

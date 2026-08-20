@@ -656,6 +656,11 @@ struct StudioApp {
     preview_render_key: Option<PreviewRenderKey>,
     usage: Option<AppUsageData>,
     usage_history: crate::usage_history::UsageHistory,
+    /// Analysis of the current reading, rebuilt only when the reading or
+    /// the provider selection changes rather than on every frame. The
+    /// selection is part of the key because switching a provider off
+    /// changes the analysis without changing the reading.
+    fleet_insights: Option<(crate::providers::ProviderSet, crate::insights::Insights)>,
     usage_poll_ok: bool,
     usage_has_error: bool,
     last_cache_read: Instant,

@@ -88,6 +88,7 @@ impl StudioApp {
             preview_render_key: None,
             usage,
             usage_history,
+            fleet_insights: None,
             usage_poll_ok,
             usage_has_error,
             last_cache_read: Instant::now(),
@@ -734,6 +735,9 @@ impl StudioApp {
             self.usage = Some(cache.data);
             self.usage_poll_ok = poll_ok;
             self.usage_has_error = has_error;
+            // A fresh reading also brings a fresh history sample.
+            self.usage_history = app_settings::load_usage_history();
+            self.fleet_insights = None;
         }
         changed
     }
