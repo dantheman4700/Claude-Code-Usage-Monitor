@@ -22,6 +22,37 @@ struct UsageResponse {
     five_hour: Option<UsageBucket>,
     seven_day: Option<UsageBucket>,
     spend: Option<SpendResponse>,
+    /// Self-describing limit rows that sit alongside the fixed `five_hour`
+    /// and `seven_day` fields. Per-model weekly caps appear only here, so on
+    /// accounts that have them the fixed fields no longer tell the whole
+    /// story. Absent on older accounts, hence the default.
+    #[serde(default)]
+    limits: Vec<LimitEntry>,
+}
+
+/// One row of `limits`. `group` says which window the row belongs to
+/// ("session" or "weekly"); rows within a group differ by scope, e.g. a
+/// plan-wide weekly cap next to a per-model one.
+#[derive(Deserialize)]
+struct LimitEntry {
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    percent: f64,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<LimitScope>,
+}
+
+#[derive(Deserialize)]
+struct LimitScope {
+    model: Option<LimitModel>,
+}
+
+#[derive(Deserialize)]
+struct LimitModel {
+    display_name: Option<String>,
 }
 
 /// Paid credits that carry the account past its plan limits. Amounts are
@@ -146,6 +177,10 @@ pub(super) fn try_usage_endpoint(token: &str) -> Result<Option<UsageData>, PollE
         Ok(response) => response,
         Err(_) => return Ok(None),
     };
+    Ok(Some(claude_usage_from_response(&response)))
+}
+
+fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
     let mut data = UsageData::default();
 
     if let Some(bucket) = &response.five_hour {
@@ -158,12 +193,49 @@ pub(super) fn try_usage_endpoint(token: &str) -> Result<Option<UsageData>, PollE
         data.weekly.resets_at = parse_iso8601(bucket.resets_at.as_deref());
     }
 
+    // `limits` supersedes the fixed fields wherever it has something to say.
+    // A plan can carry several caps for one window, and the account is
+    // throttled by whichever fills first, which is not necessarily the
+    // plan-wide row that `five_hour` and `seven_day` report.
+    if let Some(entry) = binding_limit(&response.limits, "session") {
+        data.session.percentage = entry.percent;
+        if let Some(resets_at) = parse_iso8601(entry.resets_at.as_deref()) {
+            data.session.resets_at = Some(resets_at);
+        }
+    }
+
+    if let Some(entry) = binding_limit(&response.limits, "weekly") {
+        data.weekly.percentage = entry.percent;
+        if let Some(resets_at) = parse_iso8601(entry.resets_at.as_deref()) {
+            data.weekly.resets_at = Some(resets_at);
+        }
+        // Name the model when a per-model cap is the one biting, so the bar
+        // is not silently misread as the plan-wide weekly figure.
+        data.weekly_label = entry
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.model.as_ref())
+            .and_then(|model| model.display_name.clone());
+    }
+
     data.credits = response
         .spend
         .as_ref()
         .and_then(|spend| claude_credits(spend, &data));
 
-    Ok(Some(data))
+    data
+}
+
+/// The row that actually constrains `group`.
+///
+/// Several caps can share a window, and the binding one is the fullest: it is
+/// what the account hits first. Reporting anything lower would tell the user
+/// they have room they do not have, so ties and unknowns resolve upward.
+fn binding_limit<'a>(limits: &'a [LimitEntry], group: &str) -> Option<&'a LimitEntry> {
+    limits
+        .iter()
+        .filter(|entry| entry.group.as_deref() == Some(group))
+        .max_by(|a, b| a.percent.total_cmp(&b.percent))
 }
 
 /// What a failed call to the usage endpoint actually tells us.
@@ -771,18 +843,7 @@ mod tests {
     fn usage_from_json(json: &str) -> UsageData {
         let response: UsageResponse =
             serde_json::from_str(json).expect("the fixture should deserialize");
-        let mut data = UsageData::default();
-        if let Some(bucket) = &response.seven_day {
-            data.weekly.percentage = bucket.utilization;
-        }
-        if let Some(bucket) = &response.five_hour {
-            data.session.percentage = bucket.utilization;
-        }
-        data.credits = response
-            .spend
-            .as_ref()
-            .and_then(|spend| claude_credits(spend, &data));
-        data
+        claude_usage_from_response(&response)
     }
 
     fn status_error(code: u16) -> ureq::Error {
@@ -890,5 +951,63 @@ mod tests {
                                  "limit": {"amount_minor": 5000, "exponent": 2},
                                  "enabled": true}}"#;
         assert!(usage_from_json(json).credits.is_none());
+    }
+
+    /// A per-model weekly cap can sit above the plan-wide one, and it is the
+    /// cap the account actually hits first. Reporting `seven_day` there would
+    /// tell the user they have headroom they do not have.
+    #[test]
+    fn a_scoped_weekly_cap_outranks_the_plan_wide_one() {
+        let data = usage_from_json(
+            r#"{
+                "five_hour": {"utilization": 23.0, "resets_at": null},
+                "seven_day": {"utilization": 48.0, "resets_at": null},
+                "limits": [
+                    {"kind": "session", "group": "session", "percent": 23},
+                    {"kind": "weekly_all", "group": "weekly", "percent": 48},
+                    {
+                        "kind": "weekly_scoped",
+                        "group": "weekly",
+                        "percent": 75,
+                        "scope": {"model": {"display_name": "Fable"}}
+                    }
+                ]
+            }"#,
+        );
+
+        assert_eq!(data.weekly.percentage, 75.0);
+        assert_eq!(data.weekly_label.as_deref(), Some("Fable"));
+        assert_eq!(data.session.percentage, 23.0);
+    }
+
+    /// Older accounts get no `limits` at all, so the fixed fields have to keep
+    /// working untouched.
+    #[test]
+    fn the_fixed_fields_still_carry_accounts_without_limits() {
+        let data = usage_from_json(
+            r#"{
+                "five_hour": {"utilization": 12.0, "resets_at": null},
+                "seven_day": {"utilization": 34.0, "resets_at": null}
+            }"#,
+        );
+
+        assert_eq!(data.session.percentage, 12.0);
+        assert_eq!(data.weekly.percentage, 34.0);
+        assert_eq!(data.weekly_label, None);
+    }
+
+    /// The plan-wide row carries no scope, so nothing should be labelled.
+    #[test]
+    fn an_unscoped_weekly_cap_is_left_unlabelled() {
+        let data = usage_from_json(
+            r#"{
+                "limits": [
+                    {"kind": "weekly_all", "group": "weekly", "percent": 60}
+                ]
+            }"#,
+        );
+
+        assert_eq!(data.weekly.percentage, 60.0);
+        assert_eq!(data.weekly_label, None);
     }
 }

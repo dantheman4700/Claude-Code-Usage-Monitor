@@ -314,11 +314,13 @@ pub(super) fn format_usage_line(base: &str, context: &DataContext) -> Option<Str
     let mut parts = base.split('.');
     let provider = parts.next()?;
     let window = parts.next()?;
+    // Resolved through the provider registry rather than a list repeated here,
+    // so registering a provider is enough to make its usage lines work. The
+    // synthetic "active" prefix has no descriptor of its own.
+    let known_provider =
+        provider == "active" || crate::providers::ProviderId::from_key(provider).is_some();
     if parts.next().is_some()
-        || !matches!(
-            provider,
-            "active" | "claude" | "codex" | "antigravity" | "opencode" | "cursor"
-        )
+        || !known_provider
         || !matches!(
             window,
             "session" | "five_hour" | "weekly" | "monthly" | "credits"

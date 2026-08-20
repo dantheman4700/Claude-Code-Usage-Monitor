@@ -34,6 +34,19 @@ fn main() {
 
     res.compile().expect("Failed to compile Windows resources");
 
+    // winres hands the linker `libresource.a`, but an archive member is only
+    // pulled in when something references one of its symbols, and nothing ever
+    // references a resource blob. lld therefore drops it and the executable
+    // ships with no icon, no version info, and — worse — no manifest, which
+    // the Windows 11 raised desktop needs. Naming the object file directly
+    // sidesteps archive member selection altogether.
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let resource_object = Path::new(&out_dir).join("resource.o");
+        if resource_object.exists() {
+            println!("cargo:rustc-link-arg={}", resource_object.display());
+        }
+    }
+
     println!("cargo:rerun-if-changed=src/app.manifest");
 }
 
