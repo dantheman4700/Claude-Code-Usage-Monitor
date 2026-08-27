@@ -1621,10 +1621,8 @@ pub const FLEET_TRAY_SURFACE_ID: &str = "fleet-tray-icon";
 /// Names earlier generations of the fleet icon shipped with. A saved theme
 /// still carrying one of these has never been touched and can be upgraded.
 /// Every change to the built-in icon adds the outgoing name here.
-pub const FLEET_TRAY_SURFACE_GENERATED_NAMES: &[&str] = &["Fleet usage", "Fleet usage (mono)"];
-/// Kept for the tests that exercise the first generation.
-#[cfg(test)]
-pub const FLEET_TRAY_SURFACE_LEGACY_NAME: &str = "Fleet usage";
+pub const FLEET_TRAY_SURFACE_GENERATED_NAMES: &[&str] =
+    &["Fleet usage", "Fleet usage (mono)", "Fleet usage (gauge)"];
 
 pub fn validate_mouse_action_script(
     source: &str,
@@ -1998,30 +1996,29 @@ impl ThemeDocument {
         changed
     }
 
+    /// Retire the generated tray surfaces from a saved theme.
+    ///
+    /// The tray icon is the application's own icon now, drawn by Windows from
+    /// a real multi-size `.ico`, so a theme no longer carries one. Saved
+    /// themes are user-owned copies that never follow the built-in, which is
+    /// why this has to run on load: without it an install keeps whatever
+    /// generation of drawn icon it last had, alongside the real one.
+    ///
+    /// Only generated surfaces go -- the per-provider row, and any fleet icon
+    /// still carrying a generated name. A tray surface the user renamed is
+    /// theirs and is left exactly where it is.
     pub fn migrate_tray_icons_to_fleet(&mut self) -> bool {
-        // A saved theme is a user-owned copy, so a fleet icon it already has
-        // is whatever generation it was given -- it does not follow the
-        // built-in. The generated name marks an untouched one; a surface the
-        // user renamed is theirs and is left alone.
         if let Some(index) = self
             .surfaces
             .iter()
             .position(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
         {
-            let outdated =
+            let generated =
                 FLEET_TRAY_SURFACE_GENERATED_NAMES.contains(&self.surfaces[index].name.as_str());
-            if !outdated {
+            if !generated {
                 return false;
             }
-            let starter = Self::starter();
-            let Some(fleet) = starter
-                .surfaces
-                .iter()
-                .find(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
-            else {
-                return false;
-            };
-            self.surfaces[index] = fleet.clone();
+            self.surfaces.remove(index);
             return true;
         }
         let generated: Vec<String> = PROVIDER_DESCRIPTORS
@@ -2037,14 +2034,6 @@ impl ThemeDocument {
         }
         self.surfaces
             .retain(|surface| !generated.contains(&surface.id));
-        let starter = Self::starter();
-        if let Some(fleet) = starter
-            .surfaces
-            .iter()
-            .find(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
-        {
-            self.surfaces.push(fleet.clone());
-        }
         true
     }
 

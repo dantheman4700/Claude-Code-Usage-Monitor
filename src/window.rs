@@ -641,7 +641,9 @@ mod tray_tooltip_tests {
 fn tray_icon_tooltip_from_state() -> String {
     let state = lock_state();
     match state.as_ref() {
-        Some(state) => state.language.strings().window_title.to_string(),
+        // `fleet_tray_tooltip` only reads the data it is handed, so calling it
+        // while the lock is held is fine.
+        Some(state) => fleet_tray_tooltip(state.data.as_ref()),
         None => "Claude Code Usage Monitor".to_string(),
     }
 }

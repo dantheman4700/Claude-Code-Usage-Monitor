@@ -999,12 +999,9 @@ fn starter_has_a_taskbar_widget_and_provider_tray_icons() {
         theme.surfaces[0].placement.reference.region,
         ReferenceRegion::SystemTray
     );
-    // One taskbar widget plus one fleet tray icon -- not one icon per provider.
-    assert_eq!(theme.surfaces.len(), 2);
-    assert_eq!(theme.surfaces[1].id, "fleet-tray-icon");
-    assert!(theme.surfaces[1..]
-        .iter()
-        .all(|surface| surface.placement.nest == SurfaceNest::TrayIcon));
+    // Just the taskbar widget. The tray icon is the application's own icon,
+    // drawn by Windows from the embedded .ico, not a themed surface.
+    assert_eq!(theme.surfaces.len(), 1);
     assert_eq!(
         theme.surfaces[0].mouse_events.as_ref().unwrap().right_click,
         "show_context_menu(\"classic-v1\")"
@@ -1016,12 +1013,6 @@ fn starter_has_a_taskbar_widget_and_provider_tray_icons() {
         theme.surfaces[0].mouse_events.as_ref().unwrap().click,
         "show_dashboard()"
     );
-    assert!(theme.surfaces[1..].iter().all(|surface| {
-        let events = surface.mouse_events.as_ref().unwrap();
-        events.click == "show_dashboard()"
-            && events.double_click.is_empty()
-            && events.right_click == "show_context_menu(\"classic-v1\")"
-    }));
 }
 
 #[test]
@@ -1033,9 +1024,6 @@ fn migrated_theme_is_writable_and_only_moves_the_taskbar_surface() {
     assert_eq!(theme.surfaces[0].placement.reference.display, 2);
     assert_eq!(theme.surfaces[0].placement.offset_x, -96);
     assert_eq!(theme.surfaces[0].render.0, "0");
-    assert!(theme.surfaces[1..]
-        .iter()
-        .all(|surface| surface.placement.nest == SurfaceNest::TrayIcon));
     assert!(theme.validate().is_empty());
 }
 
@@ -1046,24 +1034,6 @@ fn hidden_legacy_widget_creates_an_unplaced_hidden_copy() {
     assert_eq!(theme.surfaces[0].render.0, "0");
     assert_eq!(theme.surfaces[0].placement, classic.surfaces[0].placement);
     assert!(theme.validate().is_empty());
-}
-
-#[test]
-fn the_single_tray_icon_summarises_whatever_is_enabled() {
-    let theme = ThemeDocument::starter();
-    // There is one icon for the whole fleet rather than one per provider, so it
-    // renders whichever providers happen to be switched on.
-    for runtime in [
-        ThemeRuntime::new(true, false, false),
-        ThemeRuntime::new(false, true, false),
-        ThemeRuntime::new(true, true, true),
-    ] {
-        assert!(surface_should_render(&theme, 1, None, runtime));
-    }
-    let rendered =
-        render_theme_surface_with_runtime(&theme, 1, None, ThemeRuntime::new(false, true, false));
-    assert_eq!((rendered.width, rendered.height), (64, 64));
-    assert!(rendered.pixels.iter().any(|pixel| pixel >> 24 > 0));
 }
 
 #[test]
@@ -1364,39 +1334,6 @@ fn action_overrides_are_runtime_only_and_reset_restores_saved_expression() {
 }
 
 #[test]
-fn tray_root_can_toggle_the_main_root_on_another_surface() {
-    let mut theme = ThemeDocument::starter();
-    // Start from a visible root so the toggle below is the hide it asserts.
-    theme.surfaces[0].render = 1.0.into();
-    let tray_id = theme.surfaces[1].id.clone();
-    let click = "toggle(\"main\", render)".to_string();
-    let mut overrides = HashMap::new();
-    execute_mouse_actions(
-        &theme,
-        1,
-        &tray_id,
-        &click,
-        None,
-        ThemeRuntime::default(),
-        &mut overrides,
-    )
-    .unwrap();
-
-    let key = MouseActionOverrideKey {
-        surface_index: 0,
-        object_id: "main".into(),
-        property: MouseActionProperty::Render,
-    };
-    assert_eq!(overrides.get(&key).map(|value| value.0.as_str()), Some("0"));
-    assert!(!surface_should_render(
-        &apply_mouse_action_overrides(&theme, &overrides),
-        0,
-        None,
-        ThemeRuntime::default()
-    ));
-}
-
-#[test]
 fn increase_and_decrease_accumulate_from_the_effective_value() {
     let mut theme = ThemeDocument::starter();
     theme.id = "mouse-adjustments".into();
@@ -1622,68 +1559,6 @@ fn credit_badges_abbreviate_a_balance_too_wide_for_the_tray() {
     );
 }
 
-/// A saved theme is a user-owned copy that does not inherit built-in changes,
-/// so upgrading has to fold its old per-provider icon column into the single
-/// fleet icon or the icon the panel opens from never appears.
-#[test]
-fn a_saved_theme_folds_its_provider_tray_icons_into_the_fleet_icon() {
-    let mut theme = ThemeDocument::starter();
-    // Recreate the pre-fleet shape: one tray surface per provider, no fleet.
-    let fleet = theme
-        .surfaces
-        .iter()
-        .position(|surface| surface.id == "fleet-tray-icon")
-        .expect("the starter ships the fleet icon");
-    let template = theme.surfaces.remove(fleet);
-    for key in ["claude", "codex", "grok"] {
-        let mut surface = template.clone();
-        surface.id = format!("{key}-tray-icon");
-        theme.surfaces.push(surface);
-    }
-
-    assert!(theme.migrate_tray_icons_to_fleet());
-    let ids: Vec<&str> = theme.surfaces.iter().map(|s| s.id.as_str()).collect();
-    assert!(ids.contains(&"fleet-tray-icon"));
-    assert!(!ids.iter().any(|id| id.ends_with("-tray-icon") && *id != "fleet-tray-icon"));
-}
-
-/// Running twice must not duplicate the icon, and a theme that already has it
-/// is left alone.
-#[test]
-fn the_fleet_icon_migration_is_idempotent() {
-    let mut theme = ThemeDocument::starter();
-    assert!(!theme.migrate_tray_icons_to_fleet());
-    assert_eq!(
-        theme
-            .surfaces
-            .iter()
-            .filter(|surface| surface.id == "fleet-tray-icon")
-            .count(),
-        1
-    );
-}
-
-/// A tray surface the user named themselves is not a generated one, so it stays
-/// exactly where it is.
-#[test]
-fn the_migration_leaves_user_named_tray_surfaces_alone() {
-    let mut theme = ThemeDocument::starter();
-    let fleet = theme
-        .surfaces
-        .iter()
-        .position(|surface| surface.id == "fleet-tray-icon")
-        .expect("the starter ships the fleet icon");
-    let mut custom = theme.surfaces.remove(fleet);
-    custom.id = "my-own-tray-icon".into();
-    theme.surfaces.push(custom);
-
-    assert!(!theme.migrate_tray_icons_to_fleet());
-    assert!(theme
-        .surfaces
-        .iter()
-        .any(|surface| surface.id == "my-own-tray-icon"));
-}
-
 /// The bars on the taskbar are retired; the tray icon is the way in and the
 /// panel is where the numbers live. The widget ships hidden, and "Show widget"
 /// brings it back for anyone who wants it.
@@ -1692,8 +1567,6 @@ fn the_starter_ships_with_the_taskbar_widget_hidden() {
     let theme = ThemeDocument::starter();
     assert_eq!(theme.surfaces[0].placement.nest, SurfaceNest::Taskbar);
     assert!(!surface_should_render(&theme, 0, None, ThemeRuntime::default()));
-    // The tray icon is unaffected.
-    assert!(surface_should_render(&theme, 1, None, ThemeRuntime::default()));
 }
 
 #[test]
@@ -1704,42 +1577,101 @@ fn hiding_the_taskbar_widget_only_touches_taskbar_roots_and_reports_change() {
     assert_eq!(theme.surfaces[0].render.0, "0");
     // Already hidden: nothing to do, so a caller can skip the write.
     assert!(!theme.hide_taskbar_widget());
-    // The tray root keeps whatever it had.
-    assert_eq!(theme.surfaces[1].render.0, ThemeDocument::starter().surfaces[1].render.0);
 }
 
-/// The first generation of the fleet icon was orange. A saved theme still
-/// carrying that untouched icon is upgraded to the current one; a renamed one
-/// is the user's and stays.
+/// A tray-nested root, the shape the generated icons used to have.
+fn tray_surface(theme: &ThemeDocument, id: &str, name: &str) -> SceneObject {
+    let mut surface = theme.surfaces[0].clone();
+    surface.id = id.into();
+    surface.name = name.into();
+    surface.placement.nest = SurfaceNest::TrayIcon;
+    surface.render = 1.0.into();
+    surface.children.clear();
+    surface
+}
+
+/// The per-provider tray row from before the fleet icon is dropped outright:
+/// the tray icon is the application's own icon now.
 #[test]
-fn an_untouched_first_generation_fleet_icon_is_upgraded_in_place() {
+fn a_saved_theme_drops_its_generated_provider_tray_icons() {
     let mut theme = ThemeDocument::starter();
-    let index = theme
-        .surfaces
-        .iter()
-        .position(|surface| surface.id == "fleet-tray-icon")
-        .expect("the starter ships the fleet icon");
-    theme.surfaces[index].name = FLEET_TRAY_SURFACE_LEGACY_NAME.into();
-    theme.surfaces[index].children.clear();
+    for key in ["claude", "codex", "grok"] {
+        let surface = tray_surface(&theme, &format!("{key}-tray-icon"), "generated");
+        theme.surfaces.push(surface);
+    }
 
     assert!(theme.migrate_tray_icons_to_fleet());
-    assert_eq!(theme.surfaces[index].name, "Fleet usage (gauge)");
-    assert!(!theme.surfaces[index].children.is_empty());
-    // And it is not upgraded twice.
+    assert!(theme
+        .surfaces
+        .iter()
+        .all(|surface| !surface.id.ends_with("-tray-icon")));
+    // And there is nothing left to do on the next start.
     assert!(!theme.migrate_tray_icons_to_fleet());
 }
 
+/// Every generation of the drawn fleet icon is retired, whichever one a saved
+/// theme happened to stop at.
+#[test]
+fn every_generated_fleet_icon_generation_is_retired() {
+    for name in FLEET_TRAY_SURFACE_GENERATED_NAMES {
+        let mut theme = ThemeDocument::starter();
+        let surface = tray_surface(&theme, FLEET_TRAY_SURFACE_ID, name);
+        theme.surfaces.push(surface);
+
+        assert!(theme.migrate_tray_icons_to_fleet(), "{name}");
+        assert!(theme
+            .surfaces
+            .iter()
+            .all(|surface| surface.id != FLEET_TRAY_SURFACE_ID));
+        assert!(!theme.migrate_tray_icons_to_fleet());
+    }
+}
+
+/// A tray surface the user renamed is theirs and stays.
 #[test]
 fn a_renamed_fleet_icon_is_left_alone() {
     let mut theme = ThemeDocument::starter();
-    let index = theme
-        .surfaces
-        .iter()
-        .position(|surface| surface.id == "fleet-tray-icon")
-        .expect("the starter ships the fleet icon");
-    theme.surfaces[index].name = "Danny's icon".into();
-    theme.surfaces[index].children.clear();
+    let surface = tray_surface(&theme, FLEET_TRAY_SURFACE_ID, "Danny's icon");
+    theme.surfaces.push(surface);
 
     assert!(!theme.migrate_tray_icons_to_fleet());
-    assert!(theme.surfaces[index].children.is_empty());
+    assert!(theme
+        .surfaces
+        .iter()
+        .any(|surface| surface.id == FLEET_TRAY_SURFACE_ID));
+}
+
+#[test]
+fn tray_root_can_toggle_the_main_root_on_another_surface() {
+    let mut theme = ThemeDocument::starter();
+    // Start from a visible root so the toggle below is the hide it asserts.
+    theme.surfaces[0].render = 1.0.into();
+    let tray = tray_surface(&theme, "tray", "Tray");
+    let tray_id = tray.id.clone();
+    theme.surfaces.push(tray);
+    let click = "toggle(\"main\", render)".to_string();
+    let mut overrides = HashMap::new();
+    execute_mouse_actions(
+        &theme,
+        1,
+        &tray_id,
+        &click,
+        None,
+        ThemeRuntime::default(),
+        &mut overrides,
+    )
+    .unwrap();
+
+    let key = MouseActionOverrideKey {
+        surface_index: 0,
+        object_id: "main".into(),
+        property: MouseActionProperty::Render,
+    };
+    assert_eq!(overrides.get(&key).map(|value| value.0.as_str()), Some("0"));
+    assert!(!surface_should_render(
+        &apply_mouse_action_overrides(&theme, &overrides),
+        0,
+        None,
+        ThemeRuntime::default()
+    ));
 }
