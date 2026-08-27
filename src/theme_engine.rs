@@ -1355,11 +1355,17 @@ fn fleet_summary(
             continue;
         };
         let score = |usage: &crate::models::UsageData| {
+            let scoped = usage
+                .scoped
+                .iter()
+                .map(|scoped| scoped.section.percentage)
+                .fold(0.0_f64, f64::max);
             usage
                 .credits
                 .as_ref()
                 .map(|credits| credits.percentage)
                 .unwrap_or_else(|| usage.session.percentage.max(usage.weekly.percentage))
+                .max(scoped)
         };
         if worst.as_ref().is_none_or(|held| score(usage) > score(held)) {
             worst = Some(usage.clone());

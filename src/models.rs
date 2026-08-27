@@ -53,6 +53,19 @@ pub struct UsageData {
     /// fixed schema, so these are labelled values the panel lists as given.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<Detail>,
+    /// Extra caps that sit beside the plan-wide windows -- a per-model weekly
+    /// limit, say. They are limits in their own right, not a replacement for
+    /// `weekly`: an account can be at 48% plan-wide and 75% on one model, and
+    /// both numbers are true at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped: Vec<ScopedLimit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScopedLimit {
+    /// What the cap applies to, as the provider names it ("Fable").
+    pub label: String,
+    pub section: UsageSection,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

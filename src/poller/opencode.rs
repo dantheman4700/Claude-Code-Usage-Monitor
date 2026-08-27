@@ -95,6 +95,7 @@ fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollE
         stale: false,
         plan: None,
         details: Vec::new(),
+        scoped: Vec::new(),
     })
 }
 

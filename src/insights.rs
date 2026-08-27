@@ -214,6 +214,17 @@ pub fn collect_constraints(
                 severity: Severity::of(usage.weekly.percentage, thresholds),
             });
         }
+        for scoped in &usage.scoped {
+            constraints.push(Constraint {
+                provider,
+                window: Window::Weekly,
+                percentage: scoped.section.percentage,
+                resets_at: scoped.section.resets_at,
+                scope: Some(scoped.label.clone()),
+                stale: usage.stale,
+                severity: Severity::of(scoped.section.percentage, thresholds),
+            });
+        }
         if let Some(monthly) = &usage.monthly {
             constraints.push(Constraint {
                 provider,
@@ -657,5 +668,40 @@ mod tests {
             .expect("Fireworks coupling");
         assert_eq!(coupling.severity, Severity::Critical);
         assert!(coupling.seats.len() >= 3);
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+    use crate::models::{ScopedLimit, UsageData, UsageSection};
+
+    /// A per-model cap is a limit in its own right: it ranks alongside the
+    /// plan-wide windows and, being the tightest, it is the one that binds.
+    #[test]
+    fn a_scoped_cap_is_a_constraint_beside_the_plan_wide_one() {
+        let mut data = AppUsageData::default();
+        data.insert(
+            ProviderId::Claude,
+            UsageData {
+                session: UsageSection { percentage: 23.0, resets_at: None },
+                weekly: UsageSection { percentage: 48.0, resets_at: None },
+                scoped: vec![ScopedLimit {
+                    label: "Fable".into(),
+                    section: UsageSection { percentage: 75.0, resets_at: None },
+                }],
+                ..Default::default()
+            },
+        );
+        let constraints = collect_constraints(
+            &data,
+            ProviderSet::from_enabled([ProviderId::Claude]),
+            Thresholds::default(),
+        );
+        assert_eq!(constraints.len(), 3);
+        assert_eq!(constraints[0].scope.as_deref(), Some("Fable"));
+        assert_eq!(constraints[0].percentage, 75.0);
+        assert_eq!(constraints[1].percentage, 48.0);
+        assert_eq!(constraints[1].scope, None);
     }
 }

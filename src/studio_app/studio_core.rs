@@ -91,6 +91,8 @@ impl StudioApp {
             usage_history,
             fleet_insights: None,
             activity,
+            fleet_expanded: Default::default(),
+            studio_nav_open: false,
             usage_poll_ok,
             usage_has_error,
             last_cache_read: Instant::now(),
@@ -784,26 +786,55 @@ impl StudioApp {
                         })
                         .show(ui, |ui| {
                             ui.set_width(DEFAULT_MENU_WIDTH - 16.0);
-                            nav(ui, &mut self.page, Page::Fleet, language.text("Fleet"));
+                            nav(ui, &mut self.page, Page::Fleet, language.text("Dashboard"));
+                            nav(ui, &mut self.page, Page::Routing, language.text("Routing"));
+                            nav(ui, &mut self.page, Page::Activity, language.text("Activity"));
                             nav(
                                 ui,
                                 &mut self.page,
                                 Page::Settings,
                                 language.text("Settings"),
                             );
-                            nav(
-                                ui,
-                                &mut self.page,
-                                Page::Studio,
-                                language.text("Theme Studio"),
+                            // The theme studio stays reachable, one level down.
+                            let on_studio_page = matches!(
+                                self.page,
+                                Page::Studio | Page::ContextMenus | Page::Assets
                             );
-                            nav(
-                                ui,
-                                &mut self.page,
-                                Page::ContextMenus,
-                                language.text("Context Menus"),
+                            let open = self.studio_nav_open || on_studio_page;
+                            ui.add_space(10.0);
+                            let label = format!(
+                                "{}  {}",
+                                if open { "▾" } else { "▸" },
+                                language.text("Theme studio")
                             );
-                            nav(ui, &mut self.page, Page::Assets, language.text("Assets"));
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(label)
+                                            .size(13.0)
+                                            .color(crate::ui::theme::muted()),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                self.studio_nav_open = !open;
+                            }
+                            if open {
+                                nav(
+                                    ui,
+                                    &mut self.page,
+                                    Page::Studio,
+                                    language.text("Theme Studio"),
+                                );
+                                nav(
+                                    ui,
+                                    &mut self.page,
+                                    Page::ContextMenus,
+                                    language.text("Context Menus"),
+                                );
+                                nav(ui, &mut self.page, Page::Assets, language.text("Assets"));
+                            }
                         });
                 },
             );
@@ -839,6 +870,8 @@ impl StudioApp {
                     }
                     match self.page {
                         Page::Fleet => self.fleet_page(ui),
+                        Page::Routing => self.routing_page(ui),
+                        Page::Activity => self.activity_page(ui),
                         Page::Settings => self.settings_page(ui),
                         Page::Studio => self.studio_page(ui),
                         Page::ContextMenus => self.context_menus_page(ui),

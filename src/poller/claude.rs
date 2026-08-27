@@ -10,7 +10,7 @@ use super::{
     build_agent, get_header_f64, get_header_i64, parse_iso8601, unix_to_system_time, PollError,
 };
 use crate::diagnose;
-use crate::models::{CreditsSection, Detail, UsageData};
+use crate::models::{CreditsSection, Detail, ScopedLimit, UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -213,25 +213,39 @@ fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
     // A plan can carry several caps for one window, and the account is
     // throttled by whichever fills first, which is not necessarily the
     // plan-wide row that `five_hour` and `seven_day` report.
-    if let Some(entry) = binding_limit(&response.limits, "session") {
+    if let Some(entry) = response
+        .limits
+        .iter()
+        .find(|entry| entry.group.as_deref() == Some("session"))
+    {
         data.session.percentage = entry.percent;
         if let Some(resets_at) = parse_iso8601(entry.resets_at.as_deref()) {
             data.session.resets_at = Some(resets_at);
         }
     }
 
-    if let Some(entry) = binding_limit(&response.limits, "weekly") {
-        data.weekly.percentage = entry.percent;
-        if let Some(resets_at) = parse_iso8601(entry.resets_at.as_deref()) {
-            data.weekly.resets_at = Some(resets_at);
-        }
-        // Name the model when a per-model cap is the one biting, so the bar
-        // is not silently misread as the plan-wide weekly figure.
-        data.weekly_label = entry
+    // The weekly rows split into the plan-wide cap and per-model caps. They
+    // are separate limits and both hold at once, so the plan-wide one stays in
+    // `weekly` and each per-model one becomes its own scoped row rather than
+    // the tightest overwriting the bar.
+    for entry in response
+        .limits
+        .iter()
+        .filter(|entry| entry.group.as_deref() == Some("weekly"))
+    {
+        let model = entry
             .scope
             .as_ref()
             .and_then(|scope| scope.model.as_ref())
             .and_then(|model| model.display_name.clone());
+        let section = UsageSection {
+            percentage: entry.percent,
+            resets_at: parse_iso8601(entry.resets_at.as_deref()).or(data.weekly.resets_at),
+        };
+        match model {
+            Some(label) => data.scoped.push(ScopedLimit { label, section }),
+            None => data.weekly = section,
+        }
     }
 
     data.credits = response
@@ -260,18 +274,6 @@ fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
     }
 
     data
-}
-
-/// The row that actually constrains `group`.
-///
-/// Several caps can share a window, and the binding one is the fullest: it is
-/// what the account hits first. Reporting anything lower would tell the user
-/// they have room they do not have, so ties and unknowns resolve upward.
-fn binding_limit<'a>(limits: &'a [LimitEntry], group: &str) -> Option<&'a LimitEntry> {
-    limits
-        .iter()
-        .filter(|entry| entry.group.as_deref() == Some(group))
-        .max_by(|a, b| a.percent.total_cmp(&b.percent))
 }
 
 /// What a failed call to the usage endpoint actually tells us.
@@ -993,7 +995,7 @@ mod tests {
     /// cap the account actually hits first. Reporting `seven_day` there would
     /// tell the user they have headroom they do not have.
     #[test]
-    fn a_scoped_weekly_cap_outranks_the_plan_wide_one() {
+    fn a_scoped_weekly_cap_is_its_own_row_beside_the_plan_wide_one() {
         let data = usage_from_json(
             r#"{
                 "five_hour": {"utilization": 23.0, "resets_at": null},
@@ -1011,8 +1013,11 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(data.weekly.percentage, 75.0);
-        assert_eq!(data.weekly_label.as_deref(), Some("Fable"));
+        assert_eq!(data.weekly.percentage, 48.0, "plan-wide weekly is kept");
+        assert_eq!(data.weekly_label, None);
+        assert_eq!(data.scoped.len(), 1);
+        assert_eq!(data.scoped[0].label, "Fable");
+        assert_eq!(data.scoped[0].section.percentage, 75.0);
         assert_eq!(data.session.percentage, 23.0);
     }
 
@@ -1045,5 +1050,6 @@ mod tests {
 
         assert_eq!(data.weekly.percentage, 60.0);
         assert_eq!(data.weekly_label, None);
+        assert!(data.scoped.is_empty());
     }
 }

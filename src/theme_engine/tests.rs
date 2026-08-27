@@ -312,6 +312,7 @@ fn usage_lines_handle_loading_errors_missing_resets_and_language() {
             stale: false,
             plan: None,
             details: Vec::new(),
+            scoped: Vec::new(),
         },
     )]);
     let ready = DataContext::from_usage_with_runtime(
@@ -490,6 +491,7 @@ fn reset_stats_and_duration_formats_are_available_to_every_provider() {
             stale: false,
             plan: None,
             details: Vec::new(),
+            scoped: Vec::new(),
         },
     )]);
     let context = DataContext::from_usage(Some(&usage), &Canvas::default());

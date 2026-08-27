@@ -1,9 +1,10 @@
-//! The fleet page: every provider's limits, and what they mean together.
+//! The dashboard, and the two pages that hang off it.
 //!
-//! The tray icon shows one number. This page answers the questions that need
-//! more than one -- which cap bites first, whether a window runs dry before it
-//! renews, where there is still room, which seats share an account -- and
-//! keeps enough history and activity to see how it got that way.
+//! The dashboard is one screen: what is closest to running out, then every
+//! provider as a card, the ones that are reporting first and the tightest at
+//! the top. A card opens into its detail -- plan extras, history, burn rate,
+//! and the conductor seats its account backs. Routing (where the next job can
+//! go) and Activity (what changed) are their own pages.
 
 use super::*;
 
@@ -11,46 +12,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::activity_log::{ActivityEvent, EventKind};
 use crate::insights::{self, Constraint, Headroom, Insights, Projection, Severity, Thresholds};
-use crate::models::UsageData;
+use crate::models::{AppUsageData, UsageData};
 use crate::providers::{ProviderId, ProviderSet};
 use crate::ui::theme::{accent, danger, muted, section_border, section_surface, success, sweep, warning};
 use crate::usage_history::Reading;
 
-const METER_WIDTH: f32 = 170.0;
+const METER_WIDTH: f32 = 190.0;
 const METER_HEIGHT: f32 = 10.0;
-const SPARK_WIDTH: f32 = 170.0;
-const SPARK_HEIGHT: f32 = 26.0;
-const LABEL_COLUMN: f32 = 72.0;
-const ACTIVITY_ROWS: usize = 25;
-
+const SPARK_WIDTH: f32 = 190.0;
+const SPARK_HEIGHT: f32 = 28.0;
+const LABEL_COLUMN: f32 = 84.0;
+const ACTIVITY_ROWS: usize = 100;
 
 impl StudioApp {
-    pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
-        let language = self.language();
+    fn dashboard_inputs(&mut self) -> Option<(AppUsageData, Insights, Thresholds, SystemTime)> {
         let now = SystemTime::now();
         let thresholds = Thresholds::from_settings(&self.settings);
         let enabled = ProviderSet::from_enabled(ProviderId::ALL);
-
-        let Some(usage) = self.usage.clone() else {
-            settings_scroll_area(ui, |ui| {
-                ui.add_space(24.0);
-                ui.label(
-                    egui::RichText::new(language.text("No usage has been collected yet"))
-                        .size(16.0)
-                        .color(muted()),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        language.text("Readings appear here after the first successful poll."),
-                    )
-                    .color(muted()),
-                );
-                self.fleet_activity(ui, now);
-            });
-            return;
-        };
-
+        let usage = self.usage.clone()?;
         // Analysing walks the whole history per provider, and egui repaints
         // continuously, so the result is kept until the reading, thresholds
         // or provider set change.
@@ -70,242 +49,308 @@ impl StudioApp {
         let insights = self
             .fleet_insights
             .as_ref()
-            .map(|(_, _, insights)| insights.clone())
-            .expect("insights were just computed");
-
-        settings_scroll_area(ui, |ui| {
-            self.fleet_headline(ui, &insights, now);
-            self.fleet_provider_cards(ui, &usage, &insights, now, thresholds);
-            self.fleet_routing(ui, &insights, now);
-            self.fleet_couplings(ui, &insights);
-            self.fleet_activity(ui, now);
-        });
+            .map(|(_, _, insights)| insights.clone())?;
+        Some((usage, insights, thresholds, now))
     }
 
-    /// The one sentence worth reading first.
-    fn fleet_headline(&self, ui: &mut egui::Ui, insights: &Insights, now: SystemTime) {
+    fn nothing_yet(&self, ui: &mut egui::Ui) {
         let language = self.language();
-        section(ui, language.text("Right now"), |ui| match &insights.binding {
-            Some(binding) if binding.severity() != Severity::Normal => {
-                let colour = severity_colour(binding.severity());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new(constraint_title(binding))
-                            .size(18.0)
-                            .strong()
-                            .color(colour),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("{:.0}%", binding.percentage))
-                            .size(18.0)
-                            .strong()
-                            .color(colour),
-                    );
-                });
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(reset_phrase(binding.resets_at, now)).color(muted()));
-                // The seats are why this matters: it is a row of the ladder
-                // going down, not one model being slow.
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Affects {}",
-                        insights::seats_for(binding.provider).join(", ")
-                    ))
-                    .color(muted())
-                    .size(11.0),
-                );
-            }
-            Some(binding) => {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Nothing is tight. Highest is {} at {:.0}%.",
-                        constraint_title(binding),
-                        binding.percentage
-                    ))
-                    .size(15.0)
-                    .color(success()),
-                );
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new(language.text("No limits are being reported."))
-                        .color(muted()),
-                );
-            }
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new(language.text("No usage has been collected yet"))
+                .size(16.0)
+                .color(muted()),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(language.text("Readings appear here after the first successful poll."))
+                .color(muted()),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Dashboard
+    // ------------------------------------------------------------------
+
+    pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
+        let Some((usage, insights, thresholds, now)) = self.dashboard_inputs() else {
+            settings_scroll_area(ui, |ui| self.nothing_yet(ui));
+            return;
+        };
+        settings_scroll_area(ui, |ui| {
+            headline(ui, &insights, now, self.language());
+            self.provider_cards(ui, &usage, &insights, now, thresholds);
         });
     }
 
-    fn fleet_provider_cards(
-        &self,
+    fn provider_cards(
+        &mut self,
         ui: &mut egui::Ui,
-        usage: &crate::models::AppUsageData,
+        usage: &AppUsageData,
         insights: &Insights,
         now: SystemTime,
         thresholds: Thresholds,
     ) {
         let language = self.language();
-        section(ui, language.text("Providers"), |ui| {
-            let mut drew_any = false;
-            for descriptor in PROVIDER_DESCRIPTORS {
-                let reading = usage.get(descriptor.id);
-                if reading.is_none() && !self.settings.show_unreachable_providers {
-                    continue;
-                }
-                drew_any = true;
-                let constraints: Vec<&Constraint> = insights
+        let show_unreachable = self.settings.show_unreachable_providers;
+
+        // Reporting providers first, tightest at the top; the rest below.
+        let mut order: Vec<(ProviderId, bool, Severity, f64)> = ProviderId::ALL
+            .into_iter()
+            .map(|provider| {
+                let reporting = usage.get(provider).is_some();
+                let rows: Vec<&Constraint> = insights
                     .constraints
                     .iter()
-                    .filter(|constraint| constraint.provider == descriptor.id)
+                    .filter(|constraint| constraint.provider == provider)
                     .collect();
-                let series = self.usage_history.series(descriptor.id);
-                provider_card(
-                    ui,
-                    language.text(descriptor.display_name),
-                    reading,
-                    &constraints,
-                    &series,
-                    now,
-                    thresholds,
-                    language,
+                let worst = rows.iter().map(|c| c.severity()).max().unwrap_or(Severity::Normal);
+                let peak = rows.iter().map(|c| c.percentage).fold(0.0_f64, f64::max);
+                (provider, reporting, worst, peak)
+            })
+            .collect();
+        order.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(b.2.cmp(&a.2))
+                .then(b.3.total_cmp(&a.3))
+                .then(a.0.cmp(&b.0))
+        });
+
+        ui.add_space(4.0);
+        let mut drew_any = false;
+        for (provider, reporting, _, _) in order {
+            if !reporting && !show_unreachable {
+                continue;
+            }
+            drew_any = true;
+            let reading = usage.get(provider);
+            let rows: Vec<&Constraint> = insights
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.provider == provider)
+                .collect();
+            let expanded = self.fleet_expanded.contains(&provider);
+            let toggled = provider_card(
+                ui,
+                provider,
+                reading,
+                &rows,
+                expanded,
+                &self.usage_history.series(provider),
+                insights,
+                now,
+                thresholds,
+                language,
+            );
+            if toggled {
+                if expanded {
+                    self.fleet_expanded.remove(&provider);
+                } else {
+                    self.fleet_expanded.insert(provider);
+                }
+            }
+            ui.add_space(8.0);
+        }
+        if !drew_any {
+            ui.label(egui::RichText::new(language.text("Nothing is reporting.")).color(muted()));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Routing
+    // ------------------------------------------------------------------
+
+    pub(super) fn routing_page(&mut self, ui: &mut egui::Ui) {
+        let Some((_, insights, _, now)) = self.dashboard_inputs() else {
+            settings_scroll_area(ui, |ui| self.nothing_yet(ui));
+            return;
+        };
+        let language = self.language();
+        let show_unreachable = self.settings.show_unreachable_providers;
+        settings_scroll_area(ui, |ui| {
+            section(ui, language.text("Where to route next"), |ui| {
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "Ranked by the room left on each provider's tightest window. A provider is only as free as its worst cap.",
+                    ))
+                    .color(muted())
+                    .size(11.0),
                 );
                 ui.add_space(8.0);
-            }
-            if !drew_any {
-                ui.label(
-                    egui::RichText::new(language.text("Nothing is reporting."))
-                        .color(muted()),
-                );
-            }
-        });
-    }
+                let rows: Vec<&Headroom> = insights
+                    .headroom
+                    .iter()
+                    .filter(|headroom| headroom.available || show_unreachable)
+                    .collect();
+                if rows.is_empty() {
+                    ui.label(egui::RichText::new(language.text("Nothing to rank.")).color(muted()));
+                }
+                for (rank, headroom) in rows.iter().enumerate() {
+                    let projection = insights
+                        .projections
+                        .iter()
+                        .filter(|projection| projection.provider == headroom.provider)
+                        .max_by(|a, b| a.percent_per_hour.total_cmp(&b.percent_per_hour));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}.", rank + 1))
+                                .color(muted())
+                                .monospace(),
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(104.0, 18.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(language.text(provider_name(headroom.provider)))
+                                        .strong(),
+                                );
+                            },
+                        );
+                        if !headroom.available {
+                            ui.label(
+                                egui::RichText::new(language.text("unreachable"))
+                                    .color(muted())
+                                    .italics(),
+                            );
+                            return;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}% free", headroom.percent_free))
+                                .strong()
+                                .color(headroom_colour(headroom)),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("via {}", headroom.limiting_window.label()))
+                                .color(muted())
+                                .size(11.0),
+                        );
+                        if let Some(projection) = projection {
+                            projection_label(ui, projection, now, language);
+                        }
+                    });
+                }
+            });
 
-    /// Where the next job can go, and whether anything runs dry first.
-    fn fleet_routing(&self, ui: &mut egui::Ui, insights: &Insights, now: SystemTime) {
-        let language = self.language();
-        section(ui, language.text("Routing"), |ui| {
-            let rows: Vec<&Headroom> = insights
-                .headroom
-                .iter()
-                .filter(|headroom| headroom.available || self.settings.show_unreachable_providers)
-                .collect();
-            if rows.is_empty() {
-                ui.label(egui::RichText::new(language.text("Nothing to rank.")).color(muted()));
-                return;
-            }
-            for (rank, headroom) in rows.iter().enumerate() {
-                let projection = insights
+            section(ui, language.text("Burn rate"), |ui| {
+                let mut projections: Vec<&Projection> = insights
                     .projections
                     .iter()
-                    .filter(|projection| projection.provider == headroom.provider)
-                    .max_by(|a, b| a.percent_per_hour.total_cmp(&b.percent_per_hour));
-                ui.horizontal_wrapped(|ui| {
+                    .filter(|projection| projection.percent_per_hour > 0.0)
+                    .collect();
+                projections.sort_by(|a, b| b.percent_per_hour.total_cmp(&a.percent_per_hour));
+                if projections.is_empty() {
                     ui.label(
-                        egui::RichText::new(format!("{}.", rank + 1))
-                            .color(muted())
-                            .monospace(),
+                        egui::RichText::new(language.text("Not enough history yet to measure a rate."))
+                            .color(muted()),
                     );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(96.0, 18.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(language.text(provider_name(headroom.provider)))
-                                    .strong(),
-                            );
-                        },
-                    );
-                    if !headroom.available {
-                        ui.label(
-                            egui::RichText::new(language.text("unreachable"))
-                                .color(muted())
-                                .italics(),
+                }
+                for projection in projections {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(104.0, 18.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(language.text(provider_name(projection.provider)));
+                            },
                         );
-                        return;
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("{:.0}% free", headroom.percent_free))
-                            .strong()
-                            .color(headroom_colour(headroom)),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("via {}", headroom.limiting_window.label()))
-                            .color(muted())
-                            .size(11.0),
-                    );
-                    if let Some(projection) = projection {
                         projection_label(ui, projection, now, language);
-                    }
-                });
-            }
+                    });
+                }
+            });
         });
     }
 
-    /// Which seats go down together, because they bill to one account.
-    fn fleet_couplings(&self, ui: &mut egui::Ui, insights: &Insights) {
-        let language = self.language();
-        section(ui, language.text("Shared limits"), |ui| {
-            ui.label(
-                egui::RichText::new(language.text(
-                    "Seats in a row share one account, so its limit takes all of them at once.",
-                ))
-                .color(muted())
-                .size(11.0),
-            );
-            ui.add_space(6.0);
-            for coupling in &insights.couplings {
-                ui.horizontal_wrapped(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(96.0, 18.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(language.text(provider_name(coupling.provider)))
-                                    .strong()
-                                    .color(severity_colour(coupling.severity)),
-                            );
-                        },
-                    );
-                    ui.label(
-                        egui::RichText::new(coupling.seats.join("  "))
-                            .color(muted())
-                            .monospace()
-                            .size(11.0),
-                    );
-                });
-            }
-        });
-    }
+    // ------------------------------------------------------------------
+    // Activity
+    // ------------------------------------------------------------------
 
-    /// What changed, newest first.
-    fn fleet_activity(&self, ui: &mut egui::Ui, now: SystemTime) {
+    pub(super) fn activity_page(&mut self, ui: &mut egui::Ui) {
         let language = self.language();
-        section(ui, language.text("Activity"), |ui| {
-            let mut any = false;
-            for event in self.activity.recent(ACTIVITY_ROWS) {
-                any = true;
-                activity_row(ui, event, now, language);
-            }
-            if !any {
+        let now = SystemTime::now();
+        settings_scroll_area(ui, |ui| {
+            section(ui, language.text("Activity"), |ui| {
                 ui.label(
-                    egui::RichText::new(language.text("Nothing has happened yet."))
-                        .color(muted()),
+                    egui::RichText::new(language.text(
+                        "Only changes are recorded: a provider coming online, going dark, rejecting its credentials, a refresh, a migration.",
+                    ))
+                    .color(muted())
+                    .size(11.0),
                 );
-            }
+                ui.add_space(8.0);
+                let mut any = false;
+                for event in self.activity.recent(ACTIVITY_ROWS) {
+                    any = true;
+                    activity_row(ui, event, now, language);
+                }
+                if !any {
+                    ui.label(
+                        egui::RichText::new(language.text("Nothing has happened yet."))
+                            .color(muted()),
+                    );
+                }
+            });
         });
     }
 }
 
+// ----------------------------------------------------------------------
+// Pieces
+// ----------------------------------------------------------------------
+
+/// The one line worth reading first.
+fn headline(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: LanguageId) {
+    section(ui, language.text("Right now"), |ui| match &insights.binding {
+        Some(binding) if binding.severity() != Severity::Normal => {
+            let colour = severity_colour(binding.severity());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(constraint_title(binding))
+                        .size(18.0)
+                        .strong()
+                        .color(colour),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{:.0}%", binding.percentage))
+                        .size(18.0)
+                        .strong()
+                        .color(colour),
+                );
+                ui.label(egui::RichText::new(reset_phrase(binding.resets_at, now)).color(muted()));
+            });
+        }
+        Some(binding) => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Nothing is tight. Highest is {} at {:.0}%.",
+                    constraint_title(binding),
+                    binding.percentage
+                ))
+                .size(15.0)
+                .color(success()),
+            );
+        }
+        None => {
+            ui.label(egui::RichText::new(language.text("No limits are being reported.")).color(muted()));
+        }
+    });
+}
+
+/// One provider. Returns whether the header was clicked to open or close it.
 #[allow(clippy::too_many_arguments)]
 fn provider_card(
     ui: &mut egui::Ui,
-    name: &str,
+    provider: ProviderId,
     reading: Option<&UsageData>,
-    constraints: &[&Constraint],
+    rows: &[&Constraint],
+    expanded: bool,
     series: &[(u64, Reading)],
+    insights: &Insights,
     now: SystemTime,
     thresholds: Thresholds,
     language: LanguageId,
-) {
+) -> bool {
+    let mut toggled = false;
     egui::Frame::new()
         .fill(section_surface())
         .stroke(egui::Stroke::new(1.0, section_border()))
@@ -314,16 +359,33 @@ fn provider_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // Header: name, plan, and a status chip on the right.
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(name).size(15.0).strong());
+            // Header: chevron, name, plan, status chip. The whole row opens
+            // the detail.
+            let header = ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(if expanded { "▾" } else { "▸" })
+                        .color(muted())
+                        .size(13.0),
+                );
+                ui.label(
+                    egui::RichText::new(language.text(provider_name(provider)))
+                        .size(15.0)
+                        .strong(),
+                );
                 if let Some(plan) = reading.and_then(|usage| usage.plan.as_deref()) {
                     ui.label(egui::RichText::new(plan).color(muted()));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    status_chip(ui, reading, constraints, language);
+                    status_chip(ui, reading, rows, language);
                 });
             });
+            let header = header.response.interact(egui::Sense::click());
+            if header.clicked() {
+                toggled = true;
+            }
+            if header.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
 
             let Some(reading) = reading else {
                 ui.label(
@@ -334,101 +396,131 @@ fn provider_card(
                 return;
             };
 
+            // The limits themselves: every window the provider bills, one
+            // row each. A per-model cap is its own row beside the plan-wide
+            // one, not a replacement for it.
             ui.add_space(6.0);
-            if constraints.is_empty() {
+            if rows.is_empty() {
                 ui.label(
                     egui::RichText::new(language.text("Reporting, with nothing metered yet."))
                         .color(muted())
                         .size(11.0),
                 );
             }
-            for constraint in constraints {
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(LABEL_COLUMN, 16.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(window_caption(constraint))
-                                    .color(muted())
-                                    .size(11.0),
-                            );
-                        },
-                    );
-                    meter(ui, constraint.percentage, constraint.severity(), thresholds);
-                    ui.label(
-                        egui::RichText::new(format!("{:>3.0}%", constraint.percentage))
-                            .monospace()
-                            .strong()
-                            .color(severity_colour(constraint.severity())),
-                    );
-                    if let Some(resets_at) = constraint.resets_at {
-                        ui.label(
-                            egui::RichText::new(reset_phrase(Some(resets_at), now))
-                                .color(muted())
-                                .size(11.0),
-                        );
-                    }
-                });
+            for row in rows {
+                limit_row(ui, row, now, thresholds);
             }
 
-            // Anything the provider said that is not a gauge.
+            if !expanded {
+                return;
+            }
+
+            // ---- detail ----
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
             if !reading.details.is_empty() {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    for detail in &reading.details {
-                        ui.label(
-                            egui::RichText::new(format!("{} {}", detail.label, detail.value))
-                                .color(muted())
-                                .size(11.0),
-                        );
-                    }
+                detail_line(ui, language.text("plan"), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        for detail in &reading.details {
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", detail.label, detail.value))
+                                    .size(12.0),
+                            );
+                        }
+                    });
                 });
             }
 
-            // A week of the weekly window, when there is enough to draw.
-            if series.len() >= 2 {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(LABEL_COLUMN, SPARK_HEIGHT),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(language.text("history"))
-                                    .color(muted())
-                                    .size(11.0),
-                            );
-                        },
+            let projection = insights
+                .projections
+                .iter()
+                .filter(|projection| projection.provider == provider)
+                .max_by(|a, b| a.percent_per_hour.total_cmp(&b.percent_per_hour));
+            detail_line(ui, language.text("burn rate"), |ui| match projection {
+                Some(projection) => projection_label(ui, projection, now, language),
+                None => {
+                    ui.label(
+                        egui::RichText::new(language.text("not enough history yet"))
+                            .color(muted())
+                            .size(12.0),
                     );
-                    sparkline(ui, series, thresholds);
-                });
+                }
+            });
+
+            if series.len() >= 2 {
+                detail_line(ui, language.text("history"), |ui| sparkline(ui, series, thresholds));
             }
+
+            // Which conductor seats this account backs -- so a cap here reads
+            // as "these seats go down", not "one model is slow".
+            let seats = insights::seats_for(provider);
+            detail_line(ui, language.text("backs"), |ui| {
+                ui.label(
+                    egui::RichText::new(seats.join("   "))
+                        .monospace()
+                        .size(11.5)
+                        .color(muted()),
+                );
+            });
         });
+    toggled
 }
 
-fn status_chip(
-    ui: &mut egui::Ui,
-    reading: Option<&UsageData>,
-    constraints: &[&Constraint],
-    language: LanguageId,
-) {
+fn detail_line(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL_COLUMN, 18.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(label).color(muted()).size(11.0));
+            },
+        );
+        body(ui);
+    });
+    ui.add_space(2.0);
+}
+
+fn limit_row(ui: &mut egui::Ui, row: &Constraint, now: SystemTime, thresholds: Thresholds) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL_COLUMN, 16.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(window_caption(row)).color(muted()).size(11.0));
+            },
+        );
+        meter(ui, row.percentage, row.severity(), thresholds);
+        ui.label(
+            egui::RichText::new(format!("{:>3.0}%", row.percentage))
+                .monospace()
+                .strong()
+                .color(severity_colour(row.severity())),
+        );
+        if let Some(resets_at) = row.resets_at {
+            ui.label(
+                egui::RichText::new(reset_phrase(Some(resets_at), now))
+                    .color(muted())
+                    .size(11.0),
+            );
+        }
+        if row.stale {
+            ui.label(egui::RichText::new("stale").color(muted()).italics().size(11.0));
+        }
+    });
+}
+
+fn status_chip(ui: &mut egui::Ui, reading: Option<&UsageData>, rows: &[&Constraint], language: LanguageId) {
     let (text, colour) = match reading {
         None => (language.text("unreachable"), muted()),
         Some(usage) if usage.stale => (language.text("stale"), muted()),
-        Some(_) => {
-            let worst = constraints
-                .iter()
-                .map(|constraint| constraint.severity())
-                .max()
-                .unwrap_or(Severity::Normal);
-            match worst {
-                Severity::Critical => (language.text("critical"), danger()),
-                Severity::Warning => (language.text("warning"), warning()),
-                Severity::Normal => (language.text("ok"), success()),
-            }
-        }
+        Some(_) => match rows.iter().map(|c| c.severity()).max().unwrap_or(Severity::Normal) {
+            Severity::Critical => (language.text("critical"), danger()),
+            Severity::Warning => (language.text("warning"), warning()),
+            Severity::Normal => (language.text("ok"), success()),
+        },
     };
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, colour))
@@ -439,33 +531,27 @@ fn status_chip(
         });
 }
 
-fn projection_label(
-    ui: &mut egui::Ui,
-    projection: &Projection,
-    now: SystemTime,
-    language: LanguageId,
-) {
+fn projection_label(ui: &mut egui::Ui, projection: &Projection, now: SystemTime, language: LanguageId) {
     ui.label(
-        egui::RichText::new(format!(
-            "+{:.1}%/h {}",
-            projection.percent_per_hour,
-            projection.window.label()
-        ))
-        .monospace()
-        .size(11.0)
-        .color(muted()),
+        egui::RichText::new(format!("+{:.1}%/h {}", projection.percent_per_hour, projection.window.label()))
+            .monospace()
+            .size(11.5)
+            .color(muted()),
     );
     if projection.exhausts_before_reset {
         ui.label(
             egui::RichText::new(format!(
-                "{} {}",
+                "{} {} {}",
                 language.text("runs out"),
-                relative_phrase(projection.exhausted_at, now)
+                relative_phrase(projection.exhausted_at, now),
+                language.text("before it renews")
             ))
             .color(danger())
             .strong()
-            .size(11.0),
+            .size(11.5),
         );
+    } else {
+        ui.label(egui::RichText::new(language.text("renews first")).color(success()).size(11.0));
     }
 }
 
@@ -539,11 +625,11 @@ fn headroom_colour(headroom: &Headroom) -> egui::Color32 {
     }
 }
 
-/// A filled bar with faint ticks at the warning and critical lines, so the
-/// distance to each is visible without reading the number.
+/// A filled bar with faint ticks at the warning and critical lines. At normal
+/// severity the fill is the icon's sweep, mapped across the whole bar so a
+/// half-full meter shows the orange half rather than a squeezed gradient.
 fn meter(ui: &mut egui::Ui, percentage: f64, severity: Severity, thresholds: Thresholds) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(METER_WIDTH, METER_HEIGHT), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(METER_WIDTH, METER_HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, section_border());
     let fraction = (percentage / 100.0).clamp(0.0, 1.0) as f32;
@@ -565,25 +651,33 @@ fn meter(ui: &mut egui::Ui, percentage: f64, severity: Severity, thresholds: Thr
     }
 }
 
-/// The weekly window over the retained history, oldest on the left.
+fn sweep_fill(painter: &egui::Painter, filled: egui::Rect, full_width: f32) {
+    const SLICE: f32 = 3.0;
+    let mut x = filled.left();
+    while x < filled.right() {
+        let next = (x + SLICE).min(filled.right());
+        let t = ((x + next) * 0.5 - filled.left()) / full_width.max(1.0);
+        let slice = egui::Rect::from_min_max(egui::pos2(x, filled.top()), egui::pos2(next, filled.bottom()));
+        painter.rect_filled(slice, 0.0, sweep(t));
+        x = next;
+    }
+    let cap = egui::Rect::from_min_max(filled.left_top(), egui::pos2(filled.left() + 6.0, filled.bottom()));
+    painter.rect_filled(cap, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, sweep(0.0));
+}
+
+/// The weekly window over the retained history, oldest on the left, carrying
+/// the sweep from orange to violet.
 fn sparkline(ui: &mut egui::Ui, series: &[(u64, Reading)], thresholds: Thresholds) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(SPARK_WIDTH, SPARK_HEIGHT), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(SPARK_WIDTH, SPARK_HEIGHT), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, section_border().gamma_multiply(0.5));
-    let Some(&(first, _)) = series.first() else {
-        return;
-    };
-    let Some(&(last, _)) = series.last() else {
+    let (Some(&(first, _)), Some(&(last, _))) = (series.first(), series.last()) else {
         return;
     };
     let span = last.saturating_sub(first).max(1) as f32;
     let critical_y = rect.bottom() - rect.height() * (thresholds.critical / 100.0) as f32;
     painter.line_segment(
-        [
-            egui::pos2(rect.left(), critical_y),
-            egui::pos2(rect.right(), critical_y),
-        ],
+        [egui::pos2(rect.left(), critical_y), egui::pos2(rect.right(), critical_y)],
         egui::Stroke::new(1.0, muted().gamma_multiply(0.5)),
     );
     let points: Vec<egui::Pos2> = series
@@ -598,24 +692,6 @@ fn sparkline(ui: &mut egui::Ui, series: &[(u64, Reading)], thresholds: Threshold
         let t = (pair[1].x - rect.left()) / rect.width().max(1.0);
         painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.5, sweep(t)));
     }
-}
-
-/// Fill `filled` with the icon's sweep, where `t` runs across `full_width` so
-/// a half-full meter shows the orange half of the gradient, not a squeezed
-/// copy of the whole thing.
-fn sweep_fill(painter: &egui::Painter, filled: egui::Rect, full_width: f32) {
-    const SLICE: f32 = 3.0;
-    let mut x = filled.left();
-    while x < filled.right() {
-        let next = (x + SLICE).min(filled.right());
-        let t = ((x + next) * 0.5 - filled.left()) / full_width.max(1.0);
-        let slice = egui::Rect::from_min_max(egui::pos2(x, filled.top()), egui::pos2(next, filled.bottom()));
-        painter.rect_filled(slice, 0.0, sweep(t));
-        x = next;
-    }
-    // Rounded ends, re-drawn over the square slices.
-    let cap = egui::Rect::from_min_max(filled.left_top(), egui::pos2(filled.left() + 6.0, filled.bottom()));
-    painter.rect_filled(cap, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, sweep(0.0));
 }
 
 fn reset_phrase(resets_at: Option<SystemTime>, now: SystemTime) -> String {
@@ -687,10 +763,8 @@ mod fleet_tests {
             severity: Severity::Warning,
         };
         assert_eq!(constraint_title(&constraint), "Claude Code weekly (Fable)");
-        let unscoped = Constraint {
-            scope: None,
-            ..constraint
-        };
+        assert_eq!(window_caption(&constraint), "weekly · Fable");
+        let unscoped = Constraint { scope: None, ..constraint };
         assert_eq!(constraint_title(&unscoped), "Claude Code weekly");
     }
 

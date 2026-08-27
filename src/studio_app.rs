@@ -169,6 +169,8 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Fleet,
+    Routing,
+    Activity,
     Settings,
     Studio,
     ContextMenus,
@@ -666,6 +668,11 @@ struct StudioApp {
         crate::insights::Insights,
     )>,
     activity: crate::activity_log::ActivityLog,
+    /// Provider cards the user has opened for their detail view.
+    fleet_expanded: std::collections::HashSet<crate::providers::ProviderId>,
+    /// The theme studio pages are tucked behind one nav entry, closed by
+    /// default: useful, but not what the panel is for.
+    studio_nav_open: bool,
     usage_poll_ok: bool,
     usage_has_error: bool,
     last_cache_read: Instant,

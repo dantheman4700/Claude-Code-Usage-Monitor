@@ -237,6 +237,7 @@ fn cursor_usage_from_summary(response: CursorUsageSummaryResponse) -> Option<Usa
         stale: false,
         plan: None,
         details: Vec::new(),
+        scoped: Vec::new(),
     })
 }
 

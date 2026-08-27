@@ -273,6 +273,7 @@ fn studio_preview_uses_cached_poll_failure_state_instead_of_stale_values() {
             stale: false,
             plan: None,
             details: Vec::new(),
+            scoped: Vec::new(),
         },
     )]));
     app.usage_poll_ok = false;
@@ -321,6 +322,8 @@ fn app_with_surfaces(surfaces: Vec<SceneObject>) -> StudioApp {
         usage_history: Default::default(),
         fleet_insights: None,
         activity: Default::default(),
+        fleet_expanded: Default::default(),
+        studio_nav_open: false,
         usage_poll_ok: false,
         usage_has_error: false,
         last_cache_read: Instant::now(),

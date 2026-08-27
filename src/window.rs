@@ -539,8 +539,13 @@ fn fleet_tray_tooltip(data: Option<&crate::models::AppUsageData>) -> String {
             .min()
             .map(|remaining| format!("  ↻{}", short_duration(remaining)))
             .unwrap_or_default();
+        let scoped: String = usage
+            .scoped
+            .iter()
+            .map(|scoped| format!(" · {} {:.0}%", scoped.label, scoped.section.percentage))
+            .collect();
         let stale = if usage.stale { " (stale)" } else { "" };
-        lines.push(format!("{name} {body}{reset}{stale}"));
+        lines.push(format!("{name} {body}{scoped}{reset}{stale}"));
     }
     if lines.is_empty() {
         return "Fleet usage · nothing reporting".to_string();
