@@ -61,6 +61,11 @@ pub struct SettingsFile {
     show_fireworks: bool,
     #[serde(default)]
     show_devin: bool,
+    /// Set once the taskbar widget has been hidden on this install. The hide is
+    /// applied to whichever theme is active at the time and then never again,
+    /// so choosing "Show widget" afterwards sticks.
+    #[serde(default)]
+    pub taskbar_widget_retired: bool,
     #[serde(default = "default_true")]
     pub custom_theme_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +99,7 @@ impl Default for SettingsFile {
             show_grok: providers.contains(ProviderId::Grok),
             show_fireworks: providers.contains(ProviderId::Fireworks),
             show_devin: providers.contains(ProviderId::Devin),
+            taskbar_widget_retired: false,
             custom_theme_enabled: true,
             active_theme_path: None,
             dashboard_width: None,

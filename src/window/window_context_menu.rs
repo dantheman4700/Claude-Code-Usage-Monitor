@@ -319,9 +319,55 @@ pub(super) fn execute_context_menu_action(
                 .as_ref()
                 .and_then(|state| state.active_theme.as_ref())
                 .and_then(context_menu_widget_origin);
-            if let Some((surface_index, root_id)) = target {
-                let _ =
-                    execute_mouse_action_source(surface_index, &root_id, "toggle(self, render)");
+            let Some((surface_index, root_id)) = target else {
+                return;
+            };
+            let _ = execute_mouse_action_source(surface_index, &root_id, "toggle(self, render)");
+
+            // The toggle above lives in an in-memory override and would be
+            // forgotten on the next start. Write the choice into the theme so
+            // it sticks, and drop the override so the document is the one
+            // source of truth from here on.
+            let persisted = {
+                let mut state = lock_state();
+                let Some(state) = state.as_mut() else {
+                    return;
+                };
+                let Some(theme) = state.active_theme.as_ref() else {
+                    return;
+                };
+                let effective =
+                    theme_engine::apply_mouse_action_overrides(theme, &state.mouse_action_overrides);
+                let runtime = theme_runtime_for_surface(
+                    &effective,
+                    surface_index,
+                    theme_runtime_from_state(state),
+                );
+                let visible = theme_engine::surface_should_render(
+                    &effective,
+                    surface_index,
+                    state.data.as_ref(),
+                    runtime,
+                );
+                state.mouse_action_overrides.remove(&theme_engine::MouseActionOverrideKey {
+                    surface_index,
+                    object_id: root_id.clone(),
+                    property: theme_engine::MouseActionProperty::Render,
+                });
+                let Some(theme) = state.active_theme.as_mut() else {
+                    return;
+                };
+                if let Some(surface) = theme.surfaces.get_mut(surface_index) {
+                    surface.render = if visible { 1.0 } else { 0.0 }.into();
+                }
+                (!theme.is_builtin()).then(|| theme.clone())
+            };
+            if let Some(theme) = persisted {
+                if let Err(error) = theme_engine::save_theme(&theme) {
+                    crate::diagnose::log(format!(
+                        "unable to persist the widget visibility choice: {error}"
+                    ));
+                }
             }
         }
         ContextMenuAction::ToggleLayerRender { target } => {

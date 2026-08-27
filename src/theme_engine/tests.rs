@@ -1361,7 +1361,9 @@ fn action_overrides_are_runtime_only_and_reset_restores_saved_expression() {
 
 #[test]
 fn tray_root_can_toggle_the_main_root_on_another_surface() {
-    let theme = ThemeDocument::starter();
+    let mut theme = ThemeDocument::starter();
+    // Start from a visible root so the toggle below is the hide it asserts.
+    theme.surfaces[0].render = 1.0.into();
     let tray_id = theme.surfaces[1].id.clone();
     let click = "toggle(\"main\", render)".to_string();
     let mut overrides = HashMap::new();
@@ -1447,6 +1449,8 @@ fn hit_testing_selects_the_topmost_interactive_layer() {
     let mut theme = ThemeDocument::starter();
     theme.id = "mouse-hit-test".into();
     let surface = &mut theme.surfaces[0];
+    // The starter ships the taskbar root hidden; hit testing needs it shown.
+    surface.render = 1.0.into();
     surface.width = 100.0.into();
     surface.height = 100.0.into();
     surface.children.clear();
@@ -1674,4 +1678,28 @@ fn the_migration_leaves_user_named_tray_surfaces_alone() {
         .surfaces
         .iter()
         .any(|surface| surface.id == "my-own-tray-icon"));
+}
+
+/// The bars on the taskbar are retired; the tray icon is the way in and the
+/// panel is where the numbers live. The widget ships hidden, and "Show widget"
+/// brings it back for anyone who wants it.
+#[test]
+fn the_starter_ships_with_the_taskbar_widget_hidden() {
+    let theme = ThemeDocument::starter();
+    assert_eq!(theme.surfaces[0].placement.nest, SurfaceNest::Taskbar);
+    assert!(!surface_should_render(&theme, 0, None, ThemeRuntime::default()));
+    // The tray icon is unaffected.
+    assert!(surface_should_render(&theme, 1, None, ThemeRuntime::default()));
+}
+
+#[test]
+fn hiding_the_taskbar_widget_only_touches_taskbar_roots_and_reports_change() {
+    let mut theme = ThemeDocument::starter();
+    theme.surfaces[0].render = 1.0.into();
+    assert!(theme.hide_taskbar_widget());
+    assert_eq!(theme.surfaces[0].render.0, "0");
+    // Already hidden: nothing to do, so a caller can skip the write.
+    assert!(!theme.hide_taskbar_widget());
+    // The tray root keeps whatever it had.
+    assert_eq!(theme.surfaces[1].render.0, ThemeDocument::starter().surfaces[1].render.0);
 }

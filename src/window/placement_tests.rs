@@ -45,6 +45,8 @@ fn legacy_physical_offset_becomes_a_leftward_logical_theme_offset() {
 fn tray_widget_action_targets_a_custom_theme_root_without_a_main_id() {
     let mut theme = ThemeDocument::starter();
     theme.surfaces[0].id = "layer-62744-2".into();
+    // Start from a visible root so the toggle below is the hide it asserts.
+    theme.surfaces[0].render = 1.0.into();
     let (surface_index, root_id) = context_menu_widget_origin(&theme).unwrap();
     assert_eq!((surface_index, root_id.as_str()), (0, "layer-62744-2"));
 

@@ -1711,7 +1711,8 @@
             }
           }
         }
-      ]
+      ],
+      "render": "0"
     },
     {
       "id": "fleet-tray-icon",

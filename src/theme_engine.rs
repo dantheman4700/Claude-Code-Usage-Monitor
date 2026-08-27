@@ -1972,6 +1972,25 @@ impl ThemeDocument {
     ///
     /// Only the untouched generated icons are replaced: a tray surface the user
     /// has renamed or re-parented is left exactly where it is.
+    /// Take the widget off the taskbar, leaving the tray icon as the way in.
+    ///
+    /// Returns whether anything changed, so a caller can skip writing the file
+    /// for a theme that had already hidden it.
+    pub fn hide_taskbar_widget(&mut self) -> bool {
+        let mut changed = false;
+        for surface in &mut self.surfaces {
+            if surface.placement.nest != SurfaceNest::Taskbar {
+                continue;
+            }
+            let hidden: Expression = 0.0.into();
+            if surface.render != hidden {
+                surface.render = hidden;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn migrate_tray_icons_to_fleet(&mut self) -> bool {
         if self
             .surfaces

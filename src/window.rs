@@ -1550,6 +1550,29 @@ pub fn run() {
             }
             theme
         });
+        // Retire the taskbar widget once per install. The panel is where the
+        // numbers live now and the tray icon is the way in; a row of bars on
+        // the taskbar only crowds it. Done exactly once so that anyone who
+        // picks "Show widget" afterwards is not overridden on the next start.
+        let active_theme = active_theme.map(|mut theme| {
+            if !settings.taskbar_widget_retired {
+                let changed = theme.hide_taskbar_widget();
+                if changed && !theme.is_builtin() {
+                    match theme_engine::save_theme(&theme) {
+                        Ok(path) => diagnose::log(format!(
+                            "retired the taskbar widget in {}",
+                            path.display()
+                        )),
+                        Err(error) => diagnose::log(format!(
+                            "unable to persist retiring the taskbar widget: {error}"
+                        )),
+                    }
+                }
+                settings.taskbar_widget_retired = true;
+                save_settings_or_log(&settings, "unable to record the retired taskbar widget");
+            }
+            theme
+        });
         let custom_theme_enabled = true;
         if let Some(path) = &active_theme_path {
             let path = path.to_string_lossy().into_owned();
