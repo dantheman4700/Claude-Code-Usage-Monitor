@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::ui::theme::{accent, menu_hover, menu_text, selected_menu_fill, sweep};
+use crate::ui::theme::{menu_hover, menu_text, selected_menu_fill, sweep};
 
 pub(crate) fn navigation_item(ui: &mut egui::Ui, selected: bool, title: &str) -> egui::Response {
     let (rect, response) =
@@ -31,9 +31,6 @@ pub(crate) fn navigation_item(ui: &mut egui::Ui, selected: bool, title: &str) ->
             );
             painter.rect_filled(slice, 0.0, sweep(index as f32 / (BANDS - 1) as f32));
         }
-        // Rounded top and bottom over the square bands.
-        let _ = accent;
-        painter.rect_stroke(rect, 4.0, egui::Stroke::NONE, egui::StrokeKind::Inside);
     }
     ui.painter().text(
         egui::pos2(rect.left() + 18.0, rect.center().y),
