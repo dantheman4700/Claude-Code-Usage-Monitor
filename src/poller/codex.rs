@@ -45,6 +45,26 @@ struct CodexTokenData {
 pub(super) struct CodexUsageResponse {
     rate_limit: Option<Option<Box<CodexRateLimitDetails>>>,
     credits: Option<Option<Box<CodexCredits>>>,
+    /// "plus", "pro", "team" and so on, as OpenAI spells it.
+    #[serde(default)]
+    plan_type: Option<String>,
+    /// One-off credits that reset a hit rate limit early.
+    #[serde(default)]
+    rate_limit_reset_credits: Option<CodexResetCredits>,
+    #[serde(default)]
+    spend_control: Option<CodexSpendControl>,
+}
+
+#[derive(Deserialize, Default)]
+struct CodexResetCredits {
+    #[serde(default)]
+    available_count: u32,
+}
+
+#[derive(Deserialize, Default)]
+struct CodexSpendControl {
+    #[serde(default)]
+    reached: bool,
 }
 
 #[derive(Deserialize)]
@@ -152,8 +172,42 @@ pub(super) fn codex_usage_from_response(
     account_id: Option<&str>,
 ) -> Option<UsageData> {
     let credits = response.credits.flatten();
+    let plan = response.plan_type.clone();
+    let reset_credits = response
+        .rate_limit_reset_credits
+        .as_ref()
+        .map_or(0, |credits| credits.available_count);
+    let spend_capped = response
+        .spend_control
+        .as_ref()
+        .is_some_and(|control| control.reached);
     let details = *response.rate_limit.flatten()?;
     let mut data = UsageData::default();
+    data.plan = plan.map(|plan| {
+        // OpenAI sends the plan in lower case; the panel shows it as a name.
+        let mut chars = plan.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => plan,
+        }
+    });
+    if let Some(credits) = &credits {
+        if let Some(balance) = &credits.balance {
+            data.details.push(crate::models::Detail::new("Credits", balance.clone()));
+        }
+        if credits.unlimited {
+            data.details.push(crate::models::Detail::new("Credits", "unlimited"));
+        }
+    }
+    if reset_credits > 0 {
+        data.details.push(crate::models::Detail::new(
+            "Reset credits",
+            reset_credits.to_string(),
+        ));
+    }
+    if spend_capped {
+        data.details.push(crate::models::Detail::new("Spend cap", "reached"));
+    }
 
     // Assign by window length, not by slot. Codex has shipped the weekly
     // allowance in `primary_window` with `secondary_window` empty while the

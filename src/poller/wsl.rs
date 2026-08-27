@@ -7,7 +7,8 @@
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::diagnose;
 
@@ -23,6 +24,26 @@ const WSL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Order is whatever `wsl.exe` reports; callers that want a specific distro
 /// have to look for it by name.
 pub(super) fn list_distros() -> Vec<String> {
+    // Six providers ask for this on every poll, and the answer changes about
+    // as often as someone installs a new distro. One `wsl.exe` spawn every
+    // few minutes is a fair price; six per poll is not.
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(10 * 60);
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((fetched_at, distros)) = cache.as_ref() {
+            if fetched_at.elapsed() < TTL {
+                return distros.clone();
+            }
+        }
+    }
+    let distros = list_distros_uncached();
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), distros.clone()));
+    }
+    distros
+}
+
+fn list_distros_uncached() -> Vec<String> {
     let output = match run_with_timeout(
         Command::new("wsl.exe")
             .args(["-l", "-q"])
@@ -107,6 +128,11 @@ pub(super) fn path_watch_signature(distro: &str, key: &str, script: &str) -> Opt
 /// rewriting its own credential file.
 pub(super) fn run_detached(distro: &str, script: &str, what: &str) {
     diagnose::log(format!("attempting WSL {what} in distro {distro}"));
+    crate::activity_log::record(
+        crate::activity_log::EventKind::Refresh,
+        None,
+        format!("Attempted {what} in WSL ({distro})"),
+    );
     let _ = run_with_timeout(
         Command::new("wsl.exe")
             .arg("-d")

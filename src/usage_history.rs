@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use crate::models::AppUsageData;
 use crate::providers::ProviderId;
 
-/// Readings older than this are dropped. Two weeks covers a seven-day window
-/// twice over, which is enough to characterise a weekly burn rate.
-pub const RETENTION_SECONDS: u64 = 14 * 24 * 60 * 60;
+/// Default retention. Two weeks covers a seven-day window twice over, which
+/// is enough to characterise a weekly burn rate.
+#[cfg(test)]
+pub const DEFAULT_RETENTION_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 /// Hard ceiling on stored samples, so a fast poll interval cannot grow the
 /// file without bound even inside the retention window.
@@ -51,7 +52,19 @@ impl UsageHistory {
     ///
     /// Returns whether anything changed, so callers can skip writing the file
     /// when a sample was collapsed into the previous one.
+    /// The runtime always passes the configured retention; this default is
+    /// what the tests are written against.
+    #[cfg(test)]
     pub fn record(&mut self, data: &AppUsageData, now_unix: u64) -> bool {
+        self.record_with_retention(data, now_unix, DEFAULT_RETENTION_SECONDS)
+    }
+
+    pub fn record_with_retention(
+        &mut self,
+        data: &AppUsageData,
+        now_unix: u64,
+        retention_seconds: u64,
+    ) -> bool {
         let readings: BTreeMap<ProviderId, Reading> = ProviderId::ALL
             .into_iter()
             .filter_map(|provider| {
@@ -86,12 +99,12 @@ impl UsageHistory {
             unix: now_unix,
             readings,
         });
-        self.prune(now_unix);
+        self.prune(now_unix, retention_seconds);
         true
     }
 
-    fn prune(&mut self, now_unix: u64) {
-        let cutoff = now_unix.saturating_sub(RETENTION_SECONDS);
+    fn prune(&mut self, now_unix: u64, retention_seconds: u64) {
+        let cutoff = now_unix.saturating_sub(retention_seconds);
         self.samples.retain(|sample| sample.unix >= cutoff);
         if self.samples.len() > MAX_SAMPLES {
             let excess = self.samples.len() - MAX_SAMPLES;
@@ -173,7 +186,7 @@ mod tests {
     fn readings_older_than_the_retention_window_are_dropped() {
         let mut history = UsageHistory::default();
         history.record(&data(10.0, 20.0), 1_000);
-        history.record(&data(50.0, 60.0), 1_000 + RETENTION_SECONDS + 1);
+        history.record(&data(50.0, 60.0), 1_000 + DEFAULT_RETENTION_SECONDS + 1);
 
         assert_eq!(history.samples.len(), 1);
         assert_eq!(history.samples[0].readings[&ProviderId::Claude].weekly, 60.0);

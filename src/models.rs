@@ -45,6 +45,29 @@ pub struct UsageData {
     /// the provider failed this cycle. The figures are real, just not current.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+    /// The plan or tier the account is on, as the provider names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Anything else worth showing that does not fit a gauge: balances,
+    /// per-model splits, message counts. Providers differ too much for a
+    /// fixed schema, so these are labelled values the panel lists as given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<Detail>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Detail {
+    pub label: String,
+    pub value: String,
+}
+
+impl Detail {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
 }
 
 /// Codex reports a credit balance with no ceiling, so the denominator has to

@@ -66,6 +66,18 @@ pub struct SettingsFile {
     /// so choosing "Show widget" afterwards sticks.
     #[serde(default)]
     pub taskbar_widget_retired: bool,
+    /// Usage at or above this is shown as a warning.
+    #[serde(default = "default_warn_percent")]
+    pub warn_percent: u8,
+    /// Usage at or above this is shown as critical.
+    #[serde(default = "default_critical_percent")]
+    pub critical_percent: u8,
+    /// How long readings are kept for burn-rate and history views.
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u16,
+    /// Whether providers with nothing to read still get a row in the panel.
+    #[serde(default = "default_true")]
+    pub show_unreachable_providers: bool,
     #[serde(default = "default_true")]
     pub custom_theme_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +112,10 @@ impl Default for SettingsFile {
             show_fireworks: providers.contains(ProviderId::Fireworks),
             show_devin: providers.contains(ProviderId::Devin),
             taskbar_widget_retired: false,
+            warn_percent: default_warn_percent(),
+            critical_percent: default_critical_percent(),
+            history_retention_days: default_history_retention_days(),
+            show_unreachable_providers: true,
             custom_theme_enabled: true,
             active_theme_path: None,
             dashboard_width: None,
@@ -116,6 +132,11 @@ pub struct LegacyPlacement {
 
 impl SettingsFile {
     pub fn normalize(&mut self) {
+        // The warning line has to sit below the critical one, and both inside
+        // the gauge, or every reading lands in one bucket.
+        self.critical_percent = self.critical_percent.clamp(2, 100);
+        self.warn_percent = self.warn_percent.clamp(1, self.critical_percent - 1);
+        self.history_retention_days = self.history_retention_days.clamp(1, 90);
         if !matches!(
             self.poll_interval_ms,
             POLL_1_MIN | POLL_5_MIN | POLL_15_MIN | POLL_1_HOUR
@@ -298,8 +319,9 @@ pub fn load_usage_history() -> UsageHistory {
 /// sample -- the store collapses readings that arrive too close together, and
 /// rewriting the file for a discarded sample is pure churn.
 pub fn record_usage_history(data: &AppUsageData, now_unix: u64) {
+    let retention = u64::from(load_settings().history_retention_days) * 24 * 60 * 60;
     let mut history = load_usage_history();
-    if history.record(data, now_unix) {
+    if history.record_with_retention(data, now_unix, retention) {
         let _ = write_json_atomic(&usage_history_path(), &history);
     }
 }
@@ -362,6 +384,15 @@ fn wide_path(path: &Path) -> Vec<u16> {
 
 fn default_poll_interval() -> u32 {
     POLL_15_MIN
+}
+fn default_warn_percent() -> u8 {
+    75
+}
+fn default_critical_percent() -> u8 {
+    90
+}
+fn default_history_retention_days() -> u16 {
+    14
 }
 fn default_true() -> bool {
     true

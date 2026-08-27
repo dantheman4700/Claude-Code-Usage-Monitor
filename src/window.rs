@@ -41,6 +41,7 @@ use crate::theme_engine::{
     self, Canvas, DataContext, HorizontalAnchor, MouseActionEffect, MouseActionOverrideKey,
     MouseEventKind, ReferenceRegion, SurfaceNest, ThemeDocument, ThemeRuntime, VerticalAnchor,
 };
+use crate::activity_log;
 use crate::tray_icon;
 use crate::updater::{self, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
 
@@ -103,6 +104,10 @@ struct AppState {
     auth_watch_mode: poller::CredentialWatchMode,
     auth_watch_snapshot: poller::CredentialWatchSnapshot,
     last_poll_ok: bool,
+    /// Per-provider retry schedule. A provider that failed is asked again on
+    /// a widening interval instead of every poll, which is what keeps a dead
+    /// provider from spawning `wsl.exe` twice a minute forever.
+    provider_backoff: HashMap<ProviderId, ProviderBackoff>,
     update_status: UpdateStatus,
     last_update_check_unix: Option<u64>,
 
@@ -122,6 +127,25 @@ struct AppState {
     hovered_mouse_layer: Option<(usize, String)>,
     pending_mouse_click: Option<PendingMouseClick>,
     suppress_next_left_up: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProviderBackoff {
+    misses: u32,
+    next_attempt_unix: u64,
+}
+
+/// How long to leave a provider alone after its `misses`th consecutive
+/// failure. Missing credentials are the slow case: nothing changes until a
+/// person signs in, and every attempt costs a `wsl.exe` spawn per distro.
+fn backoff_seconds(error: poller::PollError, misses: u32) -> u64 {
+    let (base, cap) = match error {
+        poller::PollError::NoCredentials => (5 * 60, 15 * 60),
+        poller::PollError::AuthRequired | poller::PollError::TokenExpired => (2 * 60, 15 * 60),
+        poller::PollError::RequestFailed => (60, 10 * 60),
+    };
+    let doubling = misses.saturating_sub(1).min(8);
+    (base * 2u64.saturating_pow(doubling)).min(cap)
 }
 
 #[derive(Clone, Debug)]
@@ -1536,6 +1560,11 @@ pub fn run() {
         // old icon column in place.
         let active_theme = active_theme.map(|mut theme| {
             if theme.migrate_tray_icons_to_fleet() {
+                activity_log::record(
+                    activity_log::EventKind::Migration,
+                    None,
+                    "Folded the per-provider tray icons into one fleet icon",
+                );
                 // A built-in is read-only, and it already ships the fleet icon,
                 // so only a user-owned copy needs writing back.
                 match theme_engine::save_theme(&theme) {
@@ -1568,6 +1597,11 @@ pub fn run() {
                         )),
                     }
                 }
+                activity_log::record(
+                    activity_log::EventKind::Migration,
+                    None,
+                    "Retired the taskbar widget; the tray icon opens the panel",
+                );
                 settings.taskbar_widget_retired = true;
                 save_settings_or_log(&settings, "unable to record the retired taskbar widget");
             }
@@ -1679,6 +1713,7 @@ pub fn run() {
                 mirror_hwnds: Vec::new(),
                 desktop_hwnds: Vec::new(),
                 mouse_action_overrides: HashMap::new(),
+                provider_backoff: HashMap::new(),
                 hovered_mouse_layer: None,
                 pending_mouse_click: None,
                 suppress_next_left_up: false,
@@ -1929,14 +1964,93 @@ fn do_poll_once(hwnd: HWND) {
     // Poll everything, not just what the widget draws. The provider toggles
     // choose which bars appear on the taskbar; the fleet panel is meant to show
     // the whole picture, and it can only do that for providers that were asked.
-    // One with no credentials answers immediately and without a request.
-    let polled_providers = ProviderSet::from_enabled(ProviderId::ALL);
+    let all_providers = ProviderSet::from_enabled(ProviderId::ALL);
+    let now = now_unix_secs();
 
-    match poller::poll(polled_providers) {
+    // Skip providers still inside their retry window, and remember who was
+    // reporting before so only transitions reach the activity log.
+    let (polled_providers, previously_available) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        let polled = ProviderSet::from_enabled(ProviderId::ALL.into_iter().filter(|provider| {
+            s.provider_backoff
+                .get(provider)
+                .is_none_or(|backoff| backoff.next_attempt_unix <= now)
+        }));
+        let previously: Vec<ProviderId> = ProviderId::ALL
+            .into_iter()
+            .filter(|provider| {
+                s.data
+                    .as_ref()
+                    .and_then(|data| data.get(*provider))
+                    .is_some_and(|usage| !usage.stale)
+            })
+            .collect();
+        (polled, previously)
+    };
+    if polled_providers.is_empty() {
+        return;
+    }
+
+    let (data, failures) = poller::poll_detailed(polled_providers);
+
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            for provider in polled_providers.iter() {
+                if data.get(provider).is_some() {
+                    let was_failing = s.provider_backoff.remove(&provider).is_some();
+                    if was_failing || !previously_available.contains(&provider) {
+                        activity_log::record(
+                            activity_log::EventKind::Online,
+                            Some(provider),
+                            format!("{} is reporting", provider.descriptor().display_name),
+                        );
+                    }
+                }
+            }
+            for failure in &failures {
+                let entry = s.provider_backoff.entry(failure.provider).or_default();
+                entry.misses = entry.misses.saturating_add(1);
+                entry.next_attempt_unix = now + backoff_seconds(failure.error, entry.misses);
+                if entry.misses == 1 {
+                    let name = failure.provider.descriptor().display_name;
+                    let (kind, message) = match failure.error {
+                        poller::PollError::NoCredentials => (
+                            activity_log::EventKind::NoCredentials,
+                            format!("{name}: no credentials found"),
+                        ),
+                        poller::PollError::AuthRequired | poller::PollError::TokenExpired => (
+                            activity_log::EventKind::AuthRequired,
+                            format!("{name} rejected its credentials; sign in again"),
+                        ),
+                        poller::PollError::RequestFailed => (
+                            activity_log::EventKind::Offline,
+                            format!("{name} stopped answering"),
+                        ),
+                    };
+                    activity_log::record(kind, Some(failure.provider), message);
+                }
+            }
+        }
+    }
+
+    let result = if data.is_empty() {
+        Err(failures.first().copied().unwrap_or(poller::PollFailure {
+            provider: polled_providers.first().unwrap_or_default(),
+            error: poller::PollError::RequestFailed,
+        }))
+    } else {
+        Ok(data)
+    };
+
+    match result {
         Ok(data) => {
             let mut state = lock_state();
             let data = match state.as_ref().and_then(|s| s.data.as_ref()) {
-                Some(previous) => poller::carry_forward_failures(data, previous, polled_providers),
+                Some(previous) => poller::carry_forward_failures(data, previous, all_providers),
                 None => data,
             };
             let cache_data = data.clone();

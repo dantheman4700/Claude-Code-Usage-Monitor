@@ -235,6 +235,8 @@ fn cursor_usage_from_summary(response: CursorUsageSummaryResponse) -> Option<Usa
         monthly: None,
         credits: None,
         stale: false,
+        plan: None,
+        details: Vec::new(),
     })
 }
 

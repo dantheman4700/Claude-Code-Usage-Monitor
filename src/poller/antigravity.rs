@@ -48,6 +48,20 @@ struct AntigravityTokenData {
 struct AntigravityLoadResponse {
     #[serde(rename = "cloudaicompanionProject")]
     project: Option<String>,
+    #[serde(rename = "currentTier")]
+    current_tier: Option<AntigravityTier>,
+}
+
+#[derive(Deserialize)]
+struct AntigravityTier {
+    name: Option<String>,
+}
+
+/// What `loadCodeAssist` says about the account: the project quota is
+/// scoped to, and the tier it is on.
+pub(super) struct AntigravityAccount {
+    pub project: Option<String>,
+    pub tier: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -217,10 +231,12 @@ pub(super) fn fetch_antigravity_usage_from_endpoint(
     base_url: &str,
     token: &str,
 ) -> Result<UsageData, PollError> {
-    let project = fetch_antigravity_project(base_url, token)?;
+    let account = fetch_antigravity_project(base_url, token)?;
+    let project = account.project;
+    let mut data = None;
     if let Some(project) = project.as_deref() {
         match fetch_antigravity_quota_summary(base_url, token, project) {
-            Ok(data) => return Ok(data),
+            Ok(summary) => data = Some(summary),
             Err(PollError::AuthRequired) => return Err(PollError::AuthRequired),
             Err(error) => diagnose::log(format!(
                 "Antigravity retrieveUserQuotaSummary failed, falling back to model quota: {error:?}"
@@ -228,23 +244,21 @@ pub(super) fn fetch_antigravity_usage_from_endpoint(
         }
     }
 
-    let session = fetch_antigravity_model_quota(base_url, token, project.as_deref())?;
-    let weekly = UsageSection::default();
-
-    Ok(UsageData {
-        session,
-        weekly,
-        weekly_label: None,
-        monthly: None,
-        credits: None,
-        stale: false,
-    })
+    let mut data = match data {
+        Some(data) => data,
+        None => UsageData {
+            session: fetch_antigravity_model_quota(base_url, token, project.as_deref())?,
+            ..Default::default()
+        },
+    };
+    data.plan = account.tier;
+    Ok(data)
 }
 
 pub(super) fn fetch_antigravity_project(
     base_url: &str,
     token: &str,
-) -> Result<Option<String>, PollError> {
+) -> Result<AntigravityAccount, PollError> {
     let agent = build_agent()?;
     let body = serde_json::json!({
         "metadata": {
@@ -280,7 +294,13 @@ pub(super) fn fetch_antigravity_project(
         }
     };
 
-    Ok(response.project.filter(|project| !project.is_empty()))
+    Ok(AntigravityAccount {
+        project: response.project.filter(|project| !project.is_empty()),
+        tier: response
+            .current_tier
+            .and_then(|tier| tier.name)
+            .filter(|name| !name.is_empty()),
+    })
 }
 
 pub(super) fn fetch_antigravity_model_quota(

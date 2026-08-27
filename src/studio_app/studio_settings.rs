@@ -73,6 +73,14 @@ impl StudioApp {
                 );
             });
             section(ui, language.text("Providers"), |ui| {
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "Every provider is polled for the panel. These choose which appear in the taskbar widget.",
+                    ))
+                    .color(crate::ui::theme::muted())
+                    .size(11.0),
+                );
+                ui.add_space(6.0);
                 for (index, descriptor) in PROVIDER_DESCRIPTORS.iter().enumerate() {
                     if index > 0 {
                         setting_separator(ui);
@@ -93,6 +101,67 @@ impl StudioApp {
                         },
                     );
                 }
+            });
+            section(ui, language.text("Fleet"), |ui| {
+                setting_row(
+                    ui,
+                    language.text("Warn at"),
+                    language.text("Usage at or above this is shown as a warning"),
+                    |ui| {
+                        changed |= crate::ui::components::number_field::NumberField::new(
+                            &mut self.settings.warn_percent,
+                        )
+                        .range(1..=99)
+                        .speed(1)
+                        .suffix("%")
+                        .show(ui, 110.0)
+                        .changed();
+                    },
+                );
+                setting_separator(ui);
+                setting_row(
+                    ui,
+                    language.text("Critical at"),
+                    language.text("Usage at or above this is shown as critical"),
+                    |ui| {
+                        changed |= crate::ui::components::number_field::NumberField::new(
+                            &mut self.settings.critical_percent,
+                        )
+                        .range(2..=100)
+                        .speed(1)
+                        .suffix("%")
+                        .show(ui, 110.0)
+                        .changed();
+                    },
+                );
+                setting_separator(ui);
+                setting_row(
+                    ui,
+                    language.text("Keep history for"),
+                    language.text("How far back burn rate and the history view can look"),
+                    |ui| {
+                        changed |= crate::ui::components::number_field::NumberField::new(
+                            &mut self.settings.history_retention_days,
+                        )
+                        .range(1..=90)
+                        .speed(1)
+                        .suffix(" days")
+                        .show(ui, 110.0)
+                        .changed();
+                    },
+                );
+                setting_separator(ui);
+                setting_row(
+                    ui,
+                    language.text("Show unreachable providers"),
+                    language.text("List providers that have nothing to read, so a missing sign-in is visible"),
+                    |ui| {
+                        changed |= Toggle::new(&mut self.settings.show_unreachable_providers)
+                            .labels(language.text("Shown"), language.text("Hidden"))
+                            .show(ui)
+                            .changed();
+                    },
+                );
             });
             section(ui, language.text("Display"), |ui| {
                 setting_row(

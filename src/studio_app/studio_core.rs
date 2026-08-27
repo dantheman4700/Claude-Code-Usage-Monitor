@@ -71,6 +71,7 @@ impl StudioApp {
         let usage_has_error = usage_cache.as_ref().is_some_and(|cache| !cache.poll_ok);
         let usage = usage_cache.map(|cache| cache.data);
         let usage_history = app_settings::load_usage_history();
+        let activity = crate::activity_log::load();
         let next_preview_countdown_refresh = preview_countdown_refresh_delay(usage.as_ref())
             .and_then(|delay| Instant::now().checked_add(delay));
         Self {
@@ -89,6 +90,7 @@ impl StudioApp {
             usage,
             usage_history,
             fleet_insights: None,
+            activity,
             usage_poll_ok,
             usage_has_error,
             last_cache_read: Instant::now(),
@@ -737,6 +739,7 @@ impl StudioApp {
             self.usage_has_error = has_error;
             // A fresh reading also brings a fresh history sample.
             self.usage_history = app_settings::load_usage_history();
+            self.activity = crate::activity_log::load();
             self.fleet_insights = None;
         }
         changed

@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use super::{build_agent, parse_iso8601, wsl, PollError};
 use crate::diagnose;
-use crate::models::{CreditsSection, UsageData};
+use crate::models::{CreditsSection, Detail, UsageData};
 
 /// The CLI's own billing surface. There is no documented usage endpoint on
 /// `api.x.ai`: the subscription figures live behind the chat proxy, which is
@@ -28,6 +28,9 @@ const WATCH_AUTH_SCRIPT: &str = "stat -c 'present|%s|%Y' ~/.grok/auth.json 2>/de
 #[derive(Deserialize)]
 struct GrokBillingResponse {
     config: Option<GrokCreditsConfig>,
+    /// "SuperGrok Heavy" and so on. Sits beside `config` rather than inside it.
+    #[serde(rename = "subscriptionTier", default)]
+    subscription_tier: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +48,18 @@ struct GrokCreditsConfig {
     on_demand_used: Option<GrokAmount>,
     #[serde(rename = "billingPeriodEnd")]
     billing_period_end: Option<String>,
+    /// Usage split by product, when the account uses more than one.
+    #[serde(rename = "productUsage", default)]
+    product_usage: Vec<GrokProductUsage>,
+    #[serde(rename = "prepaidBalance")]
+    prepaid_balance: Option<GrokAmount>,
+}
+
+#[derive(Deserialize)]
+struct GrokProductUsage {
+    product: Option<String>,
+    #[serde(rename = "usagePercent")]
+    usage_percent: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +142,23 @@ fn grok_usage_from_response(response: &GrokBillingResponse) -> Option<UsageData>
     // from reading as the seven-day figure the other providers show there.
     data.weekly_label = Some("wk".into());
     data.credits = grok_credits(config);
+    data.plan = response.subscription_tier.clone();
+    // Only worth listing when there is more than one product; a single entry
+    // just repeats the gauge.
+    if config.product_usage.len() > 1 {
+        for product in &config.product_usage {
+            if let (Some(name), Some(percent)) = (&product.product, product.usage_percent) {
+                data.details
+                    .push(Detail::new(name.clone(), format!("{percent:.0}%")));
+            }
+        }
+    }
+    if let Some(balance) = config.prepaid_balance.as_ref().and_then(|amount| amount.val) {
+        if balance > 0.0 {
+            data.details
+                .push(Detail::new("Prepaid", format!("${balance:.2}")));
+        }
+    }
     Some(data)
 }
 

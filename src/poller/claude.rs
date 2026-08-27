@@ -10,7 +10,7 @@ use super::{
     build_agent, get_header_f64, get_header_i64, parse_iso8601, unix_to_system_time, PollError,
 };
 use crate::diagnose;
-use crate::models::{CreditsSection, UsageData};
+use crate::models::{CreditsSection, Detail, UsageData};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -28,6 +28,22 @@ struct UsageResponse {
     /// story. Absent on older accounts, hence the default.
     #[serde(default)]
     limits: Vec<LimitEntry>,
+    /// Per-model weekly buckets. Only present on plans that meter them.
+    #[serde(default)]
+    seven_day_opus: Option<UsageBucket>,
+    #[serde(default)]
+    seven_day_sonnet: Option<UsageBucket>,
+    #[serde(default)]
+    extra_usage: Option<ExtraUsage>,
+}
+
+/// Pay-as-you-go beyond the plan, when the account has it switched on.
+#[derive(Deserialize)]
+struct ExtraUsage {
+    #[serde(default)]
+    is_enabled: bool,
+    utilization: Option<f64>,
+    monthly_limit: Option<f64>,
 }
 
 /// One row of `limits`. `group` says which window the row belongs to
@@ -222,6 +238,26 @@ fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
         .spend
         .as_ref()
         .and_then(|spend| claude_credits(spend, &data));
+
+    for (name, bucket) in [
+        ("Opus 7d", &response.seven_day_opus),
+        ("Sonnet 7d", &response.seven_day_sonnet),
+    ] {
+        if let Some(bucket) = bucket {
+            data.details
+                .push(Detail::new(name, format!("{:.0}%", bucket.utilization)));
+        }
+    }
+    if let Some(extra) = &response.extra_usage {
+        if extra.is_enabled {
+            let value = match (extra.utilization, extra.monthly_limit) {
+                (Some(used), Some(limit)) => format!("{used:.0}% of ${limit:.0}"),
+                (Some(used), None) => format!("{used:.0}%"),
+                _ => "on".to_string(),
+            };
+            data.details.push(Detail::new("Extra usage", value));
+        }
+    }
 
     data
 }

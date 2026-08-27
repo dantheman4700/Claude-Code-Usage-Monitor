@@ -93,6 +93,8 @@ fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollE
             .map(|window| section_from_window(window, now)),
         credits: None,
         stale: false,
+        plan: None,
+        details: Vec::new(),
     })
 }
 

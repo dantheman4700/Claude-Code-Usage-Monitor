@@ -26,8 +26,14 @@ pub struct PollFailure {
     pub error: PollError,
 }
 
-pub fn poll(enabled_providers: ProviderSet) -> Result<AppUsageData, PollFailure> {
-    poll_with(enabled_providers, poll_provider)
+/// Every reading that came back, and every provider that did not, with why.
+///
+/// `poll` collapses failures into one because the widget only needs to know
+/// whether anything answered. Deciding how soon to ask a provider again needs
+/// to know which ones failed and how -- a missing key and a dropped connection
+/// deserve very different retry schedules.
+pub fn poll_detailed(enabled_providers: ProviderSet) -> (AppUsageData, Vec<PollFailure>) {
+    poll_with_detailed(enabled_providers, poll_provider)
 }
 
 /// Keep the previous reading for any enabled provider that failed this cycle.
@@ -55,12 +61,31 @@ pub fn carry_forward_failures(
     merged
 }
 
+/// Collapses failures the way the widget wants: one error, only when
+/// nothing answered. The runtime uses `poll_detailed`; this is the shape the
+/// poll tests are written against.
+#[cfg(test)]
 fn poll_with(
     enabled_providers: ProviderSet,
-    mut poll_provider: impl FnMut(ProviderId) -> Result<UsageData, PollError>,
+    poll_provider: impl FnMut(ProviderId) -> Result<UsageData, PollError>,
 ) -> Result<AppUsageData, PollFailure> {
+    let (data, failures) = poll_with_detailed(enabled_providers, poll_provider);
+    if data.is_empty() {
+        Err(failures.first().copied().unwrap_or(PollFailure {
+            provider: enabled_providers.first().unwrap_or_default(),
+            error: PollError::RequestFailed,
+        }))
+    } else {
+        Ok(data)
+    }
+}
+
+fn poll_with_detailed(
+    enabled_providers: ProviderSet,
+    mut poll_provider: impl FnMut(ProviderId) -> Result<UsageData, PollError>,
+) -> (AppUsageData, Vec<PollFailure>) {
     let mut data = AppUsageData::default();
-    let mut first_error = None;
+    let mut failures = Vec::new();
     for provider in enabled_providers.iter() {
         match poll_provider(provider) {
             Ok(usage) => {
@@ -73,19 +98,11 @@ fn poll_with(
                         provider.descriptor().display_name
                     ));
                 }
-                first_error.get_or_insert(PollFailure { provider, error });
+                failures.push(PollFailure { provider, error });
             }
         }
     }
-
-    if data.is_empty() {
-        Err(first_error.unwrap_or(PollFailure {
-            provider: enabled_providers.first().unwrap_or_default(),
-            error: PollError::RequestFailed,
-        }))
-    } else {
-        Ok(data)
-    }
+    (data, failures)
 }
 
 mod antigravity;

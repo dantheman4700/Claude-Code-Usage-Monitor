@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod activity_log;
 mod app_settings;
 mod context_menu;
 mod dashboard;

@@ -11,10 +11,32 @@ use crate::models::AppUsageData;
 use crate::providers::{ProviderId, ProviderSet};
 use crate::usage_history::{Reading, UsageHistory};
 
-/// Usage at or above this is treated as effectively spent.
-pub const CRITICAL_PERCENT: f64 = 90.0;
-/// Usage at or above this is worth warning about.
-pub const WARNING_PERCENT: f64 = 75.0;
+/// Where the warning and critical lines sit. Configurable, because a
+/// provider that renews hourly and one that renews monthly deserve different
+/// alarm points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Thresholds {
+    pub warn: f64,
+    pub critical: f64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            warn: 75.0,
+            critical: 90.0,
+        }
+    }
+}
+
+impl Thresholds {
+    pub fn from_settings(settings: &crate::app_settings::SettingsFile) -> Self {
+        Self {
+            warn: f64::from(settings.warn_percent),
+            critical: f64::from(settings.critical_percent),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Window {
@@ -43,10 +65,10 @@ pub enum Severity {
 }
 
 impl Severity {
-    fn of(percentage: f64) -> Self {
-        if percentage >= CRITICAL_PERCENT {
+    pub fn of(percentage: f64, thresholds: Thresholds) -> Self {
+        if percentage >= thresholds.critical {
             Severity::Critical
-        } else if percentage >= WARNING_PERCENT {
+        } else if percentage >= thresholds.warn {
             Severity::Warning
         } else {
             Severity::Normal
@@ -66,11 +88,13 @@ pub struct Constraint {
     /// and "you are at 75% on Fable".
     pub scope: Option<String>,
     pub stale: bool,
+    /// Judged against the thresholds in force when the reading was collected.
+    pub severity: Severity,
 }
 
 impl Constraint {
     pub fn severity(&self) -> Severity {
-        Severity::of(self.percentage)
+        self.severity
     }
 
     pub fn remaining(&self) -> f64 {
@@ -151,7 +175,11 @@ pub fn seats_for(provider: ProviderId) -> &'static [&'static str] {
 }
 
 /// Pull every limit out of a poll.
-pub fn collect_constraints(data: &AppUsageData, enabled: ProviderSet) -> Vec<Constraint> {
+pub fn collect_constraints(
+    data: &AppUsageData,
+    enabled: ProviderSet,
+    thresholds: Thresholds,
+) -> Vec<Constraint> {
     let mut constraints = Vec::new();
     for provider in ProviderId::ALL {
         if !enabled.contains(provider) {
@@ -172,6 +200,7 @@ pub fn collect_constraints(data: &AppUsageData, enabled: ProviderSet) -> Vec<Con
                 resets_at: usage.session.resets_at,
                 scope: None,
                 stale: usage.stale,
+                severity: Severity::of(usage.session.percentage, thresholds),
             });
         }
         if usage.weekly.percentage > 0.0 || usage.weekly.resets_at.is_some() {
@@ -182,6 +211,7 @@ pub fn collect_constraints(data: &AppUsageData, enabled: ProviderSet) -> Vec<Con
                 resets_at: usage.weekly.resets_at,
                 scope: usage.weekly_label.clone(),
                 stale: usage.stale,
+                severity: Severity::of(usage.weekly.percentage, thresholds),
             });
         }
         if let Some(monthly) = &usage.monthly {
@@ -192,6 +222,7 @@ pub fn collect_constraints(data: &AppUsageData, enabled: ProviderSet) -> Vec<Con
                 resets_at: monthly.resets_at,
                 scope: None,
                 stale: usage.stale,
+                severity: Severity::of(monthly.percentage, thresholds),
             });
         }
         if let Some(credits) = &usage.credits {
@@ -202,6 +233,7 @@ pub fn collect_constraints(data: &AppUsageData, enabled: ProviderSet) -> Vec<Con
                 resets_at: None,
                 scope: None,
                 stale: usage.stale,
+                severity: Severity::of(credits.percentage, thresholds),
             });
         }
     }
@@ -266,7 +298,7 @@ pub fn project(constraint: &Constraint, percent_per_hour: f64, now: SystemTime) 
         (Some(exhausted), Some(resets)) => exhausted < resets,
         // With no reset time there is nothing to beat, so a finite exhaustion
         // is only news if the window is already filling.
-        (Some(_), None) => percent_per_hour > 0.0 && constraint.percentage >= WARNING_PERCENT,
+        (Some(_), None) => percent_per_hour > 0.0 && constraint.severity >= Severity::Warning,
         _ => false,
     };
     Projection {
@@ -321,8 +353,9 @@ pub fn analyze(
     enabled: ProviderSet,
     history: &UsageHistory,
     now: SystemTime,
+    thresholds: Thresholds,
 ) -> Insights {
-    let constraints = collect_constraints(data, enabled);
+    let constraints = collect_constraints(data, enabled, thresholds);
     let binding = constraints.first().cloned();
 
     let projections = constraints
@@ -405,6 +438,7 @@ mod tests {
             ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Codex]),
             &UsageHistory::default(),
             SystemTime::UNIX_EPOCH,
+            Thresholds::default(),
         );
 
         let binding = insights.binding.expect("a binding constraint");
@@ -426,7 +460,7 @@ mod tests {
             },
         )]);
         let constraints =
-            collect_constraints(&data, ProviderSet::from_enabled([ProviderId::Grok]));
+            collect_constraints(&data, ProviderSet::from_enabled([ProviderId::Grok]), Thresholds::default());
 
         assert_eq!(constraints.len(), 1);
         assert_eq!(constraints[0].window, Window::Weekly);
@@ -447,7 +481,7 @@ mod tests {
             },
         )]);
         let constraints =
-            collect_constraints(&data, ProviderSet::from_enabled([ProviderId::Claude]));
+            collect_constraints(&data, ProviderSet::from_enabled([ProviderId::Claude]), Thresholds::default());
 
         assert_eq!(constraints[0].window, Window::Credits);
         assert_eq!(constraints[0].severity(), Severity::Critical);
@@ -499,6 +533,7 @@ mod tests {
             resets_at: Some(now + Duration::from_secs(3 * 3_600)),
             scope: None,
             stale: false,
+            severity: Severity::Warning,
         };
         let projection = project(&constraint, 10.0, now);
 
@@ -519,6 +554,7 @@ mod tests {
             resets_at: Some(now + Duration::from_secs(3_600)),
             scope: None,
             stale: false,
+            severity: Severity::Warning,
         };
         assert!(!project(&constraint, 10.0, now).exhausts_before_reset);
     }
@@ -545,7 +581,13 @@ mod tests {
             ),
         ]);
         let enabled = ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Grok]);
-        let insights = analyze(&data, enabled, &UsageHistory::default(), SystemTime::UNIX_EPOCH);
+        let insights = analyze(
+            &data,
+            enabled,
+            &UsageHistory::default(),
+            SystemTime::UNIX_EPOCH,
+            Thresholds::default(),
+        );
 
         assert_eq!(insights.headroom[0].provider, ProviderId::Grok);
         assert_eq!(insights.headroom[0].percent_free, 96.0);
@@ -566,7 +608,13 @@ mod tests {
             },
         )]);
         let enabled = ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Devin]);
-        let insights = analyze(&data, enabled, &UsageHistory::default(), SystemTime::UNIX_EPOCH);
+        let insights = analyze(
+            &data,
+            enabled,
+            &UsageHistory::default(),
+            SystemTime::UNIX_EPOCH,
+            Thresholds::default(),
+        );
 
         assert_eq!(insights.headroom[0].provider, ProviderId::Claude);
         assert!(insights.headroom[0].available);
@@ -599,6 +647,7 @@ mod tests {
             ProviderSet::from_enabled([ProviderId::Fireworks]),
             &UsageHistory::default(),
             SystemTime::UNIX_EPOCH,
+            Thresholds::default(),
         );
 
         let coupling = insights

@@ -11,6 +11,8 @@ fn usage_with_session_percent(percentage: f64) -> UsageData {
         monthly: None,
         credits: None,
         stale: false,
+        plan: None,
+        details: Vec::new(),
     }
 }
 
