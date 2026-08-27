@@ -1716,7 +1716,7 @@
     },
     {
       "id": "fleet-tray-icon",
-      "name": "Fleet usage",
+      "name": "Fleet usage (mono)",
       "mouse_events": {
         "click": "show_dashboard()",
         "right_click": "show_context_menu(\"classic-v1\")"

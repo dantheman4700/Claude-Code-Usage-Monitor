@@ -164,9 +164,9 @@ pub(super) fn context_menu_action_flags(
         }
         ContextMenuAction::ToggleProvider { provider } => state.providers.contains(*provider),
         ContextMenuAction::ToggleStartup => is_startup_enabled(),
-        ContextMenuAction::SetDisplay { index } => lock_state()
-            .as_ref()
-            .is_some_and(|state| state.taskbar_index == *index),
+        // `state` is already held for the whole match; taking the lock again
+        // here deadlocked the UI thread on every right-click.
+        ContextMenuAction::SetDisplay { index } => state.taskbar_index == *index,
         ContextMenuAction::ToggleWidget => state
             .active_theme
             .as_ref()

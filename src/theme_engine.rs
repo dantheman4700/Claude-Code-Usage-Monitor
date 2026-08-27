@@ -1618,6 +1618,9 @@ fn set_mouse_property_expression(
 
 /// The one tray icon the fleet panel is opened from.
 pub const FLEET_TRAY_SURFACE_ID: &str = "fleet-tray-icon";
+/// The name the first generation of the fleet icon shipped with. A saved
+/// theme still carrying it has never been touched and can be upgraded.
+pub const FLEET_TRAY_SURFACE_LEGACY_NAME: &str = "Fleet usage";
 
 pub fn validate_mouse_action_script(
     source: &str,
@@ -1992,12 +1995,29 @@ impl ThemeDocument {
     }
 
     pub fn migrate_tray_icons_to_fleet(&mut self) -> bool {
-        if self
+        // A saved theme is a user-owned copy, so a fleet icon it already has
+        // is whatever generation it was given -- it does not follow the
+        // built-in. The generated name marks an untouched one; a surface the
+        // user renamed is theirs and is left alone.
+        if let Some(index) = self
             .surfaces
             .iter()
-            .any(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
+            .position(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
         {
-            return false;
+            let outdated = self.surfaces[index].name == FLEET_TRAY_SURFACE_LEGACY_NAME;
+            if !outdated {
+                return false;
+            }
+            let starter = Self::starter();
+            let Some(fleet) = starter
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == FLEET_TRAY_SURFACE_ID)
+            else {
+                return false;
+            };
+            self.surfaces[index] = fleet.clone();
+            return true;
         }
         let generated: Vec<String> = PROVIDER_DESCRIPTORS
             .iter()

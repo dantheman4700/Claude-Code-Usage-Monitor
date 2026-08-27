@@ -138,10 +138,16 @@ struct ProviderBackoff {
 /// How long to leave a provider alone after its `misses`th consecutive
 /// failure. Missing credentials are the slow case: nothing changes until a
 /// person signs in, and every attempt costs a `wsl.exe` spawn per distro.
+///
+/// The steps are deliberately coarser than the slowest poll interval. A retry
+/// due at exactly the next tick is no backoff at all -- the first schedule
+/// landed on the five-minute timer to the second, twice -- so the shortest
+/// wait for a missing key is now three ticks. A manual refresh clears the
+/// schedule for anyone who has just signed in.
 fn backoff_seconds(error: poller::PollError, misses: u32) -> u64 {
     let (base, cap) = match error {
-        poller::PollError::NoCredentials => (5 * 60, 15 * 60),
-        poller::PollError::AuthRequired | poller::PollError::TokenExpired => (2 * 60, 15 * 60),
+        poller::PollError::NoCredentials => (15 * 60, 60 * 60),
+        poller::PollError::AuthRequired | poller::PollError::TokenExpired => (5 * 60, 30 * 60),
         poller::PollError::RequestFailed => (60, 10 * 60),
     };
     let doubling = misses.saturating_sub(1).min(8);

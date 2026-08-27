@@ -126,6 +126,12 @@ pub(super) unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_APP_REFRESH_NOW => {
+            {
+                let mut state = lock_state();
+                if let Some(s) = state.as_mut() {
+                    s.provider_backoff.clear();
+                }
+            }
             request_poll(hwnd);
             LRESULT(0)
         }
@@ -323,6 +329,10 @@ pub(super) unsafe extern "system" fn wnd_proc(
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
                             s.force_notify_auth_error = true;
+                            // A manual refresh means "try everything now":
+                            // it is how someone who just signed in gets the
+                            // provider back without waiting out its backoff.
+                            s.provider_backoff.clear();
                         }
                     }
                     render_layered();

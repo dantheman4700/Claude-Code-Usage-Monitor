@@ -1707,3 +1707,39 @@ fn hiding_the_taskbar_widget_only_touches_taskbar_roots_and_reports_change() {
     // The tray root keeps whatever it had.
     assert_eq!(theme.surfaces[1].render.0, ThemeDocument::starter().surfaces[1].render.0);
 }
+
+/// The first generation of the fleet icon was orange. A saved theme still
+/// carrying that untouched icon is upgraded to the current one; a renamed one
+/// is the user's and stays.
+#[test]
+fn an_untouched_first_generation_fleet_icon_is_upgraded_in_place() {
+    let mut theme = ThemeDocument::starter();
+    let index = theme
+        .surfaces
+        .iter()
+        .position(|surface| surface.id == "fleet-tray-icon")
+        .expect("the starter ships the fleet icon");
+    theme.surfaces[index].name = FLEET_TRAY_SURFACE_LEGACY_NAME.into();
+    theme.surfaces[index].children.clear();
+
+    assert!(theme.migrate_tray_icons_to_fleet());
+    assert_eq!(theme.surfaces[index].name, "Fleet usage (mono)");
+    assert!(!theme.surfaces[index].children.is_empty());
+    // And it is not upgraded twice.
+    assert!(!theme.migrate_tray_icons_to_fleet());
+}
+
+#[test]
+fn a_renamed_fleet_icon_is_left_alone() {
+    let mut theme = ThemeDocument::starter();
+    let index = theme
+        .surfaces
+        .iter()
+        .position(|surface| surface.id == "fleet-tray-icon")
+        .expect("the starter ships the fleet icon");
+    theme.surfaces[index].name = "Danny's icon".into();
+    theme.surfaces[index].children.clear();
+
+    assert!(!theme.migrate_tray_icons_to_fleet());
+    assert!(theme.surfaces[index].children.is_empty());
+}
