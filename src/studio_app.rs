@@ -875,11 +875,12 @@ fn style_native_titlebar(context: &eframe::CreationContext<'_>) {
     };
     let hwnd = HWND(handle.hwnd.get() as *mut _);
     let (large_icon, small_icon) = crate::tray_icon::load_app_icons();
-    // COLORREF uses 0x00BBGGRR. Keep the caption integrated with the app while
-    // retaining the subtle outline that distinguishes ordinary Windows apps.
-    let surface_color = 0x0020_2020u32;
-    let border_color = 0x0054_5454u32;
-    let text_color = 0x00F0_F0F0u32;
+    // COLORREF uses 0x00BBGGRR. The caption takes the panel's own indigo so
+    // the title bar, the panel and the tray icon read as one thing, with a
+    // slightly lighter indigo outline standing in for the usual window edge.
+    let surface_color = 0x0028_0E10u32; // rgb(16, 14, 40)
+    let border_color = 0x0068_2A2Eu32; // rgb(46, 42, 104)
+    let text_color = 0x00FF_F2F4u32; // rgb(244, 242, 255)
     unsafe {
         if !large_icon.is_invalid() {
             let _ = SendMessageW(

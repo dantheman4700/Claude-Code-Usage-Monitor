@@ -64,14 +64,26 @@ pub(crate) fn configure_style(context: &egui::Context, language: LanguageId) {
     );
     context.set_fonts(fonts);
 
+    // The palette is the icon's: a deep indigo tile, a sweep from orange
+    // through pink to violet, and white. Surfaces are indigo rather than
+    // neutral grey so the panel and the tray icon read as one thing.
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = menu_surface();
-    visuals.window_fill = egui::Color32::from_rgb(38, 38, 38);
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(48, 48, 48);
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(58, 58, 58);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(65, 54, 51);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(76, 78, 84);
-    visuals.faint_bg_color = egui::Color32::from_rgb(37, 37, 37);
+    visuals.window_fill = egui::Color32::from_rgb(23, 20, 54);
+    visuals.widgets.noninteractive.fg_stroke.color = text();
+    visuals.widgets.inactive.fg_stroke.color = text();
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+    visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(42, 38, 96);
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(36, 32, 84);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(53, 49, 138);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(63, 58, 160);
+    visuals.widgets.hovered.bg_stroke.color = accent_hover_border();
+    visuals.widgets.active.bg_stroke.color = accent();
+    visuals.selection.bg_fill = egui::Color32::from_rgb(76, 70, 184);
+    visuals.selection.stroke.color = egui::Color32::WHITE;
+    visuals.hyperlink_color = accent();
+    visuals.faint_bg_color = egui::Color32::from_rgb(20, 18, 46);
     // Text edits use `extreme_bg_color`, while dropdowns and numeric fields use
     // the inactive widget surface. Keep them on the same surface so changing a
     // field type does not also change its apparent depth.
@@ -197,67 +209,67 @@ fn load_language_fonts(
 }
 
 pub(crate) fn accent() -> egui::Color32 {
-    egui::Color32::from_rgb(217, 119, 87)
+    egui::Color32::from_rgb(236, 72, 153)
 }
 
 pub(crate) fn accent_hover_border() -> egui::Color32 {
-    egui::Color32::from_rgb(157, 73, 45)
+    egui::Color32::from_rgb(139, 92, 246)
 }
 
 pub(crate) fn menu_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(32, 32, 32)
+    egui::Color32::from_rgb(16, 14, 40)
 }
 
 pub(crate) fn muted() -> egui::Color32 {
-    egui::Color32::from_rgb(143, 146, 156)
+    egui::Color32::from_rgb(154, 151, 194)
 }
 
 pub(crate) fn selected_menu_fill() -> egui::Color32 {
-    egui::Color32::from_rgb(49, 49, 49)
+    egui::Color32::from_rgb(42, 38, 96)
 }
 
 pub(crate) fn helper_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(21, 22, 26)
+    egui::Color32::from_rgb(13, 11, 34)
 }
 
 pub(crate) fn helper_card_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(24, 25, 29)
+    egui::Color32::from_rgb(18, 16, 44)
 }
 
 pub(crate) fn helper_border() -> egui::Color32 {
-    egui::Color32::from_rgb(48, 50, 57)
+    egui::Color32::from_rgb(46, 42, 104)
 }
 
 pub(crate) fn success() -> egui::Color32 {
-    egui::Color32::from_rgb(78, 201, 143)
+    egui::Color32::from_rgb(74, 222, 128)
 }
 
 pub(crate) fn danger() -> egui::Color32 {
-    egui::Color32::from_rgb(232, 119, 95)
+    egui::Color32::from_rgb(244, 63, 94)
 }
 
 pub(crate) fn toggle_inactive() -> egui::Color32 {
-    egui::Color32::from_rgb(72, 72, 72)
+    egui::Color32::from_rgb(59, 55, 112)
 }
 
 pub(crate) fn toggle_inactive_hover() -> egui::Color32 {
-    egui::Color32::from_rgb(92, 92, 92)
+    egui::Color32::from_rgb(76, 71, 144)
 }
 
 pub(crate) fn toggle_knob() -> egui::Color32 {
-    egui::Color32::from_rgb(245, 245, 245)
+    egui::Color32::from_rgb(250, 249, 255)
 }
 
 pub(crate) fn toggle_label() -> egui::Color32 {
-    egui::Color32::from_rgb(218, 218, 218)
+    egui::Color32::from_rgb(230, 227, 255)
 }
 
 pub(crate) fn anchor_outline() -> egui::Color32 {
-    egui::Color32::from_rgb(128, 131, 140)
+    egui::Color32::from_rgb(139, 136, 190)
 }
 
 pub(crate) fn anchor_idle_fill() -> egui::Color32 {
-    egui::Color32::from_rgb(35, 37, 42)
+    egui::Color32::from_rgb(24, 21, 58)
 }
 
 pub(crate) fn checkerboard_dark() -> egui::Color32 {
@@ -269,45 +281,77 @@ pub(crate) fn checkerboard_light() -> egui::Color32 {
 }
 
 pub(crate) fn section_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(35, 35, 35)
+    egui::Color32::from_rgb(26, 23, 64)
 }
 
 pub(crate) fn section_border() -> egui::Color32 {
-    egui::Color32::from_rgb(54, 54, 54)
+    egui::Color32::from_rgb(46, 42, 104)
 }
 
 pub(crate) fn setting_separator_color() -> egui::Color32 {
-    egui::Color32::from_rgb(53, 53, 53)
+    egui::Color32::from_rgb(44, 40, 100)
 }
 
 pub(crate) fn menu_hover() -> egui::Color32 {
-    egui::Color32::from_rgb(42, 42, 42)
+    egui::Color32::from_rgb(30, 27, 75)
 }
 
 pub(crate) fn menu_text() -> egui::Color32 {
-    egui::Color32::from_rgb(245, 245, 245)
+    egui::Color32::from_rgb(244, 242, 255)
 }
 
 pub(crate) fn asset_card_selected() -> egui::Color32 {
-    egui::Color32::from_rgb(57, 48, 46)
+    egui::Color32::from_rgb(68, 44, 110)
 }
 
 pub(crate) fn asset_card_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(31, 32, 36)
+    egui::Color32::from_rgb(22, 19, 56)
 }
 
 pub(crate) fn asset_card_border() -> egui::Color32 {
-    egui::Color32::from_rgb(55, 57, 64)
+    egui::Color32::from_rgb(50, 46, 112)
 }
 
 pub(crate) fn asset_preview_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(24, 25, 28)
+    egui::Color32::from_rgb(14, 12, 36)
 }
 
 pub(crate) fn splitter_hover_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(38, 40, 46)
+    egui::Color32::from_rgb(30, 27, 75)
 }
 
 pub(crate) fn splitter_idle() -> egui::Color32 {
-    egui::Color32::from_rgb(65, 68, 76)
+    egui::Color32::from_rgb(66, 62, 128)
+}
+
+pub(crate) fn text() -> egui::Color32 {
+    egui::Color32::from_rgb(244, 242, 255)
+}
+
+/// The icon's orange, used for warnings so the two share a vocabulary.
+pub(crate) fn warning() -> egui::Color32 {
+    egui::Color32::from_rgb(249, 115, 22)
+}
+
+/// The icon's sweep: orange through pink to violet, at `t` in 0..=1.
+pub(crate) fn sweep(t: f32) -> egui::Color32 {
+    const STOPS: [(f32, [u8; 3]); 3] = [
+        (0.0, [249, 115, 22]),
+        (0.5, [236, 72, 153]),
+        (1.0, [139, 92, 246]),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    let (from, to) = if t <= STOPS[1].0 {
+        (STOPS[0], STOPS[1])
+    } else {
+        (STOPS[1], STOPS[2])
+    };
+    let span = (to.0 - from.0).max(f32::EPSILON);
+    let k = (t - from.0) / span;
+    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * k).round() as u8;
+    egui::Color32::from_rgb(
+        mix(from.1[0], to.1[0]),
+        mix(from.1[1], to.1[1]),
+        mix(from.1[2], to.1[2]),
+    )
 }

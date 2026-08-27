@@ -13,7 +13,7 @@ use crate::activity_log::{ActivityEvent, EventKind};
 use crate::insights::{self, Constraint, Headroom, Insights, Projection, Severity, Thresholds};
 use crate::models::UsageData;
 use crate::providers::{ProviderId, ProviderSet};
-use crate::ui::theme::{accent, danger, muted, section_border, section_surface, success};
+use crate::ui::theme::{accent, danger, muted, section_border, section_surface, success, sweep, warning};
 use crate::usage_history::Reading;
 
 const METER_WIDTH: f32 = 170.0;
@@ -23,9 +23,6 @@ const SPARK_HEIGHT: f32 = 26.0;
 const LABEL_COLUMN: f32 = 72.0;
 const ACTIVITY_ROWS: usize = 25;
 
-fn warning_colour() -> egui::Color32 {
-    egui::Color32::from_rgb(224, 160, 48)
-}
 
 impl StudioApp {
     pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
@@ -428,7 +425,7 @@ fn status_chip(
                 .unwrap_or(Severity::Normal);
             match worst {
                 Severity::Critical => (language.text("critical"), danger()),
-                Severity::Warning => (language.text("warning"), warning_colour()),
+                Severity::Warning => (language.text("warning"), warning()),
                 Severity::Normal => (language.text("ok"), success()),
             }
         }
@@ -527,7 +524,7 @@ fn window_caption(constraint: &Constraint) -> String {
 fn severity_colour(severity: Severity) -> egui::Color32 {
     match severity {
         Severity::Critical => danger(),
-        Severity::Warning => warning_colour(),
+        Severity::Warning => warning(),
         Severity::Normal => success(),
     }
 }
@@ -536,7 +533,7 @@ fn headroom_colour(headroom: &Headroom) -> egui::Color32 {
     if headroom.percent_free <= 10.0 {
         danger()
     } else if headroom.percent_free <= 25.0 {
-        warning_colour()
+        warning()
     } else {
         success()
     }
@@ -553,7 +550,11 @@ fn meter(ui: &mut egui::Ui, percentage: f64, severity: Severity, thresholds: Thr
     if fraction > 0.0 {
         let mut filled = rect;
         filled.set_width(rect.width() * fraction);
-        painter.rect_filled(filled, 3.0, severity_colour(severity));
+        if severity == Severity::Normal {
+            sweep_fill(painter, filled, rect.width());
+        } else {
+            painter.rect_filled(filled, 3.0, severity_colour(severity));
+        }
     }
     for line in [thresholds.warn, thresholds.critical] {
         let x = rect.left() + rect.width() * (line / 100.0).clamp(0.0, 1.0) as f32;
@@ -593,7 +594,28 @@ fn sparkline(ui: &mut egui::Ui, series: &[(u64, Reading)], thresholds: Threshold
             egui::pos2(x, y)
         })
         .collect();
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, accent())));
+    for pair in points.windows(2) {
+        let t = (pair[1].x - rect.left()) / rect.width().max(1.0);
+        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.5, sweep(t)));
+    }
+}
+
+/// Fill `filled` with the icon's sweep, where `t` runs across `full_width` so
+/// a half-full meter shows the orange half of the gradient, not a squeezed
+/// copy of the whole thing.
+fn sweep_fill(painter: &egui::Painter, filled: egui::Rect, full_width: f32) {
+    const SLICE: f32 = 3.0;
+    let mut x = filled.left();
+    while x < filled.right() {
+        let next = (x + SLICE).min(filled.right());
+        let t = ((x + next) * 0.5 - filled.left()) / full_width.max(1.0);
+        let slice = egui::Rect::from_min_max(egui::pos2(x, filled.top()), egui::pos2(next, filled.bottom()));
+        painter.rect_filled(slice, 0.0, sweep(t));
+        x = next;
+    }
+    // Rounded ends, re-drawn over the square slices.
+    let cap = egui::Rect::from_min_max(filled.left_top(), egui::pos2(filled.left() + 6.0, filled.bottom()));
+    painter.rect_filled(cap, egui::CornerRadius { nw: 3, sw: 3, ne: 0, se: 0 }, sweep(0.0));
 }
 
 fn reset_phrase(resets_at: Option<SystemTime>, now: SystemTime) -> String {
