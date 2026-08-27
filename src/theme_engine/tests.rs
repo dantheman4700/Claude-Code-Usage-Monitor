@@ -1723,7 +1723,7 @@ fn an_untouched_first_generation_fleet_icon_is_upgraded_in_place() {
     theme.surfaces[index].children.clear();
 
     assert!(theme.migrate_tray_icons_to_fleet());
-    assert_eq!(theme.surfaces[index].name, "Fleet usage (mono)");
+    assert_eq!(theme.surfaces[index].name, "Fleet usage (gauge)");
     assert!(!theme.surfaces[index].children.is_empty());
     // And it is not upgraded twice.
     assert!(!theme.migrate_tray_icons_to_fleet());

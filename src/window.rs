@@ -500,6 +500,144 @@ fn save_settings_or_log(settings: &SettingsFile, context: &str) {
     }
 }
 
+/// What the tray icon says on hover: one line per provider that is reporting,
+/// with both windows and whichever reset comes first.
+///
+/// Windows caps a tray tip at 127 characters. A provider whose line would not
+/// fit is left out whole rather than cut mid-word; the panel has the rest.
+fn fleet_tray_tooltip(data: Option<&crate::models::AppUsageData>) -> String {
+    const LIMIT: usize = 127;
+    let Some(data) = data else {
+        return "Fleet usage".to_string();
+    };
+    let now = SystemTime::now();
+    let mut lines = Vec::new();
+    for provider in ProviderId::ALL {
+        let Some(usage) = data.get(provider) else {
+            continue;
+        };
+        let name = provider.descriptor().display_name;
+        let label = usage.weekly_label.as_deref();
+        // A window a provider does not bill reads as a flat zero; only show
+        // the session figure when there is a session window behind it.
+        let has_session = usage.session.percentage > 0.0 || usage.session.resets_at.is_some();
+        let body = if has_session {
+            match label {
+                Some(label) => format!(
+                    "{:.0}% · {:.0}% {label}",
+                    usage.session.percentage, usage.weekly.percentage
+                ),
+                None => format!("{:.0}% · {:.0}%", usage.session.percentage, usage.weekly.percentage),
+            }
+        } else {
+            format!("{:.0}% {}", usage.weekly.percentage, label.unwrap_or("7d"))
+        };
+        let reset = [usage.session.resets_at, usage.weekly.resets_at]
+            .into_iter()
+            .flatten()
+            .filter_map(|at| at.duration_since(now).ok())
+            .min()
+            .map(|remaining| format!("  ↻{}", short_duration(remaining)))
+            .unwrap_or_default();
+        let stale = if usage.stale { " (stale)" } else { "" };
+        lines.push(format!("{name} {body}{reset}{stale}"));
+    }
+    if lines.is_empty() {
+        return "Fleet usage · nothing reporting".to_string();
+    }
+    let mut tip = String::new();
+    for line in lines {
+        let separator = usize::from(!tip.is_empty());
+        if tip.chars().count() + separator + line.chars().count() > LIMIT {
+            break;
+        }
+        if separator == 1 {
+            tip.push('\n');
+        }
+        tip.push_str(&line);
+    }
+    tip
+}
+
+/// "3h12m" / "2d5h" / "40m" -- as short as a tooltip needs.
+fn short_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d{hours}h")
+    } else if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tray_tooltip_tests {
+    use super::*;
+    use crate::models::{AppUsageData, UsageData, UsageSection};
+
+    fn usage(session: Option<f64>, weekly: f64, label: Option<&str>) -> UsageData {
+        UsageData {
+            session: UsageSection {
+                percentage: session.unwrap_or(0.0),
+                resets_at: session.map(|_| SystemTime::now() + Duration::from_secs(3 * 3_600)),
+            },
+            weekly: UsageSection {
+                percentage: weekly,
+                resets_at: Some(SystemTime::now() + Duration::from_secs(4 * 86_400)),
+            },
+            weekly_label: label.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn each_reporting_provider_gets_one_line_with_the_sooner_reset() {
+        let mut data = AppUsageData::default();
+        data.insert(ProviderId::Claude, usage(Some(6.0), 11.0, Some("Fable")));
+        data.insert(ProviderId::Grok, usage(None, 3.0, Some("wk")));
+        let tip = fleet_tray_tooltip(Some(&data));
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("Claude Code 6% · 11% Fable  ↻2h59m") || lines[0].starts_with("Claude Code 6% · 11% Fable  ↻3h00m"), "{}", lines[0]);
+        // No session window: a single figure with its label, not "0% · 3%".
+        assert!(lines[1].starts_with("Grok 3% wk  ↻3d23h"), "{}", lines[1]);
+    }
+
+    /// The tip is capped by Windows; lines that do not fit are dropped whole.
+    #[test]
+    fn lines_that_would_not_fit_are_left_out_rather_than_cut() {
+        let mut data = AppUsageData::default();
+        for provider in ProviderId::ALL {
+            data.insert(provider, usage(Some(50.0), 50.0, Some("longish label")));
+        }
+        let tip = fleet_tray_tooltip(Some(&data));
+        assert!(tip.chars().count() <= 127, "{}", tip.chars().count());
+        for line in tip.lines() {
+            assert!(line.contains("↻"), "a line was cut: {line}");
+        }
+    }
+
+    #[test]
+    fn nothing_reporting_says_so() {
+        assert_eq!(fleet_tray_tooltip(None), "Fleet usage");
+        assert_eq!(
+            fleet_tray_tooltip(Some(&AppUsageData::default())),
+            "Fleet usage · nothing reporting"
+        );
+    }
+
+    #[test]
+    fn durations_stay_short() {
+        assert_eq!(short_duration(Duration::from_secs(3 * 3_600 + 12 * 60)), "3h12m");
+        assert_eq!(short_duration(Duration::from_secs(2 * 86_400 + 5 * 3_600)), "2d5h");
+        assert_eq!(short_duration(Duration::from_secs(40 * 60)), "40m");
+    }
+}
+
 fn tray_icon_tooltip_from_state() -> String {
     let state = lock_state();
     match state.as_ref() {
@@ -525,6 +663,7 @@ fn sync_tray_icon(hwnd: HWND) {
                 == SurfaceNest::TrayIcon
         });
         if has_tray_surfaces {
+            let tooltip = fleet_tray_tooltip(data.as_ref());
             let icons = theme
                 .surfaces
                 .iter()
@@ -575,7 +714,7 @@ fn sync_tray_icon(hwnd: HWND) {
                     );
                     Some(tray_icon::ThemedTrayIcon {
                         surface_index,
-                        tooltip: surface.name.clone(),
+                        tooltip: tooltip.clone(),
                         width: rendered.width,
                         height: rendered.height,
                         pixels: rendered.pixels,
