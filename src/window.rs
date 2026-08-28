@@ -664,7 +664,7 @@ fn tray_icon_tooltip_from_state() -> String {
         // `fleet_tray_tooltip` only reads the data it is handed, so calling it
         // while the lock is held is fine.
         Some(state) => fleet_tray_tooltip(state.data.as_ref()),
-        None => "Claude Code Usage Monitor".to_string(),
+        None => "Headroom".to_string(),
     }
 }
 
@@ -1576,6 +1576,14 @@ fn total_widget_width() -> i32 {
 }
 
 pub fn run() {
+    if app_settings::migrate_legacy_app_data() {
+        diagnose::log("migrated app data from ClaudeCodeUsageMonitor to Headroom");
+        activity_log::record(
+            activity_log::EventKind::Migration,
+            None,
+            "Carried settings and history over from Claude Code Usage Monitor",
+        );
+    }
     let run_args: Vec<String> = std::env::args().collect();
     let open_dashboard_on_start = run_args.iter().any(|argument| argument == "--dashboard");
     let allow_multiple = run_args
@@ -1593,9 +1601,9 @@ pub fn run() {
     // wait for the previous instance to release the mutex, then take over.
     let is_relaunch = std::env::var(ENV_RELAUNCH).is_ok();
     let mutex_name = native_interop::wide_str(&if allow_multiple {
-        format!("Global\\ClaudeCodeUsageMonitor-{}", std::process::id())
+        format!("Global\\Headroom-{}", std::process::id())
     } else {
-        "Global\\ClaudeCodeUsageMonitor".to_string()
+        "Global\\Headroom".to_string()
     });
     let _mutex = unsafe {
         let handle = CreateMutexW(None, true, PCWSTR::from_raw(mutex_name.as_ptr()));
@@ -1633,7 +1641,7 @@ pub fn run() {
         }
     };
 
-    let class_name = native_interop::wide_str("ClaudeCodeUsageMonitor");
+    let class_name = native_interop::wide_str("Headroom");
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();

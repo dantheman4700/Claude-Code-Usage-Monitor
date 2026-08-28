@@ -241,7 +241,47 @@ pub fn app_data_directory() -> PathBuf {
     let root = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    root.join("ClaudeCodeUsageMonitor")
+    root.join(APP_DATA_DIRECTORY_NAME)
+}
+
+pub const APP_DATA_DIRECTORY_NAME: &str = "Headroom";
+/// Where the app kept its files before it became Headroom.
+const LEGACY_APP_DATA_DIRECTORY_NAME: &str = "ClaudeCodeUsageMonitor";
+
+/// Carry settings, readings and history over from the previous name, once.
+///
+/// Only when the new directory does not exist yet: a user who has already run
+/// Headroom has newer files there, and the old directory is left untouched
+/// either way so nothing is lost if this goes wrong.
+pub fn migrate_legacy_app_data() -> bool {
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let legacy = root.join(LEGACY_APP_DATA_DIRECTORY_NAME);
+    let current = app_data_directory();
+    if current.exists() || !legacy.is_dir() {
+        return false;
+    }
+    fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+    match copy_tree(&legacy, &current) {
+        Ok(()) => true,
+        Err(error) => {
+            crate::diagnose::log(format!("unable to migrate legacy app data: {error}"));
+            false
+        }
+    }
 }
 
 pub fn settings_path() -> PathBuf {

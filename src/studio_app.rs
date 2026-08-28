@@ -139,7 +139,7 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
         .expect("src/icons/16x16.png must be a valid PNG app icon");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Usage Monitor")
+            .with_title("Headroom")
             .with_inner_size([dashboard_width, dashboard_height])
             .with_icon(dashboard_icon),
         renderer: eframe::Renderer::Glow,
@@ -147,7 +147,7 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
         ..Default::default()
     };
     if let Err(error) = eframe::run_native(
-        "ClaudeCodeUsageMonitor.Studio",
+        "Headroom.Panel",
         options,
         Box::new(move |context| Ok(Box::new(StudioApp::new(context, owner, initial_page)))),
     ) {
