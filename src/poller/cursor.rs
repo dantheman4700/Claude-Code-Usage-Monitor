@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{build_agent, parse_iso8601, PollError};
 use crate::diagnose;
-use crate::models::{UsageData, UsageSection};
+use crate::models::{LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 const CURSOR_USAGE_SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const CURSOR_SESSION_TOKEN_ENV: &str = "CURSOR_SESSION_TOKEN";
@@ -216,28 +216,40 @@ fn fetch_cursor_usage(cookie: &str) -> Result<UsageData, PollError> {
 fn cursor_usage_from_summary(response: CursorUsageSummaryResponse) -> Option<UsageData> {
     let plan = response.individual_usage?.plan?;
     let reset = parse_iso8601(response.billing_cycle_end.as_deref());
-    let auto = plan
-        .auto_percent_used
-        .or(plan.total_percent_used)
+    // Cursor bills one monthly cycle with two meters inside it -- included
+    // "Auto" usage and pay-per-use "API" -- and reports the combined figure
+    // too. None of that is a session or a weekly window, so the cycle total
+    // is the monthly limit and the two meters are scoped rows beside it.
+    let auto = plan.auto_percent_used.map(|value| value.clamp(0.0, 100.0));
+    let api = plan.api_percent_used.map(|value| value.clamp(0.0, 100.0));
+    let total = plan
+        .total_percent_used
+        .or(auto)
         .unwrap_or(0.0)
         .clamp(0.0, 100.0);
-    let api = plan.api_percent_used.unwrap_or(0.0).clamp(0.0, 100.0);
+    let section = |percentage: f64| UsageSection {
+        percentage,
+        resets_at: reset,
+    };
+    let mut scoped = Vec::new();
+    if let Some(auto) = auto {
+        scoped.push(ScopedLimit {
+            label: "Auto".into(),
+            window: LimitWindow::Monthly,
+            section: section(auto),
+        });
+    }
+    if let Some(api) = api {
+        scoped.push(ScopedLimit {
+            label: "API".into(),
+            window: LimitWindow::Monthly,
+            section: section(api),
+        });
+    }
     Some(UsageData {
-        session: UsageSection {
-            percentage: auto,
-            resets_at: reset,
-        },
-        weekly: UsageSection {
-            percentage: api,
-            resets_at: reset,
-        },
-        weekly_label: Some("API".into()),
-        monthly: None,
-        credits: None,
-        stale: false,
-        plan: None,
-        details: Vec::new(),
-        scoped: Vec::new(),
+        monthly: Some(section(total)),
+        scoped,
+        ..Default::default()
     })
 }
 
@@ -310,10 +322,20 @@ mod tests {
         .unwrap();
 
         let data = cursor_usage_from_summary(response).unwrap();
-        assert_eq!(data.session.percentage, 12.5);
-        assert_eq!(data.weekly.percentage, 3.0);
-        assert_eq!(data.weekly_label.as_deref(), Some("API"));
-        assert!(data.session.resets_at.is_some());
-        assert_eq!(data.session.resets_at, data.weekly.resets_at);
+        // One monthly cycle, with the two meters as rows beside the total.
+        let monthly = data.monthly.expect("the billing cycle is the monthly limit");
+        assert_eq!(monthly.percentage, 10.0);
+        assert!(monthly.resets_at.is_some());
+        let rows: Vec<(&str, LimitWindow, f64)> = data
+            .scoped
+            .iter()
+            .map(|s| (s.label.as_str(), s.window, s.section.percentage))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("Auto", LimitWindow::Monthly, 12.5), ("API", LimitWindow::Monthly, 3.0)]
+        );
+        assert_eq!(data.session.percentage, 0.0, "Cursor bills no session window");
+        assert_eq!(data.weekly.percentage, 0.0, "nor a weekly one");
     }
 }

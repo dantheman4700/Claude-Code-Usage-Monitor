@@ -78,15 +78,20 @@ fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollE
         .as_ref()
         .map(|window| section_from_window(window, now))
         .unwrap_or_default();
-    let (weekly, weekly_label) = select_long_window(&usage, now);
+    // Each window is its own limit and all three hold at once. The weekly
+    // slot used to take whichever of weekly and monthly was fuller, which
+    // hid the real weekly figure whenever the month was the tighter one.
+    let weekly = usage
+        .weekly
+        .as_ref()
+        .map(|window| section_from_window(window, now))
+        .unwrap_or_default();
+    let weekly_label = usage.weekly.as_ref().map(|_| "7d".to_string());
 
     Ok(UsageData {
         session,
         weekly,
         weekly_label,
-        // The monthly window is kept available to themes alongside the
-        // auto-selected `weekly` slot (which prefers the more constrained
-        // of the two windows, as before).
         monthly: usage
             .monthly
             .as_ref()
@@ -99,16 +104,6 @@ fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollE
     })
 }
 
-fn select_long_window(usage: &DashboardUsage, now: SystemTime) -> (UsageSection, Option<String>) {
-    match (&usage.weekly, &usage.monthly) {
-        (Some(weekly), Some(monthly)) if monthly.usage_percent > weekly.usage_percent => {
-            (section_from_window(monthly, now), Some("30d".to_string()))
-        }
-        (Some(weekly), _) => (section_from_window(weekly, now), Some("7d".to_string())),
-        (None, Some(monthly)) => (section_from_window(monthly, now), Some("30d".to_string())),
-        (None, None) => (UsageSection::default(), None),
-    }
-}
 
 fn section_from_window(window: &UsageWindow, now: SystemTime) -> UsageSection {
     UsageSection {
@@ -390,28 +385,22 @@ mod tests {
     }
 
     #[test]
-    fn most_constrained_long_window_is_selected() {
-        let usage = DashboardUsage {
-            weekly: Some(UsageWindow {
-                usage_percent: 40.0,
-                reset_in_sec: 60,
-            }),
-            monthly: Some(UsageWindow {
-                usage_percent: 70.0,
-                reset_in_sec: 120,
-            }),
-            ..Default::default()
-        };
-        let (section, label) = select_long_window(&usage, UNIX_EPOCH);
-        assert_eq!(section.percentage, 70.0);
-        assert_eq!(label.as_deref(), Some("30d"));
-    }
-
-    #[test]
     fn dashboard_identifiers_and_cookie_headers_reject_request_injection() {
         assert!(valid_workspace_id("wrk_01-test"));
         assert!(!valid_workspace_id("../other"));
         assert!(valid_cookie("auth=abc; theme=dark"));
         assert!(!valid_cookie("auth=abc\r\nX-Test: injected"));
+    }
+
+    /// Weekly and monthly are separate limits; the fuller one must not stand
+    /// in for the other.
+    #[test]
+    fn weekly_and_monthly_windows_both_survive() {
+        let now = SystemTime::UNIX_EPOCH;
+        let weekly = section_from_window(&UsageWindow { usage_percent: 40.0, reset_in_sec: 60 }, now);
+        let monthly = section_from_window(&UsageWindow { usage_percent: 70.0, reset_in_sec: 120 }, now);
+        assert_eq!(weekly.percentage, 40.0);
+        assert_eq!(monthly.percentage, 70.0);
+        assert!(weekly.resets_at < monthly.resets_at);
     }
 }

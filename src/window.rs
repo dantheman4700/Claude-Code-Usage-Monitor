@@ -529,10 +529,20 @@ fn fleet_tray_tooltip(data: Option<&crate::models::AppUsageData>) -> String {
                 ),
                 None => format!("{:.0}% · {:.0}%", usage.session.percentage, usage.weekly.percentage),
             }
+        } else if usage.weekly.percentage == 0.0 && usage.weekly.resets_at.is_none() {
+            // No weekly window either: the monthly cycle is the figure.
+            match &usage.monthly {
+                Some(monthly) => format!("{:.0}% mo", monthly.percentage),
+                None => format!("{:.0}% {}", usage.weekly.percentage, label.unwrap_or("7d")),
+            }
         } else {
             format!("{:.0}% {}", usage.weekly.percentage, label.unwrap_or("7d"))
         };
-        let reset = [usage.session.resets_at, usage.weekly.resets_at]
+        let reset = [
+            usage.session.resets_at,
+            usage.weekly.resets_at,
+            usage.monthly.as_ref().and_then(|monthly| monthly.resets_at),
+        ]
             .into_iter()
             .flatten()
             .filter_map(|at| at.duration_since(now).ok())

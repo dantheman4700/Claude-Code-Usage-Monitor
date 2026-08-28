@@ -106,6 +106,7 @@ fn poll_with_detailed(
 }
 
 mod antigravity;
+mod calendar;
 mod claude;
 mod claude_desktop;
 mod codex;
