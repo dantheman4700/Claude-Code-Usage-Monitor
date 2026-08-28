@@ -19,7 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, calendar, wsl, PollError};
+use super::{build_agent, calendar, credentials, PollError};
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{Detail, UsageData, UsageSection};
 
@@ -31,10 +32,18 @@ const FIREWORKS_ACCOUNT_ENV: &str = "FIREWORKS_ACCOUNT_ID";
 /// How many standing quotas to list before it stops being a summary.
 const MAX_QUOTA_DETAILS: usize = 6;
 
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_KEY: &str = "cat ~/.claude/.env.fireworks";
-const WSL_WATCH_KEY: &str = "if [ -f ~/.claude/.env.fireworks ]; then \
-     stat -c 'present|%s|%Y' ~/.claude/.env.fireworks; else echo missing; fi";
+/// Quote-free path expression -- see [`credentials`].
+const WSL_ENV_PATH: &str = "~/.claude/.env.fireworks";
+
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Fireworks,
+    env: &[&[FIREWORKS_KEY_ENV]],
+    native_files: || windows_env_file().into_iter().collect(),
+    native_extra: &[],
+    native_refresh: None,
+    wsl_paths: &[WSL_ENV_PATH],
+    wsl_refresh: None,
+};
 
 #[derive(Deserialize)]
 struct AccountsResponse {
@@ -95,12 +104,11 @@ fn lenient_f64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Opti
 }
 
 pub(super) fn poll_fireworks() -> Result<UsageData, PollError> {
-    let key = read_fireworks_key().ok_or_else(|| {
-        diagnose::log(
-            "Fireworks usage poll failed: no key found (set FIREWORKS_API_KEY or write ~/.claude/.env.fireworks)",
-        );
-        PollError::NoCredentials
-    })?;
+    credentials::poll(&SPEC, attempt)
+}
+
+fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, PollError> {
+    let key = credentials::env_value(content, FIREWORKS_KEY_ENV).ok_or(PollError::NoCredentials)?;
     let agent = build_agent()?;
     let account = resolve_account(&agent, &key)?;
     let quotas = get_json::<QuotasResponse>(&agent, &key, &format!("{FIREWORKS_API}/{}/quotas?pageSize=200", account.name))?;
@@ -123,26 +131,12 @@ pub(super) fn poll_fireworks() -> Result<UsageData, PollError> {
     Ok(fireworks_usage(&account, &quotas.quotas, spend_usd, month_end))
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let mut signatures = vec![match non_empty_environment(FIREWORKS_KEY_ENV) {
-        Some(_) => "fireworks|environment|present".to_string(),
-        None => "fireworks|environment|missing".to_string(),
-    }];
-    if let Some(path) = windows_env_file() {
-        signatures.push(super::file_signature("fireworks|file", &path));
-    }
-    if all_sources {
-        for distro in wsl::list_distros() {
-            if let Some(signature) = wsl::path_watch_signature(&distro, "fireworks-wsl", WSL_WATCH_KEY) {
-                signatures.push(signature);
-            }
-        }
-    }
-    signatures
+pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
 fn resolve_account(agent: &ureq::Agent, key: &str) -> Result<Account, PollError> {
-    if let Some(id) = non_empty_environment(FIREWORKS_ACCOUNT_ENV)
+    if let Some(id) = credentials::non_empty_environment(FIREWORKS_ACCOUNT_ENV)
         .or_else(|| env_file_value(FIREWORKS_ACCOUNT_ENV))
     {
         let name = if id.starts_with("accounts/") { id } else { format!("accounts/{id}") };
@@ -253,46 +247,15 @@ fn unix_now(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-fn read_fireworks_key() -> Option<String> {
-    non_empty_environment(FIREWORKS_KEY_ENV)
-        .or_else(|| env_file_value(FIREWORKS_KEY_ENV))
-        .or_else(|| {
-            wsl::list_distros().into_iter().find_map(|distro| {
-                wsl::read_file(&distro, WSL_READ_KEY, "Fireworks key")
-                    .and_then(|contents| parse_env_value(&contents, FIREWORKS_KEY_ENV))
-            })
-        })
-}
-
+/// A value from the native env file, for settings that sit beside the key.
 fn env_file_value(name: &str) -> Option<String> {
     windows_env_file()
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|contents| parse_env_value(&contents, name))
+        .and_then(|contents| credentials::env_value(&contents, name))
 }
 
 fn windows_env_file() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude").join(".env.fireworks"))
-}
-
-fn non_empty_environment(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn parse_env_value(contents: &str, name: &str) -> Option<String> {
-    contents.lines().find_map(|line| {
-        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        let value = line.strip_prefix(name)?.trim_start();
-        let value = value.strip_prefix('=')?.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))
-            .unwrap_or(value);
-        (!value.is_empty()).then(|| value.to_string())
-    })
 }
 
 #[cfg(test)]
@@ -349,8 +312,8 @@ mod tests {
 
     #[test]
     fn env_files_survive_export_and_quoting() {
-        assert_eq!(parse_env_value("export FIREWORKS_API_KEY=\"fw-abc\"\n", FIREWORKS_KEY_ENV).as_deref(), Some("fw-abc"));
-        assert_eq!(parse_env_value("FIREWORKS_ACCOUNT_ID=acme", FIREWORKS_ACCOUNT_ENV).as_deref(), Some("acme"));
-        assert_eq!(parse_env_value("OTHER_KEY=nope", FIREWORKS_KEY_ENV), None);
+        assert_eq!(credentials::env_value("export FIREWORKS_API_KEY=\"fw-abc\"\n", FIREWORKS_KEY_ENV).as_deref(), Some("fw-abc"));
+        assert_eq!(credentials::env_value("FIREWORKS_ACCOUNT_ID=acme", FIREWORKS_ACCOUNT_ENV).as_deref(), Some("acme"));
+        assert_eq!(credentials::env_value("OTHER_KEY=nope", FIREWORKS_KEY_ENV), None);
     }
 }

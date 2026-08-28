@@ -19,7 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, calendar, wsl, PollError};
+use super::{build_agent, calendar, credentials, PollError};
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{Detail, UsageData, UsageSection};
 
@@ -31,10 +32,18 @@ const DEVIN_ALLOWANCE_ENV: &str = "DEVIN_ACU_ALLOWANCE";
 /// 08:00 UTC.
 const BILLING_DAY_OFFSET_SECS: u64 = 8 * 60 * 60;
 
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_KEY: &str = "cat ~/.claude/.env.devin";
-const WSL_WATCH_KEY: &str = "if [ -f ~/.claude/.env.devin ]; then \
-     stat -c 'present|%s|%Y' ~/.claude/.env.devin; else echo missing; fi";
+/// Quote-free path expression -- see [`credentials`].
+const WSL_ENV_PATH: &str = "~/.claude/.env.devin";
+
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Devin,
+    env: &[&[DEVIN_KEY_ENV]],
+    native_files: || windows_env_file().into_iter().collect(),
+    native_extra: &[],
+    native_refresh: None,
+    wsl_paths: &[WSL_ENV_PATH],
+    wsl_refresh: None,
+};
 
 #[derive(Deserialize)]
 struct DevinConsumptionResponse {
@@ -55,32 +64,29 @@ struct DevinCredentials {
 }
 
 pub(super) fn poll_devin() -> Result<UsageData, PollError> {
-    let credentials = read_devin_credentials().ok_or_else(|| {
-        diagnose::log("Devin usage poll failed: no key found (set DEVIN_API_KEY)");
-        PollError::NoCredentials
-    })?;
+    credentials::poll(&SPEC, attempt)
+}
+
+fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, PollError> {
+    let key = credentials::env_value(content, DEVIN_KEY_ENV).ok_or(PollError::NoCredentials)?;
+    // The allowance is not in the API; it may sit beside the key, in the
+    // environment, or in the native env file.
+    let allowance = credentials::env_value(content, DEVIN_ALLOWANCE_ENV)
+        .or_else(|| credentials::non_empty_environment(DEVIN_ALLOWANCE_ENV))
+        .or_else(|| {
+            windows_env_file()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|contents| credentials::env_value(&contents, DEVIN_ALLOWANCE_ENV))
+        })
+        .and_then(|value| value.parse::<f64>().ok());
+    let credentials = DevinCredentials { key, allowance };
     let now = SystemTime::now();
     let period = billing_period(now);
     fetch_devin_usage(&credentials, period, now)
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let mut signatures = vec![match non_empty_environment(DEVIN_KEY_ENV) {
-        Some(_) => "devin|environment|present".to_string(),
-        None => "devin|environment|missing".to_string(),
-    }];
-    if let Some(path) = windows_env_file() {
-        signatures.push(super::file_signature("devin|file", &path));
-    }
-    if all_sources {
-        for distro in wsl::list_distros() {
-            if let Some(signature) = wsl::path_watch_signature(&distro, "devin-wsl", WSL_WATCH_KEY)
-            {
-                signatures.push(signature);
-            }
-        }
-    }
-    signatures
+pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
 /// The current billing month on Devin's clock: from the first of the month
@@ -196,50 +202,8 @@ fn format_acus(value: f64) -> String {
 
 
 
-fn read_devin_credentials() -> Option<DevinCredentials> {
-    let key = non_empty_environment(DEVIN_KEY_ENV).or_else(|| {
-        windows_env_file()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|contents| parse_env_value(&contents, DEVIN_KEY_ENV))
-            .or_else(|| {
-                wsl::list_distros().into_iter().find_map(|distro| {
-                    wsl::read_file(&distro, WSL_READ_KEY, "Devin key")
-                        .and_then(|contents| parse_env_value(&contents, DEVIN_KEY_ENV))
-                })
-            })
-    })?;
-    let allowance = non_empty_environment(DEVIN_ALLOWANCE_ENV)
-        .or_else(|| {
-            windows_env_file()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .and_then(|contents| parse_env_value(&contents, DEVIN_ALLOWANCE_ENV))
-        })
-        .and_then(|value| value.parse::<f64>().ok());
-    Some(DevinCredentials { key, allowance })
-}
-
 fn windows_env_file() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude").join(".env.devin"))
-}
-
-fn non_empty_environment(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn parse_env_value(contents: &str, name: &str) -> Option<String> {
-    contents.lines().find_map(|line| {
-        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        let value = line.strip_prefix(name)?.trim_start();
-        let value = value.strip_prefix('=')?.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .unwrap_or(value);
-        (!value.is_empty()).then(|| value.to_string())
-    })
 }
 
 #[cfg(test)]
@@ -307,8 +271,8 @@ mod tests {
 
     #[test]
     fn env_files_survive_export_and_quoting() {
-        assert_eq!(parse_env_value("export DEVIN_API_KEY=\"apk_user_x\"\n", DEVIN_KEY_ENV).as_deref(), Some("apk_user_x"));
-        assert_eq!(parse_env_value("DEVIN_ACU_ALLOWANCE=250", DEVIN_ALLOWANCE_ENV).as_deref(), Some("250"));
-        assert_eq!(parse_env_value("OTHER=1", DEVIN_KEY_ENV), None);
+        assert_eq!(credentials::env_value("export DEVIN_API_KEY=\"apk_user_x\"\n", DEVIN_KEY_ENV).as_deref(), Some("apk_user_x"));
+        assert_eq!(credentials::env_value("DEVIN_ACU_ALLOWANCE=250", DEVIN_ALLOWANCE_ENV).as_deref(), Some("250"));
+        assert_eq!(credentials::env_value("OTHER=1", DEVIN_KEY_ENV), None);
     }
 }

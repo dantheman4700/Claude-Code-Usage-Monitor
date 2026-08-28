@@ -1,11 +1,12 @@
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{build_agent, unix_to_system_time, wsl, PollError};
+use super::{build_agent, credentials, unix_to_system_time, PollError};
+use crate::providers::ProviderId;
 use crate::app_settings;
 use crate::diagnose;
 use crate::models::{CodexCreditsState, CreditsSection, UsageData, UsageSection};
@@ -13,10 +14,8 @@ use crate::models::{CodexCreditsState, CreditsSection, UsageData, UsageSection};
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_AUTH: &str = "cat ${CODEX_HOME:-$HOME/.codex}/auth.json";
-const WSL_WATCH_AUTH: &str = "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
-     stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; else echo missing; fi";
+/// Quote-free path expression -- see [`credentials`].
+const WSL_AUTH_PATH: &str = "${CODEX_HOME:-$HOME/.codex}/auth.json";
 /// `codex exec .` is a no-op run whose only purpose is making the CLI refresh
 /// and rewrite its own credential file. Delivered on stdin (see
 /// [`wsl::run_detached`]), so unlike the read scripts it may use variables.
@@ -36,14 +35,6 @@ const WSL_REFRESH: &str = "cd $HOME && for c in $HOME/.local/bin/codex $HOME/.bu
      if [ -x $c ]; then for n in $HOME/.nvm/versions/node/*/bin; do PATH=$n:$PATH; done; \
      PATH=${c%/*}:/usr/local/bin:/usr/bin:$PATH; export PATH; \
      exec $c exec --skip-git-repo-check . </dev/null >/dev/null 2>&1; fi; done; exit 127";
-
-/// Where a Codex token came from, so a refresh runs where the CLI actually
-/// lives instead of assuming the Windows install.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CodexCredentialSource {
-    Windows,
-    Wsl { distro: String },
-}
 
 #[derive(Deserialize)]
 struct CodexAuthFile {
@@ -167,49 +158,27 @@ pub(super) struct CodexRateLimitWindow {
 /// five-hour window, so anything from a day up is unambiguously weekly.
 const WEEKLY_WINDOW_THRESHOLD_SECONDS: i64 = 86_400;
 
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Codex,
+    env: &[],
+    native_files: || codex_auth_path().into_iter().collect(),
+    native_extra: &[],
+    native_refresh: Some(cli_refresh_codex_token),
+    wsl_paths: &[WSL_AUTH_PATH],
+    wsl_refresh: Some(WSL_REFRESH),
+};
+
 pub(super) fn poll_codex() -> Result<UsageData, PollError> {
-    // Every source in turn, native first. A stale token on Windows must not
-    // hide a good sign-in inside WSL, so a rejection moves on to the next
-    // source instead of ending the poll.
-    let mut found_any = false;
-    let mut rejected = false;
-    for source in codex_credential_sources() {
-        let Some(creds) = read_codex_credentials_from(&source) else {
-            continue;
-        };
-        found_any = true;
-        match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
-            Ok(usage) => return Ok(usage),
-            Err(PollError::AuthRequired) => {
-                refresh_codex_token(&source);
-                if let Some(refreshed) = read_codex_credentials_from(&source) {
-                    if let Ok(usage) =
-                        fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
-                    {
-                        return Ok(usage);
-                    }
-                }
-                rejected = true;
-                diagnose::log(format!("Codex credentials from {source:?} rejected; trying the next source"));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if !found_any {
-        diagnose::log("Codex usage poll failed: no Codex credentials found");
-        return Err(PollError::NoCredentials);
-    }
-    Err(if rejected { PollError::AuthRequired } else { PollError::RequestFailed })
+    credentials::poll(&SPEC, attempt)
 }
 
-/// Where Codex credentials may live, cheapest first. The WSL list is lazy so
-/// a machine that resolves a token natively never spawns `wsl.exe`.
-fn codex_credential_sources() -> impl Iterator<Item = CodexCredentialSource> {
-    std::iter::once(CodexCredentialSource::Windows).chain(
-        std::iter::once_with(wsl::list_distros)
-            .flatten()
-            .map(|distro| CodexCredentialSource::Wsl { distro }),
-    )
+fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, PollError> {
+    let auth: CodexAuthFile = serde_json::from_str(content).map_err(|_| PollError::NoCredentials)?;
+    let tokens = auth
+        .tokens
+        .filter(|tokens| !tokens.access_token.is_empty())
+        .ok_or(PollError::NoCredentials)?;
+    fetch_codex_usage(&tokens.access_token, tokens.account_id.as_deref())
 }
 
 pub(super) fn fetch_codex_usage(
@@ -434,37 +403,8 @@ pub(super) fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageS
     }
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let mut signatures = windows_credential_watch_snapshot();
-    if all_sources {
-        for distro in wsl::list_distros() {
-            if let Some(signature) = wsl::path_watch_signature(&distro, "codex-wsl", WSL_WATCH_AUTH)
-            {
-                signatures.push(signature);
-            }
-        }
-    }
-    signatures
-}
-
-fn windows_credential_watch_snapshot() -> Vec<String> {
-    let Some(path) = codex_auth_path() else {
-        return vec!["codex:auth-path-missing".into()];
-    };
-    let key = format!("codex:{}", path.display());
-    let signature = match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_millis())
-                .unwrap_or(0);
-            format!("{key}|present|{}|{modified}", metadata.len())
-        }
-        Err(_) => format!("{key}|missing"),
-    };
-    vec![signature]
+pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
 fn codex_auth_path() -> Option<PathBuf> {
@@ -472,51 +412,6 @@ fn codex_auth_path() -> Option<PathBuf> {
         return Some(codex_home.join("auth.json"));
     }
     Some(dirs::home_dir()?.join(".codex").join("auth.json"))
-}
-
-fn read_codex_credentials_from(source: &CodexCredentialSource) -> Option<CodexTokenData> {
-    match source {
-        CodexCredentialSource::Windows => read_codex_credentials(),
-        CodexCredentialSource::Wsl { distro } => read_wsl_codex_credentials(distro),
-    }
-}
-
-fn read_wsl_codex_credentials(distro: &str) -> Option<CodexTokenData> {
-    let content = wsl::read_file(distro, WSL_READ_AUTH, "Codex credentials")?;
-    let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
-    auth.tokens.filter(|tokens| !tokens.access_token.is_empty())
-}
-
-fn refresh_codex_token(source: &CodexCredentialSource) {
-    // `codex exec` is a real model turn; ration it.
-    if !super::spend_allowed("codex token refresh") {
-        return;
-    }
-    match source {
-        CodexCredentialSource::Windows => cli_refresh_codex_token(),
-        CodexCredentialSource::Wsl { distro } => {
-            wsl::run_detached(distro, WSL_REFRESH, "Codex token refresh")
-        }
-    }
-}
-
-fn read_codex_credentials() -> Option<CodexTokenData> {
-    let auth_path = codex_auth_path()?;
-    let content = match std::fs::read_to_string(&auth_path) {
-        Ok(content) => content,
-        Err(error) => {
-            diagnose::log_error(
-                &format!(
-                    "unable to read Codex credentials at {}",
-                    auth_path.display()
-                ),
-                error,
-            );
-            return None;
-        }
-    };
-    let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
-    auth.tokens.filter(|tokens| !tokens.access_token.is_empty())
 }
 
 fn cli_refresh_codex_token() {

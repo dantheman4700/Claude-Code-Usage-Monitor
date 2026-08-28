@@ -104,6 +104,7 @@ mod calendar;
 mod claude;
 mod claude_desktop;
 mod codex;
+mod credentials;
 mod cursor;
 mod devin;
 mod fireworks;
@@ -126,7 +127,7 @@ const PROVIDER_POLLERS: [ProviderPoller; 8] = [
     ProviderPoller {
         id: ProviderId::Codex,
         poll: codex::poll_codex,
-        credential_watch: codex_credential_watch_snapshot,
+        credential_watch: codex::credential_watch_snapshot,
     },
     ProviderPoller {
         id: ProviderId::Antigravity,
@@ -159,6 +160,18 @@ const PROVIDER_POLLERS: [ProviderPoller; 8] = [
         credential_watch: devin::credential_watch_snapshot,
     },
 ];
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    #[test]
+    fn every_provider_has_a_poller() {
+        for provider in ProviderId::ALL {
+            assert!(provider_poller(provider).is_some(), "{provider:?} is not in PROVIDER_POLLERS");
+        }
+    }
+}
 
 fn provider_poller(provider: ProviderId) -> Option<&'static ProviderPoller> {
     PROVIDER_POLLERS.iter().find(|poller| poller.id == provider)
@@ -244,10 +257,6 @@ pub(crate) fn spend_allowed(key: &'static str) -> bool {
     }
     last.push((key, now));
     true
-}
-
-fn codex_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {
-    codex::credential_watch_snapshot(all_sources)
 }
 
 fn antigravity_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {

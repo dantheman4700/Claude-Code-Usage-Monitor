@@ -1,11 +1,10 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use super::{build_agent, PollError, wsl};
+use super::{build_agent, credentials, PollError};
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{UsageData, UsageSection};
 
@@ -44,28 +43,45 @@ struct DashboardUsage {
     monthly: Option<UsageWindow>,
 }
 
+/// Quote-free path expressions -- see [`credentials`]. UNVERIFIED against a
+/// live install: the paths mirror the native list exactly, but no OpenCode
+/// Go setup exists on this machine to exercise them.
+const WSL_CONFIG_PATHS: &[&str] = &[
+    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json",
+    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json",
+];
+
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::OpenCode,
+    env: &[&[WORKSPACE_ID_ENV, AUTH_COOKIE_ENV]],
+    native_files: dashboard_config_paths,
+    native_extra: &[],
+    native_refresh: None,
+    wsl_paths: WSL_CONFIG_PATHS,
+    wsl_refresh: None,
+};
+
 pub(super) fn poll_opencode() -> Result<UsageData, PollError> {
-    let credentials = read_dashboard_credentials().ok_or_else(|| {
-        diagnose::log("OpenCode usage poll failed: no dashboard credentials found");
-        PollError::NoCredentials
-    })?;
+    credentials::poll(&SPEC, attempt)
+}
+
+fn attempt(content: &str, source: &credentials::Source) -> Result<UsageData, PollError> {
+    let credentials = match source {
+        credentials::Source::Env(_) => {
+            let workspace_id = credentials::env_value(content, WORKSPACE_ID_ENV).ok_or(PollError::NoCredentials)?;
+            let auth_cookie = credentials::env_value(content, AUTH_COOKIE_ENV).ok_or(PollError::NoCredentials)?;
+            if !valid_workspace_id(&workspace_id) || !valid_cookie(&auth_cookie) {
+                return Err(PollError::NoCredentials);
+            }
+            DashboardCredentials { workspace_id, auth_cookie, source: "environment".to_string() }
+        }
+        other => dashboard_credentials_from_content(content, &other.to_string()).ok_or(PollError::NoCredentials)?,
+    };
     poll_dashboard(&credentials)
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let mut signatures = vec![credential_watch_signature()];
-    if all_sources {
-        // One fixed script per path: a loop variable would be expanded by
-        // the outer shell before `sh` runs (see wsl::read_file).
-        for distro in wsl::list_distros() {
-            for (label, script) in WSL_WATCH_CONFIG_SCRIPTS {
-                if let Some(signature) = wsl::path_watch_signature(&distro, label, script) {
-                    signatures.push(signature);
-                }
-            }
-        }
-    }
-    signatures
+pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
 fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollError> {
@@ -122,68 +138,6 @@ fn section_from_window(window: &UsageWindow, now: SystemTime) -> UsageSection {
         percentage: window.usage_percent.clamp(0.0, 100.0),
         resets_at: now.checked_add(Duration::from_secs(window.reset_in_sec.max(0) as u64)),
     }
-}
-
-fn read_dashboard_credentials() -> Option<DashboardCredentials> {
-    if let (Some(workspace_id), Some(auth_cookie)) = (
-        non_empty_environment(WORKSPACE_ID_ENV),
-        non_empty_environment(AUTH_COOKIE_ENV),
-    ) {
-        if valid_workspace_id(&workspace_id) && valid_cookie(&auth_cookie) {
-            return Some(DashboardCredentials {
-                workspace_id,
-                auth_cookie,
-                source: "environment".to_string(),
-            });
-        }
-    }
-
-    dashboard_config_paths()
-        .into_iter()
-        .find_map(|path| read_dashboard_config(&path))
-        .or_else(read_wsl_dashboard_config)
-}
-
-/// The same helper-config files, inside each WSL distro. Quote-free scripts
-/// on purpose -- see [`wsl::read_file`]. UNVERIFIED against a live install:
-/// the paths mirror the native list exactly, but no OpenCode Go setup exists
-/// on this machine to exercise them.
-const WSL_WATCH_CONFIG_SCRIPTS: &[(&str, &str)] = &[
-    (
-        "opencode-bar-wsl",
-        "if [ -f ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json ]; then \
-         stat -c 'present|%s|%Y' ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json; else echo missing; fi",
-    ),
-    (
-        "opencode-quota-wsl",
-        "if [ -f ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json ]; then \
-         stat -c 'present|%s|%Y' ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json; else echo missing; fi",
-    ),
-];
-
-const WSL_CONFIG_SCRIPTS: &[&str] = &[
-    "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json",
-    "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json",
-];
-
-fn read_wsl_dashboard_config() -> Option<DashboardCredentials> {
-    for distro in wsl::list_distros() {
-        for script in WSL_CONFIG_SCRIPTS {
-            if let Some(content) = wsl::read_file(&distro, script, "OpenCode config") {
-                if let Some(credentials) =
-                    dashboard_credentials_from_content(&content, &format!("wsl:{distro}"))
-                {
-                    return Some(credentials);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn read_dashboard_config(path: &Path) -> Option<DashboardCredentials> {
-    let content = std::fs::read_to_string(path).ok()?;
-    dashboard_credentials_from_content(&content, &path.display().to_string())
 }
 
 fn dashboard_credentials_from_content(content: &str, source: &str) -> Option<DashboardCredentials> {
@@ -325,13 +279,13 @@ fn numeric_field(text: &str, field_name: &str) -> Option<f64> {
 
 fn dashboard_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = non_empty_environment(CONFIG_FILE_ENV).map(PathBuf::from) {
+    if let Some(path) = credentials::non_empty_environment(CONFIG_FILE_ENV).map(PathBuf::from) {
         paths.push(path);
     }
-    if let Some(app_data) = non_empty_environment("APPDATA").map(PathBuf::from) {
+    if let Some(app_data) = credentials::non_empty_environment("APPDATA").map(PathBuf::from) {
         paths.push(app_data.join("opencode-go").join("config.json"));
     }
-    if let Some(config_home) = non_empty_environment("XDG_CONFIG_HOME").map(PathBuf::from) {
+    if let Some(config_home) = credentials::non_empty_environment("XDG_CONFIG_HOME").map(PathBuf::from) {
         paths.push(config_home.join("opencode-bar").join("opencode-go.json"));
         paths.push(config_home.join("opencode-quota").join("opencode-go.json"));
     }
@@ -350,13 +304,6 @@ fn dashboard_config_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn non_empty_environment(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn valid_workspace_id(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -366,48 +313,6 @@ fn valid_workspace_id(value: &str) -> bool {
 
 fn valid_cookie(value: &str) -> bool {
     !value.is_empty() && !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))
-}
-
-fn credential_watch_signature() -> String {
-    let mut parts = Vec::new();
-    match read_dashboard_credentials() {
-        Some(credentials) => {
-            let mut hasher = DefaultHasher::new();
-            credentials.workspace_id.hash(&mut hasher);
-            credentials.auth_cookie.hash(&mut hasher);
-            parts.push(format!(
-                "dashboard|present|{}|{}|{:x}|{}",
-                credentials.workspace_id.len(),
-                credentials.auth_cookie.len(),
-                hasher.finish(),
-                credentials.source
-            ));
-        }
-        None => parts.push("dashboard|missing".to_string()),
-    }
-    for path in dashboard_config_paths() {
-        parts.push(path_signature("config", &path));
-    }
-    parts.join(";;")
-}
-
-fn path_signature(kind: &str, path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_secs())
-                .unwrap_or(0);
-            format!(
-                "{kind}:{}|present|{}|{modified}",
-                path.display(),
-                metadata.len()
-            )
-        }
-        Err(_) => format!("{kind}:{}|missing", path.display()),
-    }
 }
 
 #[cfg(test)]
