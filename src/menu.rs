@@ -26,7 +26,7 @@ pub const CMD_FREQ_1MIN: u16 = 20;
 pub const CMD_FREQ_5MIN: u16 = 21;
 pub const CMD_FREQ_15MIN: u16 = 22;
 pub const CMD_FREQ_1HOUR: u16 = 23;
-/// Provider toggles use each descriptor's own command id (60..).
+// Provider toggles use each descriptor's own command id (60..).
 
 /// Show the menu at the cursor and return the chosen command, if any.
 pub fn show(hwnd: HWND) -> Option<u16> {

@@ -103,8 +103,8 @@ pub(crate) fn select_polled(
         }
     }
     Selection {
-        polled: ProviderSet::from_enabled(polled.into_iter()),
-        changed: ProviderSet::from_enabled(changed.into_iter()),
+        polled: ProviderSet::from_enabled(polled),
+        changed: ProviderSet::from_enabled(changed),
         snapshots,
     }
 }

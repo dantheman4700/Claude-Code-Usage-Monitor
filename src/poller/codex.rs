@@ -293,15 +293,17 @@ pub(super) fn codex_usage_from_response(
         .as_ref()
         .is_some_and(|control| control.reached);
     let details = *response.rate_limit.flatten()?;
-    let mut data = UsageData::default();
-    data.plan = plan.map(|plan| {
-        // OpenAI sends the plan in lower case; the panel shows it as a name.
-        let mut chars = plan.chars();
-        match chars.next() {
-            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            None => plan,
-        }
-    });
+    let mut data = UsageData {
+        plan: plan.map(|plan| {
+            // OpenAI sends the plan in lower case; the panel shows it as a name.
+            let mut chars = plan.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => plan,
+            }
+        }),
+        ..Default::default()
+    };
     if let Some(credits) = &credits {
         if let Some(balance) = &credits.balance {
             data.details.push(crate::models::Detail::new("Credits", balance.clone()));

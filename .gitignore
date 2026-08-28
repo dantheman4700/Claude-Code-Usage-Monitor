@@ -34,3 +34,7 @@ packaging/msix/Assets/
 # Exported council diff (regenerate with git diff)
 tmp/conductor/council/fix-diff.patch
 tmp/conductor/council/headroom-review-bundle.md
+dist/staged/
+
+# Conductor run state (contracts are recorded in tmp/conductor/plans)
+.claude/state/

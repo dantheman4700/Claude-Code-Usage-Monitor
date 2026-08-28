@@ -218,9 +218,7 @@ impl PanelApp {
 
     fn update_usage_cache(&mut self, cache: UsageCache) {
         let poll_ok = cache.poll_ok;
-        let changed = self.usage.as_ref() != Some(&cache.data)
-            || self.usage_poll_ok != poll_ok
-            || self.usage_has_error != !poll_ok;
+        let changed = self.usage.as_ref() != Some(&cache.data) || self.usage_poll_ok != poll_ok;
         if changed {
             self.usage = Some(cache.data);
             self.usage_poll_ok = poll_ok;

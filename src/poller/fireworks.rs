@@ -177,11 +177,13 @@ fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, key: &str, url:
 }
 
 fn fireworks_usage(account: &Account, quotas: &[Quota], spend_usd: Option<f64>, month_end_unix: u64) -> UsageData {
-    let mut data = UsageData::default();
-    data.plan = account.account_type.as_deref().and_then(|kind| match kind {
-        "ENTERPRISE" => Some("Enterprise".to_string()),
-        _ => None,
-    });
+    let mut data = UsageData {
+        plan: account.account_type.as_deref().and_then(|kind| match kind {
+            "ENTERPRISE" => Some("Enterprise".to_string()),
+            _ => None,
+        }),
+        ..Default::default()
+    };
     if let Some(state) = account.suspend_state.as_deref() {
         // "SUSPEND_STATE_UNSPECIFIED"/"NONE" mean nothing is wrong.
         let calm = state.ends_with("UNSPECIFIED") || state.ends_with("NONE") || state.is_empty();
