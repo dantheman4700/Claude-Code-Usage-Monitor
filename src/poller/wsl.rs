@@ -19,6 +19,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// missing reading.
 const WSL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The distro list, cached; enumerating costs a `wsl.exe` spawn.
+static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+
 /// Every distro registered on the machine.
 ///
 /// Order is whatever `wsl.exe` reports; callers that want a specific distro
@@ -27,7 +30,6 @@ pub(super) fn list_distros() -> Vec<String> {
     // Six providers ask for this on every poll, and the answer changes about
     // as often as someone installs a new distro. One `wsl.exe` spawn every
     // few minutes is a fair price; six per poll is not.
-    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(10 * 60);
     if let Ok(cache) = CACHE.lock() {
         if let Some((fetched_at, distros)) = cache.as_ref() {
@@ -41,6 +43,35 @@ pub(super) fn list_distros() -> Vec<String> {
         *cache = Some((Instant::now(), distros.clone()));
     }
     distros
+}
+
+/// Drop the cached distro list; the next call enumerates again.
+pub fn invalidate_distro_cache() {
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = None;
+    }
+}
+
+/// Utility distros that ship with Docker Desktop, Rancher Desktop and Podman.
+/// Nobody signs in to a CLI inside them, and probing one costs a spawn (and
+/// keeps the WSL VM from idling out).
+fn is_utility_distro(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("docker-desktop")
+        || lower.starts_with("rancher-desktop")
+        || lower.starts_with("podman-machine")
+}
+
+static TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clear the "a probe timed out" flag before polling one provider.
+pub fn reset_timed_out() {
+    TIMED_OUT.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether any WSL probe timed out since the last reset.
+pub fn took_timeout() -> bool {
+    TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn list_distros_uncached() -> Vec<String> {
@@ -61,7 +92,7 @@ fn list_distros_uncached() -> Vec<String> {
     decode_text(&output.stdout)
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !is_utility_distro(line))
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -155,6 +186,10 @@ pub(super) fn run_detached(distro: &str, script: &str, what: &str) {
         .arg("-d")
         .arg(distro)
         .arg("--")
+        // coreutils `timeout` bounds the Linux side as well: killing wsl.exe
+        // alone would leave the shell (and a CLI turn) running in the distro.
+        .arg("timeout")
+        .arg("85")
         .arg("sh")
         .arg("-l")
         .creation_flags(CREATE_NO_WINDOW)
@@ -236,17 +271,40 @@ pub(super) fn run_with_timeout(
     timeout: Duration,
 ) -> Option<std::process::Output> {
     let mut child = command.spawn().ok()?;
+    // Drain stdout while waiting. A pipe the child cannot write into blocks
+    // the child, which then never exits, which then looks like a timeout --
+    // and a timeout looks like a missing credential file.
+    let reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = Vec::new();
+            let _ = stdout.read_to_end(&mut buffer);
+            buffer
+        })
+    });
     let start = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(Some(status)) => break Some(status),
             Ok(None) if start.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                TIMED_OUT.store(true, std::sync::atomic::Ordering::Relaxed);
+                break None;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
-    }
+    };
+    // The pipe closes with the child, so the reader always finishes.
+    let stdout = reader.and_then(|handle| handle.join().ok()).unwrap_or_default();
+    status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }

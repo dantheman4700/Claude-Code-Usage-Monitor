@@ -168,23 +168,48 @@ pub(super) struct CodexRateLimitWindow {
 const WEEKLY_WINDOW_THRESHOLD_SECONDS: i64 = 86_400;
 
 pub(super) fn poll_codex() -> Result<UsageData, PollError> {
-    let (creds, source) = match read_first_codex_credentials() {
-        Some(found) => found,
-        None => {
-            diagnose::log("Codex usage poll failed: no Codex credentials found");
-            return Err(PollError::NoCredentials);
+    // Every source in turn, native first. A stale token on Windows must not
+    // hide a good sign-in inside WSL, so a rejection moves on to the next
+    // source instead of ending the poll.
+    let mut found_any = false;
+    let mut rejected = false;
+    for source in codex_credential_sources() {
+        let Some(creds) = read_codex_credentials_from(&source) else {
+            continue;
+        };
+        found_any = true;
+        match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
+            Ok(usage) => return Ok(usage),
+            Err(PollError::AuthRequired) => {
+                refresh_codex_token(&source);
+                if let Some(refreshed) = read_codex_credentials_from(&source) {
+                    if let Ok(usage) =
+                        fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
+                    {
+                        return Ok(usage);
+                    }
+                }
+                rejected = true;
+                diagnose::log(format!("Codex credentials from {source:?} rejected; trying the next source"));
+            }
+            Err(error) => return Err(error),
         }
-    };
-
-    match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
-        Ok(data) => Ok(data),
-        Err(PollError::AuthRequired) => {
-            refresh_codex_token(&source);
-            let refreshed = read_codex_credentials_from(&source).ok_or(PollError::TokenExpired)?;
-            fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
-        }
-        Err(error) => Err(error),
     }
+    if !found_any {
+        diagnose::log("Codex usage poll failed: no Codex credentials found");
+        return Err(PollError::NoCredentials);
+    }
+    Err(if rejected { PollError::AuthRequired } else { PollError::RequestFailed })
+}
+
+/// Where Codex credentials may live, cheapest first. The WSL list is lazy so
+/// a machine that resolves a token natively never spawns `wsl.exe`.
+fn codex_credential_sources() -> impl Iterator<Item = CodexCredentialSource> {
+    std::iter::once(CodexCredentialSource::Windows).chain(
+        std::iter::once_with(wsl::list_distros)
+            .flatten()
+            .map(|distro| CodexCredentialSource::Wsl { distro }),
+    )
 }
 
 pub(super) fn fetch_codex_usage(
@@ -204,7 +229,7 @@ pub(super) fn fetch_codex_usage(
 
     let resp = match request.call() {
         Ok(resp) => resp,
-        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+        Err(ureq::Error::Status(code, _)) if code == 401 => {
             diagnose::log(format!(
                 "Codex usage endpoint returned auth error status {code}; refresh required"
             ));
@@ -447,22 +472,6 @@ fn codex_auth_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".codex").join("auth.json"))
 }
 
-/// The first usable Codex token, from Windows and then any WSL distro.
-///
-/// The CLI is often only ever signed in inside WSL, so the Linux copy is a
-/// normal source rather than a fallback for a broken install.
-fn read_first_codex_credentials() -> Option<(CodexTokenData, CodexCredentialSource)> {
-    if let Some(tokens) = read_codex_credentials() {
-        return Some((tokens, CodexCredentialSource::Windows));
-    }
-    for distro in wsl::list_distros() {
-        if let Some(tokens) = read_wsl_codex_credentials(&distro) {
-            return Some((tokens, CodexCredentialSource::Wsl { distro }));
-        }
-    }
-    None
-}
-
 fn read_codex_credentials_from(source: &CodexCredentialSource) -> Option<CodexTokenData> {
     match source {
         CodexCredentialSource::Windows => read_codex_credentials(),
@@ -477,6 +486,10 @@ fn read_wsl_codex_credentials(distro: &str) -> Option<CodexTokenData> {
 }
 
 fn refresh_codex_token(source: &CodexCredentialSource) {
+    // `codex exec` is a real model turn; ration it.
+    if !super::spend_allowed("codex token refresh") {
+        return;
+    }
     match source {
         CodexCredentialSource::Windows => cli_refresh_codex_token(),
         CodexCredentialSource::Wsl { distro } => {

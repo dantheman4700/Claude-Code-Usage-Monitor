@@ -26,20 +26,23 @@ use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
 use crate::menu;
 use crate::native_interop::{
-    wide_str, WM_APP_OPEN_DASHBOARD, WM_APP_QUIT, WM_APP_REFRESH_NOW, WM_APP_SETTINGS_UPDATED,
-    WM_APP_TRAY, WM_APP_UPDATE_CHECK_COMPLETE, WM_APP_USAGE_UPDATED,
+    wide_str, WM_APP_OPEN_DASHBOARD, WM_APP_QUIT, WM_APP_REFRESH_NOW, WM_APP_RETRY_PROVIDER,
+    WM_APP_SCHEDULE_DUE, WM_APP_SETTINGS_UPDATED, WM_APP_TRAY, WM_APP_UPDATE_CHECK_COMPLETE,
+    WM_APP_USAGE_UPDATED,
 };
 use crate::poll::request_poll;
 use crate::poller;
+use crate::providers::ProviderId;
 use crate::state::{
-    lock_state, now_unix_secs, AppState, SendHwnd, UpdateStatus, TIMER_POLL, TIMER_RESET_POLL,
-    TIMER_UPDATE_CHECK,
+    lock_state, manual_retry_cooldown_secs, now_unix_secs, AppState, SendHwnd, UpdateStatus,
+    FETCH_ALL_COOLDOWN_SECS, TIMER_DUE, TIMER_POLL, TIMER_UPDATE_CHECK,
 };
 use crate::tray_icon;
 use crate::updater::{self, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
 
 const WINDOW_CLASS: &str = "Headroom";
-const INSTANCE_MUTEX: &str = "Global\\Headroom";
+// Per-session: a second signed-in Windows user gets their own tray.
+const INSTANCE_MUTEX: &str = "Local\\Headroom";
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_REGISTRY_KEY: &str = "Headroom";
 /// The Run-key name the app used before it was Headroom.
@@ -59,6 +62,7 @@ pub fn run(open_dashboard_on_start: bool) {
         );
     }
     migrate_legacy_startup_entry();
+    poller::startup_cleanup();
 
     // Second instance: hand the request to the running one and leave.
     let mutex_name = wide_str(INSTANCE_MUTEX);
@@ -130,20 +134,15 @@ pub fn run(open_dashboard_on_start: bool) {
             providers: settings.enabled_providers(),
             poll_interval_ms: settings.poll_interval_ms,
             data: app_settings::load_usage_cache().map(|cache| cache.data),
-            retry_count: 0,
-            force_notify_auth_error: false,
-            auth_error_paused_polling: false,
-            auth_watch_mode: poller::CredentialWatchMode::ActiveSource(
-                settings.enabled_providers().first().unwrap_or_default(),
-            ),
-            auth_watch_snapshot: Vec::new(),
             last_poll_ok: false,
             update_status: UpdateStatus::Idle,
             last_update_check_unix: settings.last_update_check_unix,
             install_channel: updater::current_install_channel(),
             language,
             language_override,
-        provider_backoff: Default::default(),
+            provider_backoff: Default::default(),
+            manual_retry_unix: Default::default(),
+            last_fetch_all_unix: 0,
         });
     }
 
@@ -177,15 +176,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     match msg {
         WM_TIMER => {
             match wparam.0 {
-                TIMER_POLL => on_poll_timer(hwnd),
-                TIMER_RESET_POLL => {
-                    let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                    let paused = lock_state()
-                        .as_ref()
-                        .is_some_and(|s| s.auth_error_paused_polling);
-                    if !paused {
-                        request_poll(hwnd);
-                    }
+                TIMER_POLL => request_poll(hwnd),
+                TIMER_DUE => {
+                    let _ = KillTimer(hwnd, TIMER_DUE);
+                    request_poll(hwnd);
                 }
                 TIMER_UPDATE_CHECK => begin_update_check(hwnd, false),
                 _ => {}
@@ -201,8 +195,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_APP_REFRESH_NOW => {
-            clear_backoff();
-            request_poll(hwnd);
+            manual_retry(hwnd, None);
+            LRESULT(0)
+        }
+        WM_APP_RETRY_PROVIDER => {
+            let target = wparam
+                .0
+                .checked_sub(1)
+                .and_then(|index| ProviderId::ALL.get(index).copied());
+            if wparam.0 == 0 || target.is_some() {
+                manual_retry(hwnd, target);
+            }
+            LRESULT(0)
+        }
+        WM_APP_SCHEDULE_DUE => {
+            // The poll worker's answer to "when is the next provider due?";
+            // only this thread touches the window's timers.
+            let _ = KillTimer(hwnd, TIMER_DUE);
+            if wparam.0 > 0 {
+                SetTimer(hwnd, TIMER_DUE, wparam.0.min(u32::MAX as usize) as u32, None);
+            }
             LRESULT(0)
         }
         WM_APP_OPEN_DASHBOARD => {
@@ -246,43 +258,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
-fn on_poll_timer(hwnd: HWND) {
-    let watch = lock_state().as_ref().map(|s| {
-        (
-            s.auth_error_paused_polling,
-            s.auth_watch_mode,
-            s.auth_watch_snapshot.clone(),
-        )
-    });
-    match watch {
-        // Paused on rejected or missing credentials: poll again only once
-        // the credential files have changed.
-        Some((true, mode, previous)) => {
-            let current = poller::credential_watch_snapshot(mode);
-            if current != previous {
-                if let Some(s) = lock_state().as_mut() {
-                    if s.auth_error_paused_polling && s.auth_watch_mode == mode {
-                        s.auth_watch_snapshot = current;
-                    }
-                }
-                request_poll(hwnd);
-            }
-        }
-        Some((false, _, _)) => request_poll(hwnd),
-        None => {}
-    }
-}
-
 fn handle_command(hwnd: HWND, id: u16) {
     match id {
         menu::CMD_OPEN => dashboard::show(hwnd),
-        menu::CMD_REFRESH => {
-            if let Some(s) = lock_state().as_mut() {
-                s.force_notify_auth_error = true;
-            }
-            clear_backoff();
-            request_poll(hwnd);
-        }
+        menu::CMD_REFRESH => manual_retry(hwnd, None),
         menu::CMD_STARTUP => set_startup_enabled(!is_startup_enabled()),
         menu::CMD_UPDATES => {
             let (channel, release) = lock_state()
@@ -334,19 +313,15 @@ fn handle_command(hwnd: HWND, id: u16) {
     }
 }
 
-fn clear_backoff() {
-    if let Some(s) = lock_state().as_mut() {
-        s.provider_backoff.clear();
-    }
-}
-
 /// The icon and its hover text, from the latest reading.
 fn sync_tray(hwnd: HWND) {
     let tooltip = lock_state()
         .as_ref()
         .map(|s| fleet_tray_tooltip(s.data.as_ref()))
         .unwrap_or_else(|| "Headroom".to_string());
-    tray_icon::sync(hwnd, &tooltip);
+    if !tray_icon::sync(hwnd, &tooltip) {
+        diagnose::log("the shell refused the tray icon registration");
+    }
 }
 
 /// What the tray icon says on hover: one line per provider that is reporting,
@@ -456,7 +431,6 @@ fn reload_settings(hwnd: HWND) {
         SetTimer(hwnd, TIMER_POLL, settings.poll_interval_ms, None);
     }
     if providers_changed {
-        clear_backoff();
         request_poll(hwnd);
     }
     sync_tray(hwnd);
@@ -464,19 +438,90 @@ fn reload_settings(hwnd: HWND) {
 
 /// Persist what the tray owns: interval, providers, language, update check.
 /// Everything else in the file belongs to the panel and is left as loaded.
+/// The values are copied out first; the lock is never held across the disk.
 fn save_state_settings() {
-    let state = lock_state();
-    let Some(s) = state.as_ref() else {
-        return;
+    let owned = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        (
+            s.poll_interval_ms,
+            s.providers,
+            s.language_override.map(|language| language.code().to_string()),
+            s.last_update_check_unix,
+        )
     };
     let mut persisted = load_settings();
-    persisted.poll_interval_ms = s.poll_interval_ms;
-    persisted.set_enabled_providers(s.providers);
-    persisted.language = s.language_override.map(|language| language.code().to_string());
-    persisted.last_update_check_unix = s.last_update_check_unix;
+    persisted.poll_interval_ms = owned.0;
+    persisted.set_enabled_providers(owned.1);
+    persisted.language = owned.2;
+    persisted.last_update_check_unix = owned.3;
     if let Err(error) = save_settings(&persisted) {
         diagnose::log(format!("unable to save settings: {error}"));
     }
+}
+
+/// A retry asked for by a person: one provider, or everyone.
+///
+/// The provider's deadline is zeroed so the next round asks it, but its miss
+/// count is kept, so a repeat failure lands on the longer step rather than
+/// restarting the ladder. A cooldown stops a mashed button from turning a
+/// broken sign-in into a stream of requests; CLI refresh turns have their
+/// own ten-minute ration on top.
+pub fn manual_retry(hwnd: HWND, target: Option<ProviderId>) {
+    let now = now_unix_secs();
+    let accepted = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        match target {
+            Some(provider) => {
+                if !s.providers.contains(provider) {
+                    false
+                } else {
+                    let cooldown = manual_retry_cooldown_secs(s.provider_backoff.get(&provider));
+                    let last = s.manual_retry_unix.get(&provider).copied().unwrap_or(0);
+                    if now.saturating_sub(last) < cooldown {
+                        false
+                    } else {
+                        s.manual_retry_unix.insert(provider, now);
+                        if let Some(entry) = s.provider_backoff.get_mut(&provider) {
+                            entry.next_attempt_unix = 0;
+                        }
+                        true
+                    }
+                }
+            }
+            None => {
+                if now.saturating_sub(s.last_fetch_all_unix) < FETCH_ALL_COOLDOWN_SECS {
+                    false
+                } else {
+                    s.last_fetch_all_unix = now;
+                    for entry in s.provider_backoff.values_mut() {
+                        entry.next_attempt_unix = 0;
+                    }
+                    true
+                }
+            }
+        }
+    };
+    if !accepted {
+        diagnose::log(format!("manual retry of {target:?} ignored: cooling down"));
+        return;
+    }
+    // A distro installed since startup should count now.
+    poller::invalidate_wsl_caches();
+    activity_log::record(
+        activity_log::EventKind::Refresh,
+        target,
+        match target {
+            Some(provider) => format!("Retry requested for {}", provider.descriptor().display_name),
+            None => "Refresh of every provider requested".to_string(),
+        },
+    );
+    request_poll(hwnd);
 }
 
 fn update_language_change() -> bool {
@@ -529,14 +574,18 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
         let Some(s) = state.as_mut() else {
             return;
         };
+        let strings = s.language.strings();
         if matches!(s.update_status, UpdateStatus::Checking | UpdateStatus::Applying) {
+            // A message box runs a modal message loop; a timer firing inside
+            // it would try to take this lock again. Release it first.
+            drop(state);
             if interactive {
-                show_info_message(hwnd, s.language.strings().updates, s.language.strings().update_in_progress);
+                show_info_message(hwnd, strings.updates, strings.update_in_progress);
             }
             return;
         }
         s.update_status = UpdateStatus::Checking;
-        s.language.strings()
+        strings
     };
     std::thread::spawn(move || {
         let hwnd = send_hwnd.to_hwnd();
@@ -593,12 +642,14 @@ fn begin_update_apply(hwnd: HWND, release: ReleaseDescriptor) {
         let Some(s) = state.as_mut() else {
             return;
         };
+        let strings = s.language.strings();
         if matches!(s.update_status, UpdateStatus::Checking | UpdateStatus::Applying) {
-            show_info_message(hwnd, s.language.strings().updates, s.language.strings().update_in_progress);
+            drop(state);
+            show_info_message(hwnd, strings.updates, strings.update_in_progress);
             return;
         }
         s.update_status = UpdateStatus::Applying;
-        s.language.strings()
+        strings
     };
     std::thread::spawn(move || {
         let hwnd = send_hwnd.to_hwnd();
@@ -768,7 +819,8 @@ fn read_run_value(name: &str) -> Option<String> {
 
 fn current_exe_path() -> Option<String> {
     unsafe {
-        let mut buffer = [0u16; 260];
+        // Long paths are real; MAX_PATH is not a limit here.
+        let mut buffer = vec![0u16; 32_768];
         let len = GetModuleFileNameW(None, &mut buffer) as usize;
         (len > 0).then(|| String::from_utf16_lossy(&buffer[..len]))
     }

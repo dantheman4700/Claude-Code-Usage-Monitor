@@ -63,11 +63,17 @@ fn install_crash_hook() {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let message = format!("[{unix}] Headroom {} panicked: {info}\n", env!("CARGO_PKG_VERSION"));
-        diagnose::log(message.trim_end());
+        // The crash file first, with nothing that could take a lock in the
+        // way: if the panic happened while the diagnostic logger's mutex was
+        // held, logging through it would never return.
         let path = std::env::temp_dir().join("headroom-crash.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             use std::io::Write;
-            let _ = file.write_all(message.as_bytes());
+            // Bounded: a crash loop must not fill the disk.
+            if file.metadata().map(|meta| meta.len()).unwrap_or(0) < 1_000_000 {
+                let _ = file.write_all(message.as_bytes());
+            }
         }
+        diagnose::log(message.trim_end());
     }));
 }

@@ -11,6 +11,13 @@ pub const WM_APP_REFRESH_NOW: u32 = WM_APP + 6;
 pub const WM_APP_QUIT: u32 = WM_APP + 7;
 pub const WM_APP_OPEN_DASHBOARD: u32 = WM_APP + 8;
 pub const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 9;
+/// Posted by the poll worker: WPARAM = milliseconds until the next provider
+/// is due (0 = nothing sooner than the regular tick). Timers belong to the
+/// window's thread, so the worker asks rather than calling SetTimer itself.
+pub const WM_APP_SCHEDULE_DUE: u32 = WM_APP + 10;
+/// Posted by the panel: WPARAM = `ProviderId as usize + 1`, or 0 for every
+/// provider. A manual retry, subject to the tray's cooldown.
+pub const WM_APP_RETRY_PROVIDER: u32 = WM_APP + 11;
 
 /// A NUL-terminated UTF-16 copy of `s`, for Win32 string parameters.
 pub fn wide_str(s: &str) -> Vec<u16> {

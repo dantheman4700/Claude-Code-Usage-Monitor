@@ -12,12 +12,6 @@ pub enum PollError {
     RequestFailed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialWatchMode {
-    ActiveSource(ProviderId),
-    AllSources(ProviderId),
-}
-
 pub type CredentialWatchSnapshot = Vec<String>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +66,7 @@ fn poll_with(
     let (data, failures) = poll_with_detailed(enabled_providers, poll_provider);
     if data.is_empty() {
         Err(failures.first().copied().unwrap_or(PollFailure {
-            provider: enabled_providers.first().unwrap_or_default(),
+            provider: enabled_providers.iter().next().unwrap_or_default(),
             error: PollError::RequestFailed,
         }))
     } else {
@@ -171,19 +165,67 @@ fn provider_poller(provider: ProviderId) -> Option<&'static ProviderPoller> {
 }
 
 fn poll_provider(provider: ProviderId) -> Result<UsageData, PollError> {
-    provider_poller(provider)
+    wsl::reset_timed_out();
+    let result = provider_poller(provider)
         .ok_or(PollError::RequestFailed)
-        .and_then(|poller| (poller.poll)())
+        .and_then(|poller| (poller.poll)());
+    // A WSL probe that timed out is not a missing file: the distro may just
+    // be booting. That earns the short transient backoff, not the long
+    // "sign in" one.
+    match result {
+        Err(PollError::NoCredentials) if wsl::took_timeout() => {
+            diagnose::log(format!(
+                "{} credentials unreadable because a WSL probe timed out; will retry soon",
+                provider.descriptor().display_name
+            ));
+            Err(PollError::RequestFailed)
+        }
+        other => other,
+    }
 }
 
-pub fn credential_watch_snapshot(mode: CredentialWatchMode) -> CredentialWatchSnapshot {
-    let (provider, all_sources) = match mode {
-        CredentialWatchMode::ActiveSource(provider) => (provider, false),
-        CredentialWatchMode::AllSources(provider) => (provider, true),
-    };
+/// What a provider's credential files look like right now, across every
+/// source -- native and every WSL distro. A sign-in anywhere changes it.
+pub fn credential_watch_snapshot(provider: ProviderId) -> CredentialWatchSnapshot {
     provider_poller(provider)
-        .map(|poller| (poller.credential_watch)(all_sources))
+        .map(|poller| (poller.credential_watch)(true))
         .unwrap_or_default()
+}
+
+/// Housekeeping at startup: sweep temp files a crash may have left.
+pub fn startup_cleanup() {
+    cursor::cleanup_state_copies();
+}
+
+/// Drop the cached WSL distro list so a manual retry sees a distro that was
+/// installed since.
+pub fn invalidate_wsl_caches() {
+    wsl::invalidate_distro_cache();
+}
+
+/// Whether a quota-spending action (a CLI turn to force a token refresh, a
+/// probing request) may run now. Each key is allowed once per ten minutes:
+/// a manual retry then costs one HTTPS call, never a model turn.
+pub(crate) fn spend_allowed(key: &'static str) -> bool {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static LAST: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
+    const MIN_GAP: Duration = Duration::from_secs(10 * 60);
+    let mut last = LAST.lock().unwrap_or_else(|error| error.into_inner());
+    let now = Instant::now();
+    if let Some((_, at)) = last.iter_mut().find(|(k, _)| *k == key) {
+        if now.duration_since(*at) < MIN_GAP {
+            diagnose::log(format!(
+                "{key} skipped: last attempt {}s ago",
+                now.duration_since(*at).as_secs()
+            ));
+            return false;
+        }
+        *at = now;
+        return true;
+    }
+    last.push((key, now));
+    true
 }
 
 fn codex_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {
@@ -213,12 +255,16 @@ fn get_header_i64(response: &ureq::Response, name: &str) -> Option<i64> {
     response.header(name).and_then(|s| s.parse::<i64>().ok())
 }
 
+/// The year 9999. Anything past it is a provider bug, not a reset time, and
+/// adding it to the epoch would overflow.
+const MAX_UNIX_SECS: u64 = 253_402_300_799;
+
 fn unix_to_system_time(unix_secs: Option<i64>) -> Option<SystemTime> {
     let secs = unix_secs?;
-    if secs < 0 {
+    if secs < 0 || secs as u64 > MAX_UNIX_SECS {
         return None;
     }
-    Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
 }
 
 /// Parse an ISO 8601 timestamp string into a SystemTime.
@@ -233,7 +279,7 @@ fn parse_iso8601(s: Option<&str>) -> Option<SystemTime> {
     let formats = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"];
     for fmt in &formats {
         if let Ok(secs) = parse_datetime_to_unix(datetime_part, fmt) {
-            return Some(UNIX_EPOCH + Duration::from_secs(secs));
+            return UNIX_EPOCH.checked_add(Duration::from_secs(secs));
         }
     }
     None
@@ -262,6 +308,18 @@ fn parse_datetime_to_unix(s: &str, _fmt: &str) -> Result<u64, ()> {
     let hour: u64 = time_parts[0].parse().map_err(|_| ())?;
     let min: u64 = time_parts[1].parse().map_err(|_| ())?;
     let sec: u64 = time_parts[2].parse().map_err(|_| ())?;
+
+    // Range checks before any arithmetic: a month of 13 would index past the
+    // table below, and a year of 10^18 would loop for the rest of the day.
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour >= 24
+        || min >= 60
+        || sec >= 60
+    {
+        return Err(());
+    }
 
     // Days from year (using a simplified calculation for dates after 1970)
     let mut days: u64 = 0;

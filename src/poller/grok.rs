@@ -73,19 +73,42 @@ struct GrokAmount {
 }
 
 pub(super) fn poll_grok() -> Result<UsageData, PollError> {
-    let token = read_grok_token().ok_or_else(|| {
+    // Every token the CLI has left behind, native first; a stale one on
+    // Windows must not hide a good sign-in inside WSL. Grok has no refresh
+    // command, so a rejected token simply moves on.
+    let mut found_any = false;
+    let mut rejected = false;
+    for token in read_grok_tokens() {
+        found_any = true;
+        match fetch_grok_usage(&token) {
+            Ok(usage) => return Ok(usage),
+            Err(PollError::AuthRequired) => rejected = true,
+            Err(error) => return Err(error),
+        }
+    }
+    if !found_any {
         diagnose::log("Grok usage poll failed: no Grok credentials found (run `grok login`)");
-        PollError::NoCredentials
-    })?;
-    fetch_grok_usage(&token)
+        return Err(PollError::NoCredentials);
+    }
+    Err(if rejected { PollError::AuthRequired } else { PollError::RequestFailed })
 }
 
 pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
     let mut signatures = Vec::new();
     if let Some(path) = windows_auth_path() {
-        signatures.push(match path.metadata().ok().and_then(|meta| meta.modified().ok()) {
-            Some(_) => format!("windows|{}", path.display()),
-            None => "windows|missing".into(),
+        // Size and mtime, so a re-login that rewrites the file in place is
+        // seen; the path alone never changes.
+        signatures.push(match path.metadata() {
+            Ok(meta) => {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_secs())
+                    .unwrap_or(0);
+                format!("windows|{}|present|{}|{modified}", path.display(), meta.len())
+            }
+            Err(_) => "windows|missing".into(),
         });
     }
     for distro in wsl::list_distros() {
@@ -107,7 +130,7 @@ fn fetch_grok_usage(token: &str) -> Result<UsageData, PollError> {
         .set("x-grok-client-mode", GROK_CLIENT_MODE)
         .call()
         .map_err(|error| match error {
-            ureq::Error::Status(401 | 403, _) => {
+            ureq::Error::Status(401, _) => {
                 diagnose::log("Grok billing endpoint rejected the token; re-login required");
                 PollError::AuthRequired
             }
@@ -194,22 +217,24 @@ fn grok_credits(config: &GrokCreditsConfig) -> Option<CreditsSection> {
 ///
 /// The CLI is frequently only ever signed in inside WSL, so the Linux copy is
 /// a normal case rather than a fallback for broken installs.
-fn read_grok_token() -> Option<String> {
+fn read_grok_tokens() -> Vec<String> {
+    let mut tokens = Vec::new();
     if let Some(token) = windows_auth_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|contents| parse_grok_token(&contents))
     {
-        return Some(token);
+        tokens.push(token);
     }
-
     for distro in wsl::list_distros() {
         if let Some(token) = wsl::read_file(&distro, READ_AUTH_SCRIPT, "Grok credentials")
             .and_then(|contents| parse_grok_token(&contents))
         {
-            return Some(token);
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
         }
     }
-    None
+    tokens
 }
 
 fn windows_auth_path() -> Option<PathBuf> {

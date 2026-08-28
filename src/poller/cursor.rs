@@ -202,13 +202,33 @@ fn read_cursor_access_token_from_state_db() -> Option<String> {
     }
 }
 
+const STATE_COPY_PREFIX: &str = "cursor-state-copy-";
+
+/// Remove any state-database copy a previous run did not get to delete.
+/// The copy holds whatever Cursor keeps in its store, so it must not linger.
+pub fn cleanup_state_copies() {
+    let Ok(entries) = std::fs::read_dir(crate::app_settings::app_data_directory()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(STATE_COPY_PREFIX) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn query_cursor_access_token_from_copy(path: &Path) -> Option<String> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temporary = std::env::temp_dir().join(format!(
-        "claude-monitor-cursor-state-{}-{unique}.vscdb",
+    // Under the app's own data directory (user-only ACL), never %TEMP%, and
+    // named so `cleanup_state_copies` can sweep a copy an abort left behind.
+    let directory = crate::app_settings::app_data_directory();
+    let _ = std::fs::create_dir_all(&directory);
+    let temporary = directory.join(format!(
+        "{STATE_COPY_PREFIX}{}-{unique}.vscdb",
         std::process::id()
     ));
     if let Err(error) = std::fs::copy(path, &temporary) {
@@ -244,7 +264,7 @@ fn fetch_cursor_usage(cookie: &str) -> Result<UsageData, PollError> {
         .call()
     {
         Ok(response) => response,
-        Err(ureq::Error::Status(401 | 403, _)) => return Err(PollError::AuthRequired),
+        Err(ureq::Error::Status(401, _)) => return Err(PollError::AuthRequired),
         Err(error) => {
             diagnose::log_error("Cursor usage-summary request failed", error);
             return Err(PollError::RequestFailed);

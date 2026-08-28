@@ -79,9 +79,45 @@ impl PanelApp {
         };
         settings_scroll_area(ui, |ui| {
             self.first_run_notice(ui);
+            self.fetch_all_row(ui);
             headline(ui, &insights, now, self.language());
             self.provider_cards(ui, &usage, &insights, now, thresholds);
         });
+    }
+
+    /// One button that asks the tray to poll every provider now. The tray
+    /// applies its own cooldown; the button mirrors it so a press that was
+    /// ignored does not look like a broken button.
+    fn fetch_all_row(&mut self, ui: &mut egui::Ui) {
+        let language = self.language();
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.retry_cooldown_left(None) {
+                    Some(left) => {
+                        ui.add_enabled(false, egui::Button::new(format!("{} ({left}s)", language.text("Fetching…"))));
+                    }
+                    None => {
+                        if ui.button(language.text("Fetch all now")).clicked() {
+                            self.request_retry(None);
+                        }
+                    }
+                }
+                if let Some(at) = self.usage_updated_phrase() {
+                    ui.label(egui::RichText::new(at).color(muted()).size(11.0));
+                }
+            });
+        });
+        ui.add_space(6.0);
+    }
+
+    fn usage_updated_phrase(&self) -> Option<String> {
+        let cache = crate::app_settings::load_usage_cache_metadata()?;
+        let ago = crate::state::now_unix_secs().saturating_sub(cache);
+        Some(if ago < 60 {
+            self.language().text("updated just now").to_string()
+        } else {
+            format!("{} {}m", self.language().text("updated"), ago / 60)
+        })
     }
 
     /// Says what the app does, once, on the first screen a new user sees.
@@ -161,7 +197,7 @@ impl PanelApp {
                 .filter(|constraint| constraint.provider == provider)
                 .collect();
             let expanded = self.fleet_expanded.contains(&provider);
-            let toggled = provider_card(
+            let (toggled, retry) = provider_card(
                 ui,
                 provider,
                 reading,
@@ -172,7 +208,11 @@ impl PanelApp {
                 now,
                 thresholds,
                 language,
+                self.retry_cooldown_left(Some(provider)),
             );
+            if retry {
+                self.request_retry(Some(provider));
+            }
             if toggled {
                 if expanded {
                     self.fleet_expanded.remove(&provider);
@@ -380,8 +420,10 @@ fn provider_card(
     now: SystemTime,
     thresholds: Thresholds,
     language: LanguageId,
-) -> bool {
+    retry_cooldown: Option<u64>,
+) -> (bool, bool) {
     let mut toggled = false;
+    let mut retry = false;
     egui::Frame::new()
         .fill(section_surface())
         .stroke(egui::Stroke::new(1.0, section_border()))
@@ -408,10 +450,25 @@ fn provider_card(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     status_chip(ui, reading, rows, language);
+                    // A provider with nothing current gets its own retry:
+                    // the tray drops its backoff and asks again, subject to
+                    // the cooldown the button shows.
+                    if reading.is_none_or(|usage| usage.stale) {
+                        match retry_cooldown {
+                            Some(left) => {
+                                ui.add_enabled(false, egui::Button::new(format!("{left}s")).small());
+                            }
+                            None => {
+                                if ui.add(egui::Button::new(language.text("Retry")).small()).clicked() {
+                                    retry = true;
+                                }
+                            }
+                        }
+                    }
                 });
             });
             let header = header.response.interact(egui::Sense::click());
-            if header.clicked() {
+            if header.clicked() && !retry {
                 toggled = true;
             }
             if header.hovered() {
@@ -497,7 +554,7 @@ fn provider_card(
                 );
             });
         });
-    toggled
+    (toggled, retry)
 }
 
 fn detail_line(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {

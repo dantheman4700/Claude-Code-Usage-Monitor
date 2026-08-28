@@ -1,0 +1,8 @@
+# Seat: gemini-3.7-flash-high (agy --mode plan, raw fallback) — verbatim
+VERDICT: GO-WITH-FIXES · CONFIDENCE: 19/20
+MUST-FIX: (1) tray.rs on_poll_timer + poll.rs do_poll_once: permanent pause/backoff deadlock on auth recovery — snapshot updated, request_poll filtered by backoff → polls nothing → never again. (2) StartupTask needs RoInitialize [HOST: FALSE — windows-core 0.58 retries with CoIncrementMTAUsage]. (3) run_with_timeout never drains piped stdout → child blocks on write → 5 s kill. (4) partial poll all-fail → last_poll_ok=true, pause cleared, poll_ok:true written.
+SHOULD-FIX: claude.rs uncached wsl -l -q per poll; panel 500 ms repaint + 1 s cache parse (stat first / reload on IPC); run_detached blocks the poll worker up to 90 s; Store "Check for updates" dialog [HOST: already hidden]; docker-desktop distros probed; STATE mutex held across write_json_atomic/sync_all.
+DEBT: duplicated credential/watch helpers; eight show_* bools; FindWindow by generic title; vestigial predecessor references.
+AUTH-TRANSPORT: native-first then WSL is sound; stdin refresh sound; wsl.exe cold-starts stopped distros and probes docker-desktop; Grok has no refresh; Cursor WSL only checks auth.json; move WSL work off the primary poll thread.
+RETRY-BUTTON: WM_APP_RETRY_PROVIDER (WPARAM provider or all); LAST_MANUAL_RETRY debounce 3 s and skip if POLL_IN_FLIGHT; reset backoff/pause/snapshot/retry_count, force_notify_auth_error; TIMER_POLL back to interval; request_poll; panel "Retry" on error/stale card.
+DISSENT-RISK: UNC \\wsl$ reads are not a fix — they also wake stopped VMs and cannot run CLI refreshes.

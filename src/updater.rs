@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,7 +35,15 @@ pub enum InstallChannel {
 pub struct ReleaseDescriptor {
     pub latest_version: String,
     asset_url: String,
+    /// Hex SHA-256 of the executable, from the release's checksum asset.
+    /// A release without one is not installable from here.
+    sha256: String,
 }
+
+/// Name of the checksum asset the release workflow publishes beside the exe.
+const RELEASE_CHECKSUM_ASSET_NAME: &str = "headroom.exe.sha256";
+/// The exe is a few MB; anything past this is not our release.
+const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum UpdateCheckResult {
@@ -57,6 +65,12 @@ struct GitHubAsset {
 
 pub fn handle_cli_mode(args: &[String]) -> Option<i32> {
     if args.len() == 5 && args[1] == "--apply-update" {
+        // The Store package is read-only and updates itself; the helper mode
+        // must not exist there, whoever invokes it.
+        if running_with_package_identity() {
+            crate::diagnose::log("--apply-update refused: running with package identity");
+            return Some(1);
+        }
         let target = PathBuf::from(&args[2]);
         let source = PathBuf::from(&args[3]);
         let pid = args[4].parse::<u32>().unwrap_or(0);
@@ -153,7 +167,7 @@ pub fn begin_self_update(release: &ReleaseDescriptor) -> Result<(), String> {
         let _ = std::fs::remove_file(&partial_download_path);
     }
 
-    download_release_asset(&release.asset_url, &partial_download_path, &download_path)?;
+    download_release_asset(&release.asset_url, &release.sha256, &partial_download_path, &download_path)?;
     std::fs::copy(&current_exe, &helper_path)
         .map_err(|e| format!("Unable to prepare updater helper: {e}"))?;
 
@@ -184,7 +198,12 @@ fn apply_update(target: PathBuf, source: PathBuf, pid: u32) -> Result<(), String
         ));
     }
 
-    let _ = wait_for_process_exit(pid, Duration::from_secs(30));
+    // Replacing the binary under a live process leaves the update on disk
+    // and the old build running (the instance mutex then makes the relaunch
+    // exit). If the old process will not go, neither do we.
+    if let Err(error) = wait_for_process_exit(pid, Duration::from_secs(30)) {
+        return Err(format!("The running Headroom did not exit ({error}); the update was not applied."));
+    }
     replace_target_binary(&target, &source)?;
     relaunch_target(&target)?;
     let _ = std::fs::remove_file(&source);
@@ -214,24 +233,67 @@ fn fetch_latest_release() -> Result<Option<ReleaseDescriptor>, String> {
         return Ok(None);
     }
 
+    // Exactly our asset, never "any .exe in the release".
     let asset = release
         .assets
         .iter()
         .find(|asset| asset.name.eq_ignore_ascii_case(RELEASE_ASSET_NAME))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.to_ascii_lowercase().ends_with(".exe"))
-        })
+        .ok_or_else(|| format!("The latest release has no {RELEASE_ASSET_NAME} asset."))?;
+    let checksum = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.eq_ignore_ascii_case(RELEASE_CHECKSUM_ASSET_NAME))
         .ok_or_else(|| {
-            "No Windows executable asset was found in the latest release.".to_string()
+            format!("The latest release has no {RELEASE_CHECKSUM_ASSET_NAME} asset; not installing an unverified download.")
         })?;
+    let sha256 = fetch_checksum(&agent, &checksum.browser_download_url)?;
 
     Ok(Some(ReleaseDescriptor {
         latest_version,
         asset_url: asset.browser_download_url.clone(),
+        sha256,
     }))
+}
+
+/// The first hex token of the checksum file (`<hex>  headroom.exe`).
+fn fetch_checksum(agent: &ureq::Agent, url: &str) -> Result<String, String> {
+    let text = agent
+        .get(url)
+        .set("User-Agent", user_agent())
+        .call()
+        .map_err(|e| format!("Unable to download the release checksum: {e}"))?
+        .into_string()
+        .map_err(|e| format!("Unable to read the release checksum: {e}"))?;
+    parse_checksum(&text).ok_or_else(|| "The release checksum file is not a SHA-256 digest.".to_string())
+}
+
+fn parse_checksum(text: &str) -> Option<String> {
+    let token = text.split_whitespace().next()?.to_ascii_lowercase();
+    (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())).then_some(token)
+}
+
+/// SHA-256 through the platform's CNG, so no hashing crate is needed.
+fn sha256_hex(data: &[u8]) -> Result<String, String> {
+    use windows::Win32::Security::Cryptography::{
+        BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider, BCRYPT_ALG_HANDLE,
+        BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
+    };
+    let mut algorithm = BCRYPT_ALG_HANDLE::default();
+    unsafe {
+        BCryptOpenAlgorithmProvider(
+            &mut algorithm,
+            BCRYPT_SHA256_ALGORITHM,
+            None,
+            BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0),
+        )
+        .ok()
+        .map_err(|e| format!("SHA-256 unavailable: {e}"))?;
+        let mut digest = [0u8; 32];
+        let hashed = BCryptHash(algorithm, None, data, &mut digest).ok();
+        let _ = BCryptCloseAlgorithmProvider(algorithm, 0);
+        hashed.map_err(|e| format!("SHA-256 failed: {e}"))?;
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
 }
 
 fn build_agent() -> Result<ureq::Agent, String> {
@@ -243,7 +305,12 @@ fn build_agent() -> Result<ureq::Agent, String> {
         .build())
 }
 
-fn download_release_asset(url: &str, partial_path: &Path, final_path: &Path) -> Result<(), String> {
+fn download_release_asset(
+    url: &str,
+    expected_sha256: &str,
+    partial_path: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
     let agent = build_agent()?;
     let response = agent
         .get(url)
@@ -251,14 +318,28 @@ fn download_release_asset(url: &str, partial_path: &Path, final_path: &Path) -> 
         .call()
         .map_err(|e| format!("Unable to download the latest release: {e}"))?;
 
-    let mut reader = response.into_reader();
+    // Capped, then hashed, before it is ever called an update.
+    let mut reader = response.into_reader().take(MAX_DOWNLOAD_BYTES + 1);
+    let mut bytes = Vec::new();
+    io::copy(&mut reader, &mut bytes)
+        .map_err(|e| format!("Unable to read the downloaded update: {e}"))?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err("The downloaded update is larger than any Headroom release; not installing it.".to_string());
+    }
+    let actual = sha256_hex(&bytes)?;
+    if actual != expected_sha256 {
+        return Err(format!(
+            "The downloaded update does not match the release checksum (got {actual}); not installing it."
+        ));
+    }
+
     let mut file = File::create(partial_path)
         .map_err(|e| format!("Unable to create temporary download file: {e}"))?;
-
-    io::copy(&mut reader, &mut file)
+    file.write_all(&bytes)
         .map_err(|e| format!("Unable to write the downloaded update: {e}"))?;
     file.flush()
         .map_err(|e| format!("Unable to finalize the downloaded update: {e}"))?;
+    drop(file);
 
     std::fs::rename(partial_path, final_path)
         .map_err(|e| format!("Unable to finalize the downloaded update file: {e}"))?;
@@ -531,4 +612,24 @@ fn show_error_message(title: &str, message: &str) {
 
 fn wide_str(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_matches_the_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc").unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn checksum_files_yield_their_first_hex_token_only() {
+        assert_eq!(parse_checksum("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  headroom.exe\n").as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        assert_eq!(parse_checksum("not a digest"), None);
+        assert_eq!(parse_checksum(""), None);
+    }
 }

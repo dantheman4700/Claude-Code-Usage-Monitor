@@ -206,10 +206,6 @@ impl ProviderSet {
         self.0.count_ones() as usize
     }
 
-    pub fn first(self) -> Option<ProviderId> {
-        self.iter().next()
-    }
-
     pub fn iter(self) -> impl Iterator<Item = ProviderId> {
         ProviderId::ALL
             .into_iter()

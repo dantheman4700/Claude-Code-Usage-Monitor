@@ -1,28 +1,35 @@
 //! Asking the providers, on a schedule that respects them.
 //!
-//! A poll runs on a worker thread and reports back to the tray window with a
-//! message. Providers that failed are left alone for a widening interval;
-//! a provider whose credentials were rejected pauses everything until its
-//! credential files change on disk, so nobody is hammered while signed out.
+//! One poll worker, one clock. Each round asks every enabled provider that is
+//! due: not backed off, or backed off but with credential files that have
+//! changed since it failed. Failures widen a per-provider backoff; nothing
+//! pauses globally, so one provider's missing sign-in never silences the
+//! rest, and a sign-in is noticed within a tick because the worker compares
+//! the credential files itself. After each round the worker tells the window
+//! thread when the next provider comes due, so a two-minute backoff is
+//! honoured under a fifteen-minute tick without any timer being touched from
+//! this thread.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::activity_log::{self, EventKind};
 use crate::app_settings;
-use crate::native_interop::WM_APP_USAGE_UPDATED;
-use crate::poller::{self, PollError, PollFailure};
+use crate::models::AppUsageData;
+use crate::native_interop::{WM_APP_SCHEDULE_DUE, WM_APP_USAGE_UPDATED};
+use crate::poller::{self, CredentialWatchSnapshot, PollError, PollFailure};
 use crate::providers::{ProviderId, ProviderSet};
 use crate::state::{
-    backoff_seconds, lock_state, now_unix_secs, SendHwnd, POLL_GENERATION, POLL_IN_FLIGHT,
-    RETRY_BASE_MS, TIMER_POLL, TIMER_RESET_POLL,
+    backoff_seconds, lock_state, now_unix_secs, ProviderBackoff, SendHwnd, POLL_GENERATION,
+    POLL_IN_FLIGHT,
 };
 use crate::tray_icon;
 
 /// Ask for a poll. If one is running, exactly one more follows it.
-pub fn request_poll(hwnd: windows::Win32::Foundation::HWND) {
+pub fn request_poll(hwnd: HWND) {
     POLL_GENERATION.fetch_add(1, Ordering::AcqRel);
     if POLL_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -36,6 +43,8 @@ pub fn request_poll(hwnd: windows::Win32::Foundation::HWND) {
 
 fn poll_worker(send_hwnd: SendHwnd) {
     loop {
+        // Requests that arrive during a round are collapsed into one more
+        // round; the generation is read once so a burst never runs twice.
         let generation = POLL_GENERATION.load(Ordering::Acquire);
         do_poll_once(send_hwnd);
         if generation != POLL_GENERATION.load(Ordering::Acquire) {
@@ -54,23 +63,108 @@ fn poll_worker(send_hwnd: SendHwnd) {
     }
 }
 
+/// Which providers this round asks: everyone enabled who is not backed off,
+/// plus anyone backed off on a credential failure whose credential files
+/// have changed since. Returns the set to poll and the subset whose
+/// credentials moved (their backoff ladder restarts).
+pub(crate) fn select_polled(
+    enabled: ProviderSet,
+    backoff: &HashMap<ProviderId, ProviderBackoff>,
+    now: u64,
+    watch_now: impl Fn(ProviderId) -> CredentialWatchSnapshot,
+) -> (ProviderSet, ProviderSet) {
+    let mut polled = Vec::new();
+    let mut changed = Vec::new();
+    for provider in enabled.iter() {
+        match backoff.get(&provider) {
+            Some(entry) if entry.next_attempt_unix > now => {
+                if let Some(watched) = &entry.watch {
+                    if watch_now(provider) != *watched {
+                        polled.push(provider);
+                        changed.push(provider);
+                    }
+                }
+            }
+            _ => polled.push(provider),
+        }
+    }
+    (
+        ProviderSet::from_enabled(polled.into_iter()),
+        ProviderSet::from_enabled(changed.into_iter()),
+    )
+}
+
+/// Fold this round's failures into the backoff table. Returns each failed
+/// provider with its error and its miss count after this round, so the
+/// caller can log and notify on first misses only.
+pub(crate) fn apply_failures(
+    backoff: &mut HashMap<ProviderId, ProviderBackoff>,
+    failures: &[PollFailure],
+    mut snapshots: HashMap<ProviderId, CredentialWatchSnapshot>,
+    credentials_changed: ProviderSet,
+    now: u64,
+) -> Vec<(ProviderId, PollError, u32)> {
+    let mut ladders = Vec::with_capacity(failures.len());
+    for failure in failures {
+        let entry = backoff
+            .entry(failure.provider)
+            .or_insert_with(|| ProviderBackoff {
+                misses: 0,
+                next_attempt_unix: 0,
+                error: failure.error,
+                watch: None,
+            });
+        // A different kind of failure, or credentials that just changed,
+        // starts the ladder over: a fresh sign-in deserves the short step.
+        if entry.error != failure.error || credentials_changed.contains(failure.provider) {
+            entry.misses = 0;
+        }
+        entry.misses = entry.misses.saturating_add(1);
+        entry.error = failure.error;
+        entry.next_attempt_unix = now + backoff_seconds(failure.error, entry.misses);
+        entry.watch = snapshots.remove(&failure.provider);
+        ladders.push((failure.provider, failure.error, entry.misses));
+    }
+    ladders
+}
+
+/// When the next provider comes due: the soonest backoff expiry, or a window
+/// renewal (plus a few seconds for the provider to notice) -- whichever is
+/// first and still ahead of `now`.
+pub(crate) fn next_due_unix(
+    enabled: ProviderSet,
+    backoff: &HashMap<ProviderId, ProviderBackoff>,
+    data: Option<&AppUsageData>,
+    now: u64,
+) -> Option<u64> {
+    let retries = enabled
+        .iter()
+        .filter_map(|provider| backoff.get(&provider))
+        .map(|entry| entry.next_attempt_unix);
+    let resets = data
+        .into_iter()
+        .flat_map(|data| ProviderId::ALL.into_iter().filter_map(move |provider| data.get(provider)))
+        .flat_map(|usage| {
+            [usage.session.resets_at, usage.weekly.resets_at]
+                .into_iter()
+                .chain(usage.monthly.as_ref().map(|monthly| monthly.resets_at))
+                .chain(usage.scoped.iter().map(|scoped| scoped.section.resets_at))
+                .flatten()
+        })
+        .filter_map(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs() + 5);
+    retries.chain(resets).filter(|at| *at > now).min()
+}
+
 fn do_poll_once(send_hwnd: SendHwnd) {
     let hwnd = send_hwnd.to_hwnd();
     let now = now_unix_secs();
 
-    // The enabled set is what the user asked to be read; skipping a provider
-    // inside its retry window is the backoff. Remember who was reporting so
-    // only transitions reach the activity log.
-    let (enabled, polled, previously_available) = {
+    let (enabled, backoff, previously_available) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else {
             return;
         };
-        let polled = ProviderSet::from_enabled(s.providers.iter().filter(|provider| {
-            s.provider_backoff
-                .get(provider)
-                .is_none_or(|backoff| backoff.next_attempt_unix <= now)
-        }));
         let previously: Vec<ProviderId> = ProviderId::ALL
             .into_iter()
             .filter(|provider| {
@@ -80,210 +174,211 @@ fn do_poll_once(send_hwnd: SendHwnd) {
                     .is_some_and(|usage| !usage.stale)
             })
             .collect();
-        (s.providers, polled, previously)
+        (s.providers, s.provider_backoff.clone(), previously)
     };
+
+    // Credential-file probes spawn wsl.exe; they run here, on the worker,
+    // never on the window thread.
+    let (polled, credentials_changed) =
+        select_polled(enabled, &backoff, now, poller::credential_watch_snapshot);
     if polled.is_empty() {
+        schedule_next(send_hwnd);
         return;
     }
 
     let (data, failures) = poller::poll_detailed(polled);
-    record_transitions(&data, &failures, polled, &previously_available, now);
+    let snapshots: HashMap<ProviderId, CredentialWatchSnapshot> = failures
+        .iter()
+        .filter(|failure| failure.error.is_credential_failure())
+        .map(|failure| (failure.provider, poller::credential_watch_snapshot(failure.provider)))
+        .collect();
+    let any_fresh = !data.is_empty();
 
-    // An empty result only means "everything is down" when everything was
-    // asked; a poll of just the due providers can come back empty while good
-    // readings sit in state for the rest.
-    let everything_failed = data.is_empty() && polled == enabled;
-    if everything_failed {
-        let failure = failures.first().copied().unwrap_or(PollFailure {
-            provider: polled.first().unwrap_or_default(),
-            error: PollError::RequestFailed,
-        });
-        handle_total_failure(send_hwnd, failure);
-        return;
-    }
-
-    let mut state = lock_state();
-    let data = match state.as_ref().and_then(|s| s.data.as_ref()) {
-        Some(previous) => poller::carry_forward_failures(data, previous, enabled),
-        None => data,
-    };
-    let cache_data = data.clone();
-    if let Some(s) = state.as_mut() {
-        s.data = Some(data);
-        s.last_poll_ok = true;
-        if s.retry_count > 0 {
-            s.retry_count = 0;
-            let interval = s.poll_interval_ms;
-            unsafe {
-                SetTimer(hwnd, TIMER_POLL, interval, None);
+    // Bookkeeping under the lock; every write to disk happens after it.
+    let mut events: Vec<(EventKind, Option<ProviderId>, String)> = Vec::new();
+    let mut balloons: Vec<(String, String)> = Vec::new();
+    let (merged, poll_ok) = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            return;
+        };
+        for provider in polled.iter() {
+            if data.get(provider).is_some() {
+                let was_failing = s.provider_backoff.remove(&provider).is_some();
+                if was_failing || !previously_available.contains(&provider) {
+                    events.push((
+                        EventKind::Online,
+                        Some(provider),
+                        format!("{} is reporting", provider.descriptor().display_name),
+                    ));
+                }
             }
         }
-        s.force_notify_auth_error = false;
-        s.auth_error_paused_polling = false;
-        s.auth_watch_mode =
-            poller::CredentialWatchMode::ActiveSource(s.providers.first().unwrap_or_default());
-        s.auth_watch_snapshot.clear();
-    }
-    drop(state);
-
-    let _ = app_settings::save_usage_cache(&cache_data, true);
-    app_settings::record_usage_history(&cache_data, now);
-    schedule_reset_poll(send_hwnd, &cache_data, now);
-    unsafe {
-        let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
-    }
-}
-
-/// Backoff bookkeeping, and one activity-log line per change of state.
-fn record_transitions(
-    data: &crate::models::AppUsageData,
-    failures: &[PollFailure],
-    polled: ProviderSet,
-    previously_available: &[ProviderId],
-    now: u64,
-) {
-    let mut state = lock_state();
-    let Some(s) = state.as_mut() else {
-        return;
-    };
-    for provider in polled.iter() {
-        if data.get(provider).is_some() {
-            let was_failing = s.provider_backoff.remove(&provider).is_some();
-            if was_failing || !previously_available.contains(&provider) {
-                activity_log::record(
-                    EventKind::Online,
-                    Some(provider),
-                    format!("{} is reporting", provider.descriptor().display_name),
-                );
+        let ladders = apply_failures(&mut s.provider_backoff, &failures, snapshots, credentials_changed, now);
+        for (provider, error, misses) in ladders {
+            if misses != 1 {
+                continue;
             }
-        }
-    }
-    for failure in failures {
-        let entry = s.provider_backoff.entry(failure.provider).or_default();
-        entry.misses = entry.misses.saturating_add(1);
-        entry.next_attempt_unix = now + backoff_seconds(failure.error, entry.misses);
-        if entry.misses == 1 {
-            let name = failure.provider.descriptor().display_name;
-            let (kind, message) = match failure.error {
+            let name = provider.descriptor().display_name;
+            let (kind, message) = match error {
                 PollError::NoCredentials => {
                     (EventKind::NoCredentials, format!("{name}: no credentials found"))
                 }
-                PollError::AuthRequired | PollError::TokenExpired => (
-                    EventKind::AuthRequired,
-                    format!("{name} rejected its credentials; sign in again"),
-                ),
+                PollError::AuthRequired | PollError::TokenExpired => {
+                    let (title, body) = s.language.provider_auth_error(provider);
+                    balloons.push((title.to_string(), body.to_string()));
+                    (
+                        EventKind::AuthRequired,
+                        format!("{name} rejected its credentials; sign in again"),
+                    )
+                }
                 PollError::RequestFailed => {
                     (EventKind::Offline, format!("{name} stopped answering"))
                 }
             };
-            activity_log::record(kind, Some(failure.provider), message);
+            events.push((kind, Some(provider), message));
         }
-    }
-}
+        let merged = match s.data.as_ref() {
+            Some(previous) => poller::carry_forward_failures(data, previous, enabled),
+            None => data,
+        };
+        // "OK" means someone is reporting right now, not "the round ran".
+        let poll_ok = enabled
+            .iter()
+            .any(|provider| merged.get(provider).is_some_and(|usage| !usage.stale));
+        s.data = Some(merged.clone());
+        s.last_poll_ok = poll_ok;
+        (merged, poll_ok)
+    };
 
-/// Every polled provider failed. Rejected or missing credentials pause
-/// polling until the credential files change; anything else retries fast,
-/// doubling, capped at the poll interval.
-fn handle_total_failure(send_hwnd: SendHwnd, failure: PollFailure) {
-    let hwnd = send_hwnd.to_hwnd();
-    let auth_watch = match failure.error {
-        PollError::AuthRequired | PollError::TokenExpired => {
-            let mode = poller::CredentialWatchMode::ActiveSource(failure.provider);
-            Some((mode, poller::credential_watch_snapshot(mode)))
-        }
-        PollError::NoCredentials => {
-            let mode = poller::CredentialWatchMode::AllSources(failure.provider);
-            Some((mode, poller::credential_watch_snapshot(mode)))
-        }
-        PollError::RequestFailed => None,
-    };
-    let (notify, cache_data) = {
-        let mut state = lock_state();
-        let mut should_notify = false;
-        if let Some(s) = state.as_mut() {
-            s.last_poll_ok = false;
-            match auth_watch {
-                Some((mode, snapshot)) => {
-                    // Only the first failure gets a balloon.
-                    if s.retry_count == 0 || s.force_notify_auth_error {
-                        should_notify = true;
-                    }
-                    s.force_notify_auth_error = false;
-                    s.auth_error_paused_polling = true;
-                    s.auth_watch_mode = mode;
-                    s.auth_watch_snapshot = snapshot;
-                    s.retry_count = s.retry_count.saturating_add(1);
-                    unsafe {
-                        let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                        SetTimer(hwnd, TIMER_POLL, s.poll_interval_ms, None);
-                    }
-                }
-                None => {
-                    s.force_notify_auth_error = false;
-                    s.auth_error_paused_polling = false;
-                    s.auth_watch_snapshot.clear();
-                    s.retry_count = s.retry_count.saturating_add(1);
-                    let backoff = RETRY_BASE_MS
-                        .saturating_mul(1u32.checked_shl(s.retry_count - 1).unwrap_or(u32::MAX));
-                    let retry_ms = backoff.min(s.poll_interval_ms);
-                    unsafe {
-                        let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-                        SetTimer(hwnd, TIMER_POLL, retry_ms, None);
-                    }
-                }
-            }
-        }
-        let cache_data = state
-            .as_ref()
-            .and_then(|s| s.data.clone())
-            .unwrap_or_default();
-        (should_notify, cache_data)
-    };
-    // The panel follows the cache; record the failure so it does not show
-    // stale figures as current.
-    let _ = app_settings::save_usage_cache(&cache_data, false);
-    if notify {
-        let balloon = lock_state()
-            .as_ref()
-            .map(|s| s.language.provider_auth_error(failure.provider));
-        if let Some((title, body)) = balloon {
-            tray_icon::notify_balloon(hwnd, title, body);
-        }
+    for (kind, provider, message) in events {
+        activity_log::record(kind, provider, message);
     }
+    let _ = app_settings::save_usage_cache(&merged, poll_ok);
+    if any_fresh {
+        app_settings::record_usage_history(&merged, now);
+    }
+    for (title, body) in balloons {
+        tray_icon::notify_balloon(hwnd, &title, &body);
+    }
+    schedule_next(send_hwnd);
     unsafe {
         let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
     }
 }
 
-/// If any window renews before the next poll, poll again just after it does,
-/// so a reset shows up within seconds rather than at the next tick.
-fn schedule_reset_poll(send_hwnd: SendHwnd, data: &crate::models::AppUsageData, now: u64) {
-    let hwnd = send_hwnd.to_hwnd();
-    let interval_ms = lock_state()
-        .as_ref()
-        .map(|s| s.poll_interval_ms)
-        .unwrap_or(app_settings::POLL_5_MIN);
-    let soonest = ProviderId::ALL
-        .into_iter()
-        .filter_map(|provider| data.get(provider))
-        .flat_map(|usage| {
-            [usage.session.resets_at, usage.weekly.resets_at]
-                .into_iter()
-                .chain(usage.monthly.as_ref().map(|m| m.resets_at))
-                .chain(usage.scoped.iter().map(|s| s.section.resets_at))
-                .flatten()
-        })
-        .filter_map(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .filter(|at| *at > now)
-        .min();
-    unsafe {
-        let _ = KillTimer(hwnd, TIMER_RESET_POLL);
-        if let Some(reset_unix) = soonest {
-            let delay_ms = (reset_unix - now + 5) * 1_000;
-            if delay_ms < u64::from(interval_ms) {
-                SetTimer(hwnd, TIMER_RESET_POLL, delay_ms as u32, None);
+/// Tell the window thread when to run the next round early. Zero means
+/// nothing is due before the regular tick.
+fn schedule_next(send_hwnd: SendHwnd) {
+    let now = now_unix_secs();
+    let delay_ms = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else {
+            return;
+        };
+        match next_due_unix(s.providers, &s.provider_backoff, s.data.as_ref(), now) {
+            Some(due) if (due - now) * 1_000 < u64::from(s.poll_interval_ms) => {
+                ((due - now) * 1_000).max(1_000)
             }
+            _ => 0,
         }
+    };
+    unsafe {
+        let _ = PostMessageW(
+            send_hwnd.to_hwnd(),
+            WM_APP_SCHEDULE_DUE,
+            WPARAM(delay_ms as usize),
+            LPARAM(0),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_set() -> ProviderSet {
+        ProviderSet::from_enabled(std::iter::empty())
+    }
+
+    fn set(providers: &[ProviderId]) -> ProviderSet {
+        ProviderSet::from_enabled(providers.iter().copied())
+    }
+
+    fn backed_off(error: PollError, until: u64, watch: Option<&[&str]>) -> ProviderBackoff {
+        ProviderBackoff {
+            misses: 1,
+            next_attempt_unix: until,
+            error,
+            watch: watch.map(|w| w.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    /// The bug the council found four times over: after a sign-in, the
+    /// provider is still inside its backoff, so it must be polled on the
+    /// strength of its credential files having changed -- not skipped and
+    /// then never looked at again.
+    #[test]
+    fn a_credential_change_polls_a_backed_off_provider() {
+        let mut backoff = HashMap::new();
+        backoff.insert(ProviderId::Grok, backed_off(PollError::NoCredentials, 10_000, Some(&["grok|missing"])));
+        let enabled = set(&[ProviderId::Claude, ProviderId::Grok]);
+        let (polled, changed) = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|present|1644|99".into()]);
+        assert!(polled.contains(ProviderId::Grok));
+        assert!(polled.contains(ProviderId::Claude));
+        assert!(changed.contains(ProviderId::Grok));
+        let (polled, changed) = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|missing".into()]);
+        assert!(!polled.contains(ProviderId::Grok));
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn a_transient_backoff_is_retried_only_when_due() {
+        let mut backoff = HashMap::new();
+        backoff.insert(ProviderId::Codex, backed_off(PollError::RequestFailed, 10_000, None));
+        let enabled = set(&[ProviderId::Codex]);
+        let (polled, _) = select_polled(enabled, &backoff, 9_999, |_| unreachable!("no watch for transient failures"));
+        assert!(polled.is_empty());
+        let (polled, _) = select_polled(enabled, &backoff, 10_000, |_| unreachable!());
+        assert!(polled.contains(ProviderId::Codex));
+    }
+
+    /// Credentials that changed restart the ladder so a fresh sign-in that
+    /// still fails is asked again soon, not after the accumulated step.
+    #[test]
+    fn a_credential_change_restarts_the_ladder_but_a_plain_repeat_climbs_it() {
+        let mut backoff = HashMap::new();
+        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 3, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None });
+        let failures = [PollFailure { provider: ProviderId::Codex, error: PollError::AuthRequired }];
+        let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), set(&[ProviderId::Codex]), 1_000);
+        assert_eq!(ladders, vec![(ProviderId::Codex, PollError::AuthRequired, 1)]);
+        assert_eq!(backoff[&ProviderId::Codex].next_attempt_unix, 1_000 + 5 * 60);
+        let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), empty_set(), 2_000);
+        assert_eq!(ladders[0].2, 2);
+        assert_eq!(backoff[&ProviderId::Codex].next_attempt_unix, 2_000 + 10 * 60);
+    }
+
+    /// A manual retry zeroes the deadline but keeps the miss count, so a
+    /// repeat failure lands on the longer step rather than back at the start.
+    #[test]
+    fn a_manual_retry_keeps_the_miss_count() {
+        let mut backoff = HashMap::new();
+        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 2, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None });
+        let failures = [PollFailure { provider: ProviderId::Codex, error: PollError::AuthRequired }];
+        let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), empty_set(), 0);
+        assert_eq!(ladders[0].2, 3);
+        assert_eq!(backoff[&ProviderId::Codex].next_attempt_unix, 20 * 60);
+    }
+
+    /// With everything backed off two minutes, the next round is due in two
+    /// minutes -- not every second, and not at the fifteen-minute tick.
+    #[test]
+    fn the_next_round_is_due_at_the_soonest_retry() {
+        let mut backoff = HashMap::new();
+        backoff.insert(ProviderId::Claude, backed_off(PollError::RequestFailed, 1_120, None));
+        backoff.insert(ProviderId::Codex, backed_off(PollError::NoCredentials, 1_900, None));
+        let enabled = set(&[ProviderId::Claude, ProviderId::Codex]);
+        assert_eq!(next_due_unix(enabled, &backoff, None, 1_000), Some(1_120));
+        assert_eq!(next_due_unix(enabled, &HashMap::new(), None, 1_000), None);
     }
 }

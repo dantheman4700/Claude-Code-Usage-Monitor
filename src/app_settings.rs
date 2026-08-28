@@ -24,6 +24,9 @@ pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
+    /// Format version of this file, for the day a field changes meaning.
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +77,7 @@ impl Default for SettingsFile {
         // which of the two a caller happens to ask.
         let providers = ProviderSet::default();
         Self {
+            schema_version: SCHEMA_VERSION,
             poll_interval_ms: default_poll_interval(),
             language: None,
             last_update_check_unix: None,
@@ -168,6 +172,8 @@ impl SettingsFile {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UsageCache {
+    #[serde(default)]
+    pub schema_version: u32,
     pub updated_unix: u64,
     pub poll_ok: bool,
     pub data: AppUsageData,
@@ -241,10 +247,18 @@ pub fn usage_history_path() -> PathBuf {
 }
 
 pub fn load_settings() -> SettingsFile {
-    let mut settings = std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|content| decode_settings(&content))
-        .unwrap_or_default();
+    let path = settings_path();
+    let mut settings = match std::fs::read_to_string(&path) {
+        Ok(content) => match decode_settings(&content) {
+            Some(settings) => settings,
+            None => {
+                quarantine(&path, "invalid JSON");
+                SettingsFile::default()
+            }
+        },
+        Err(_) => SettingsFile::default(),
+    };
+    settings.schema_version = SCHEMA_VERSION;
     settings.normalize();
     settings
 }
@@ -290,6 +304,15 @@ pub fn record_usage_history(data: &AppUsageData, now_unix: u64) {
     }
 }
 
+/// The cache's `updated_unix` without parsing the readings: the file's mtime.
+pub fn load_usage_cache_metadata() -> Option<u64> {
+    std::fs::metadata(usage_cache_path())
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+}
+
 pub fn load_usage_cache() -> Option<UsageCache> {
     read_json(&usage_cache_path())
 }
@@ -298,6 +321,7 @@ pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String
     write_json_atomic(
         &usage_cache_path(),
         &UsageCache {
+            schema_version: SCHEMA_VERSION,
             updated_unix: now_unix(),
             poll_ok,
             data: data.clone(),
@@ -305,9 +329,37 @@ pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String
     )
 }
 
+pub const SCHEMA_VERSION: u32 = 1;
+
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    match serde_json::from_str(&content) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            quarantine(path, &error.to_string());
+            None
+        }
+    }
+}
+
+/// A file that no longer parses is moved aside, not silently replaced: the
+/// bytes stay for a bug report, and the app starts from defaults.
+fn quarantine(path: &Path, why: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    let aside = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+    let moved = std::fs::rename(path, &aside).is_ok();
+    crate::diagnose::log(format!(
+        "{} did not parse ({why}); {}",
+        path.display(),
+        if moved { format!("moved to {}", aside.display()) } else { "left in place".to_string() }
+    ));
 }
 
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {

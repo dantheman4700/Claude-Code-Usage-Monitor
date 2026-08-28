@@ -27,7 +27,8 @@ pub enum TrayAction {
 /// scaling one bitmap.
 pub fn load_app_icons() -> (HICON, HICON) {
     unsafe {
-        let mut exe_buf = [0u16; 260];
+        // Long paths are real; MAX_PATH is not a limit here.
+        let mut exe_buf = vec![0u16; 32_768];
         let len = GetModuleFileNameW(None, &mut exe_buf) as usize;
         if len == 0 {
             return (HICON::default(), HICON::default());
@@ -72,10 +73,12 @@ fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
 }
 
 /// Register the icon, or refresh its tooltip if it is already there.
-pub fn sync(hwnd: HWND, tooltip: &str) {
+/// Returns false when the shell refused both, which is worth a log line: an
+/// app whose icon never appears has no other way to be found.
+pub fn sync(hwnd: HWND, tooltip: &str) -> bool {
     let hicon = load_app_icon();
     if hicon.is_invalid() {
-        return;
+        return false;
     }
     unsafe {
         let mut nid = notify_data(hwnd);
@@ -85,10 +88,10 @@ pub fn sync(hwnd: HWND, tooltip: &str) {
         copy_wide(tooltip, &mut nid.szTip);
         // NIM_ADD succeeds on first registration; afterwards NIM_MODIFY
         // refreshes the image, callback and tooltip in place.
-        if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
-        }
+        let registered = Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
+            || Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool();
         let _ = DestroyIcon(hicon);
+        registered
     }
 }
 

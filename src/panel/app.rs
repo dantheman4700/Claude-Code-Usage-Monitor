@@ -45,6 +45,12 @@ pub(crate) struct PanelApp {
     pub usage_poll_ok: bool,
     pub usage_has_error: bool,
     last_cache_read: Instant,
+    /// Modification time of the cache at the last parse; unchanged means
+    /// nothing to re-read.
+    cache_modified: Option<std::time::SystemTime>,
+    /// When each retry button was last pressed, so the button reflects the
+    /// tray's cooldown instead of looking dead.
+    pub retry_pressed: std::collections::HashMap<Option<ProviderId>, Instant>,
 }
 
 /// Runs the panel when asked to, and says whether it did.
@@ -129,6 +135,8 @@ impl PanelApp {
             usage_poll_ok,
             usage_has_error,
             last_cache_read: Instant::now(),
+            cache_modified: None,
+            retry_pressed: Default::default(),
         }
     }
 
@@ -151,11 +159,33 @@ impl PanelApp {
 
     /// Tell the tray process something changed.
     pub(crate) fn post_owner(&self, message: u32) {
+        self.post_owner_with(message, 0);
+    }
+
+    pub(crate) fn post_owner_with(&self, message: u32, wparam: usize) {
         if self.owner != 0 {
             unsafe {
-                let _ = PostMessageW(HWND(self.owner as *mut _), message, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(HWND(self.owner as *mut _), message, WPARAM(wparam), LPARAM(0));
             }
         }
+    }
+
+    /// Ask the tray to retry one provider (or all), and remember the press
+    /// so the button can show the cooldown.
+    pub(crate) fn request_retry(&mut self, target: Option<ProviderId>) {
+        let wparam = target
+            .and_then(|provider| ProviderId::ALL.iter().position(|candidate| *candidate == provider))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.post_owner_with(crate::native_interop::WM_APP_RETRY_PROVIDER, wparam);
+        self.retry_pressed.insert(target, Instant::now());
+    }
+
+    /// Seconds left on a retry button's cooldown, if any.
+    pub(crate) fn retry_cooldown_left(&self, target: Option<ProviderId>) -> Option<u64> {
+        let cooldown = if target.is_some() { 30 } else { crate::state::FETCH_ALL_COOLDOWN_SECS };
+        let elapsed = self.retry_pressed.get(&target)?.elapsed().as_secs();
+        (elapsed < cooldown).then_some(cooldown - elapsed)
     }
 
     /// Pick up the tray's latest reading, at most once a second.
@@ -164,6 +194,15 @@ impl PanelApp {
             return;
         }
         self.last_cache_read = Instant::now();
+        // A stat per second is nothing; a parse per second of a file that
+        // has not changed was most of the panel's idle work.
+        let modified = std::fs::metadata(app_settings::usage_cache_path())
+            .and_then(|meta| meta.modified())
+            .ok();
+        if modified.is_some() && modified == self.cache_modified {
+            return;
+        }
+        self.cache_modified = modified;
         if let Some(cache) = app_settings::load_usage_cache() {
             self.update_usage_cache(cache);
         }
@@ -259,7 +298,7 @@ impl eframe::App for PanelApp {
             .fill(menu_surface())
             .inner_margin(egui::Margin { left: 10, right: 10, top: 0, bottom: 10 })
             .show(ui, |ui| self.shell(ui));
-        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

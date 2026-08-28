@@ -2,7 +2,7 @@
 //!
 //! One mutex, one struct. The poll worker thread and the window procedure
 //! both touch it, so nothing here holds the lock across a call that might
-//! take it again -- that deadlocked the menu once already.
+//! take it again, and nothing holds it across disk or process I/O either.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -13,19 +13,16 @@ use windows::Win32::Foundation::HWND;
 
 use crate::localization::LanguageId;
 use crate::models::AppUsageData;
-use crate::poller::{self, PollError};
+use crate::poller::{CredentialWatchSnapshot, PollError};
 use crate::providers::{ProviderId, ProviderSet};
 use crate::updater::{InstallChannel, ReleaseDescriptor};
 
+/// The regular tick, at the user's chosen interval.
 pub const TIMER_POLL: usize = 1;
 pub const TIMER_UPDATE_CHECK: usize = 2;
-/// Fires just after a window renews, so the reading turns over promptly
-/// instead of waiting out the rest of the poll interval.
-pub const TIMER_RESET_POLL: usize = 3;
-
-/// Base for the fast retry when every polled provider failed at once: one
-/// second, doubling, capped at the poll interval.
-pub const RETRY_BASE_MS: u32 = 1_000;
+/// One-shot: fires when a provider's retry comes due, or just after one of
+/// its windows renews, when that is sooner than the next regular tick.
+pub const TIMER_DUE: usize = 3;
 
 /// Monotonic poll request counter, so a request that lands while a poll is
 /// running triggers exactly one more poll rather than a pile.
@@ -54,10 +51,28 @@ pub enum UpdateStatus {
     Available(ReleaseDescriptor),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// A provider that failed, and when to ask it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderBackoff {
     pub misses: u32,
     pub next_attempt_unix: u64,
+    pub error: PollError,
+    /// For a credential failure: what its credential files looked like when
+    /// it failed. The poll worker compares this each tick and asks again as
+    /// soon as they change, so a sign-in is picked up within one tick
+    /// instead of at the end of the backoff.
+    pub watch: Option<CredentialWatchSnapshot>,
+}
+
+impl PollError {
+    /// Missing or rejected credentials: nothing changes until a person signs
+    /// in, so these are watched rather than merely retried.
+    pub fn is_credential_failure(self) -> bool {
+        matches!(
+            self,
+            PollError::NoCredentials | PollError::AuthRequired | PollError::TokenExpired
+        )
+    }
 }
 
 /// How long to leave a provider alone after its `misses`th consecutive
@@ -79,15 +94,22 @@ pub fn backoff_seconds(error: PollError, misses: u32) -> u64 {
     (base * 2u64.saturating_pow(doubling)).min(cap)
 }
 
+/// How long a manual retry of `provider` must wait after the previous one.
+/// Rejected or missing credentials get the long one: a retry there costs an
+/// HTTPS call and possibly a CLI refresh, and mashing does not sign anyone in.
+pub fn manual_retry_cooldown_secs(backoff: Option<&ProviderBackoff>) -> u64 {
+    match backoff {
+        Some(entry) if entry.error.is_credential_failure() => 30,
+        _ => 2,
+    }
+}
+
+pub const FETCH_ALL_COOLDOWN_SECS: u64 = 15;
+
 pub struct AppState {
     pub providers: ProviderSet,
     pub poll_interval_ms: u32,
     pub data: Option<AppUsageData>,
-    pub retry_count: u32,
-    pub force_notify_auth_error: bool,
-    pub auth_error_paused_polling: bool,
-    pub auth_watch_mode: poller::CredentialWatchMode,
-    pub auth_watch_snapshot: poller::CredentialWatchSnapshot,
     pub last_poll_ok: bool,
     pub update_status: UpdateStatus,
     pub last_update_check_unix: Option<u64>,
@@ -97,6 +119,9 @@ pub struct AppState {
     /// Per-provider retry schedule. A provider that failed is asked again on
     /// a widening interval instead of every poll.
     pub provider_backoff: HashMap<ProviderId, ProviderBackoff>,
+    /// When each provider was last retried by hand, for the cooldown.
+    pub manual_retry_unix: HashMap<ProviderId, u64>,
+    pub last_fetch_all_unix: u64,
 }
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
@@ -125,5 +150,14 @@ mod tests {
         assert_eq!(backoff_seconds(PollError::NoCredentials, 9), 60 * 60);
         assert_eq!(backoff_seconds(PollError::RequestFailed, 1), 2 * 60);
         assert_eq!(backoff_seconds(PollError::RequestFailed, 40), 15 * 60);
+    }
+
+    #[test]
+    fn credential_failures_get_the_long_manual_cooldown() {
+        let auth = ProviderBackoff { misses: 1, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None };
+        let transient = ProviderBackoff { error: PollError::RequestFailed, ..auth.clone() };
+        assert_eq!(manual_retry_cooldown_secs(Some(&auth)), 30);
+        assert_eq!(manual_retry_cooldown_secs(Some(&transient)), 2);
+        assert_eq!(manual_retry_cooldown_secs(None), 2);
     }
 }

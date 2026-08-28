@@ -25,11 +25,27 @@ jobs:
       - name: Test
         run: cargo test --release --locked
 
+      - name: Tag must match Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $cargo = (Get-Content Cargo.toml -Raw)
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "version not found in Cargo.toml" }
+          if ($Matches[1] -ne $tag) { throw "tag v$tag does not match Cargo.toml version $($Matches[1])" }
+
       - name: Build release binary
         run: |
           cargo build --release --locked
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target\release\headroom.exe dist\headroom.exe
+
+      # The in-app updater refuses a release without this file and verifies
+      # the download against it.
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\headroom.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  headroom.exe" | Set-Content -NoNewline dist\headroom.exe.sha256
 
       # Unsigned: Partner Center signs Store submissions. The sideload build
       # for testers is made locally with build-msix.ps1 -DevSign.
@@ -44,6 +60,7 @@ jobs:
         with:
           files: |
             dist/headroom.exe
+            dist/headroom.exe.sha256
             packaging/msix/out/*.msix
           generate_release_notes: true
 
