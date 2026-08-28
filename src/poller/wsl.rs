@@ -74,7 +74,7 @@ fn list_distros_uncached() -> Vec<String> {
 /// `${VAR:-default}` survive the round trip; shell locals and embedded double
 /// quotes do not.
 pub(super) fn read_file(distro: &str, script: &str, what: &str) -> Option<String> {
-    let output = run_with_timeout(
+    let Some(output) = run_with_timeout(
         Command::new("wsl.exe")
             .arg("-d")
             .arg(distro)
@@ -86,7 +86,16 @@ pub(super) fn read_file(distro: &str, script: &str, what: &str) -> Option<String
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
         WSL_TIMEOUT,
-    )?;
+    ) else {
+        // A timeout used to look identical to a missing file. It is not: the
+        // file may be fine and the machine merely busy, and the difference
+        // decides whether the right answer is "sign in" or "wait".
+        diagnose::log(format!(
+            "WSL {what} probe timed out after {}s in distro {distro}",
+            WSL_TIMEOUT.as_secs()
+        ));
+        return None;
+    };
 
     if !output.status.success() {
         diagnose::log(format!(

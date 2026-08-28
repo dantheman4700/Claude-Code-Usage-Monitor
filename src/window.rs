@@ -148,7 +148,9 @@ fn backoff_seconds(error: poller::PollError, misses: u32) -> u64 {
     let (base, cap) = match error {
         poller::PollError::NoCredentials => (15 * 60, 60 * 60),
         poller::PollError::AuthRequired | poller::PollError::TokenExpired => (5 * 60, 30 * 60),
-        poller::PollError::RequestFailed => (60, 10 * 60),
+        // A rate limit is the common transient failure, and asking again a
+        // minute later is what keeps it going.
+        poller::PollError::RequestFailed => (2 * 60, 15 * 60),
     };
     let doubling = misses.saturating_sub(1).min(8);
     (base * 2u64.saturating_pow(doubling)).min(cap)
@@ -2202,7 +2204,14 @@ fn do_poll_once(hwnd: HWND) {
         }
     }
 
-    let result = if data.is_empty() {
+    // An empty result only means "everything is down" when everything was
+    // asked. A poll of just the providers that were due can come back empty
+    // while good readings sit in state for the rest -- and the fast retry
+    // below is for the former. Treating the latter as a failure fired that
+    // retry every second, and each round spawned wsl.exe until the WSL reads
+    // themselves timed out and reported providers as having no credentials.
+    let everything_failed = data.is_empty() && polled_providers == all_providers;
+    let result = if everything_failed {
         Err(failures.first().copied().unwrap_or(poller::PollFailure {
             provider: polled_providers.first().unwrap_or_default(),
             error: poller::PollError::RequestFailed,
