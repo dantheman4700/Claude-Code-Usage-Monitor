@@ -95,8 +95,9 @@ pub fn run(open_dashboard_on_start: bool) {
         };
         RegisterClassW(&class);
         // Top-level and never shown: a message-only window would be simpler,
-        // but it cannot receive the TaskbarCreated broadcast.
-        let title = wide_str("Headroom");
+        // but it cannot receive the TaskbarCreated broadcast. The title must
+        // differ from the panel's, which is found by exact title.
+        let title = wide_str("Headroom Tray");
         match CreateWindowExW(
             WS_EX_TOOLWINDOW,
             PCWSTR::from_raw(class_name.as_ptr()),
