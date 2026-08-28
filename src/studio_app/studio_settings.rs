@@ -224,6 +224,51 @@ impl StudioApp {
                     },
                 );
             });
+            section(ui, language.text("About"), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("Headroom {}", env!("CARGO_PKG_VERSION")))
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(match crate::updater::current_install_channel() {
+                        crate::updater::InstallChannel::Store => {
+                            "Installed from the Microsoft Store; updates arrive through the Store."
+                        }
+                        crate::updater::InstallChannel::Winget => "Installed with winget.",
+                        crate::updater::InstallChannel::Portable => "Portable install.",
+                    })
+                    .color(crate::ui::theme::muted())
+                    .size(12.0),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Headroom reads the logins your provider tools already keep on this PC and asks each provider how much of your plan is used. Nothing leaves this machine except those requests.",
+                    )
+                    .size(12.0),
+                );
+                ui.add_space(4.0);
+                ui.hyperlink_to(
+                    language.text("Privacy policy"),
+                    "https://github.com/dantheman4700/headroom/blob/main/PRIVACY.md",
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Inspired by Claude Code Usage Monitor by Craig Constable (MIT). Icons by Lucide (ISC). Built with egui.",
+                    )
+                    .color(crate::ui::theme::muted())
+                    .size(11.0),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Not affiliated with Anthropic, OpenAI, Google, xAI, Cursor, Fireworks AI or Cognition.",
+                    )
+                    .color(crate::ui::theme::muted())
+                    .size(11.0),
+                );
+            });
         });
         if changed {
             let new_language = self.language();

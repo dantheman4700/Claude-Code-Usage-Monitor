@@ -25,6 +25,10 @@ const WINGET_PACKAGE_ID: &str = "DannyLamphere.Headroom";
 pub enum InstallChannel {
     Portable,
     Winget,
+    /// Installed from the Microsoft Store, which delivers updates itself.
+    /// Self-updating from here would violate Store policy (10.2.5) and would
+    /// not work anyway: the package directory is read-only.
+    Store,
 }
 
 #[derive(Clone, Debug)]
@@ -70,13 +74,33 @@ pub fn handle_cli_mode(args: &[String]) -> Option<i32> {
 }
 
 pub fn current_install_channel() -> InstallChannel {
+    if running_with_package_identity() {
+        return InstallChannel::Store;
+    }
     match std::env::current_exe() {
         Ok(path) if is_winget_install_path(&path) => InstallChannel::Winget,
         _ => InstallChannel::Portable,
     }
 }
 
+/// Whether this process runs inside an MSIX package -- the Store install.
+///
+/// `GetCurrentPackageFullName` with an empty buffer answers the question
+/// without the name: an unpackaged process gets APPMODEL_ERROR_NO_PACKAGE,
+/// a packaged one gets "buffer too small".
+fn running_with_package_identity() -> bool {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+    let mut length: u32 = 0;
+    let result = unsafe { GetCurrentPackageFullName(&mut length, PWSTR::null()) };
+    result == ERROR_INSUFFICIENT_BUFFER || result == ERROR_SUCCESS
+}
+
 pub fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    if matches!(current_install_channel(), InstallChannel::Store) {
+        return Err("Updates are delivered by the Microsoft Store".to_string());
+    }
     match fetch_latest_release()? {
         Some(release) => Ok(UpdateCheckResult::Available(release)),
         None => Ok(UpdateCheckResult::UpToDate),

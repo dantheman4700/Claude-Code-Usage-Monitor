@@ -78,6 +78,9 @@ pub struct SettingsFile {
     /// Whether providers with nothing to read still get a row in the panel.
     #[serde(default = "default_true")]
     pub show_unreachable_providers: bool,
+    /// Cleared once the first-run notice has been dismissed.
+    #[serde(default)]
+    pub first_run_seen: bool,
     #[serde(default = "default_true")]
     pub custom_theme_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +119,7 @@ impl Default for SettingsFile {
             critical_percent: default_critical_percent(),
             history_retention_days: default_history_retention_days(),
             show_unreachable_providers: true,
+            first_run_seen: false,
             custom_theme_enabled: true,
             active_theme_path: None,
             dashboard_width: None,

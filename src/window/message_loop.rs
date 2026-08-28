@@ -368,6 +368,9 @@ pub(super) unsafe extern "system" fn wnd_proc(
                                 begin_update_check(hwnd, true);
                             }
                         }
+                        // The check itself explains that the Store delivers
+                        // updates, in the same place a result would appear.
+                        InstallChannel::Store => begin_update_check(hwnd, true),
                     }
                 }
                 2 => {

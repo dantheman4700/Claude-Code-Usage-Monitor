@@ -78,9 +78,40 @@ impl StudioApp {
             return;
         };
         settings_scroll_area(ui, |ui| {
+            self.first_run_notice(ui);
             headline(ui, &insights, now, self.language());
             self.provider_cards(ui, &usage, &insights, now, thresholds);
         });
+    }
+
+    /// Says what the app does, once, on the first screen a new user sees.
+    fn first_run_notice(&mut self, ui: &mut egui::Ui) {
+        if self.settings.first_run_seen {
+            return;
+        }
+        let language = self.language();
+        egui::Frame::new()
+            .fill(section_surface())
+            .stroke(egui::Stroke::new(1.0, accent()))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(language.text("Welcome to Headroom")).size(15.0).strong());
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "Headroom reads the logins your AI coding tools already keep on this PC (and in WSL) and shows how much of each plan is used, which limit bites first, and where there is still room. Nothing leaves this machine except the usage requests to the providers themselves. Sign in with a provider's own tool and it appears here on the next refresh.",
+                    ))
+                    .size(12.5),
+                );
+                ui.add_space(6.0);
+                if ui.button(language.text("Got it")).clicked() {
+                    self.settings.first_run_seen = true;
+                    self.save_settings();
+                }
+            });
+        ui.add_space(10.0);
     }
 
     fn provider_cards(

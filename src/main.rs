@@ -25,6 +25,7 @@ mod window;
 mod winsqlite;
 
 fn main() {
+    install_crash_hook();
     let args: Vec<String> = std::env::args().collect();
     let diagnose_enabled = args.iter().any(|arg| arg == "--diagnose");
     if diagnose_enabled {
@@ -57,4 +58,32 @@ fn main() {
         diagnose::log("entering window::run");
     }
     window::run();
+}
+
+/// Write what a panic was to a file before the process aborts.
+///
+/// Release builds abort on panic, so nothing after the hook runs and there is
+/// no stack to read later. This is the one place a crash gets recorded,
+/// whether or not diagnostic logging was on.
+fn install_crash_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let message = format!(
+            "[{unix}] Headroom {} panicked: {info}\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        diagnose::log(message.trim_end());
+        let path = std::env::temp_dir().join("headroom-crash.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = file.write_all(message.as_bytes());
+        }
+    }));
 }

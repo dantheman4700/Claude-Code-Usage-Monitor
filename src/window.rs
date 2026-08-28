@@ -1032,6 +1032,9 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     match install_channel {
                         InstallChannel::Portable => begin_update_apply(hwnd, release),
                         InstallChannel::Winget => begin_winget_update(hwnd),
+                        // Never reached: a Store install's check returns an
+                        // error before a release is ever offered.
+                        InstallChannel::Store => {}
                     }
                 }
                 unsafe {
@@ -1585,7 +1588,11 @@ pub fn run() {
         );
     }
     let run_args: Vec<String> = std::env::args().collect();
-    let open_dashboard_on_start = run_args.iter().any(|argument| argument == "--dashboard");
+    // A fresh install opens the dashboard so the first thing a new user sees
+    // is what the app does, not an empty tray.
+    let fresh_install = !app_settings::settings_path().exists();
+    let open_dashboard_on_start =
+        fresh_install || run_args.iter().any(|argument| argument == "--dashboard");
     let allow_multiple = run_args
         .iter()
         .any(|argument| argument == "--allow-multiple");
