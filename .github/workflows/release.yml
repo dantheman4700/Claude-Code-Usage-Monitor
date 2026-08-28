@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 env:
-  RELEASE_ASSET_NAME: claude-code-usage-monitor.exe
-  WINGET_PACKAGE_ID: CodeZeno.ClaudeCodeUsageMonitor
+  RELEASE_ASSET_NAME: headroom.exe
+  WINGET_PACKAGE_ID: DannyLamphere.Headroom
 
 jobs:
   build:
@@ -22,13 +22,29 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Test
+        run: cargo test --release --locked
+
       - name: Build release binary
-        run: cargo build --release
+        run: |
+          cargo build --release --locked
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\headroom.exe dist\headroom.exe
+
+      # Unsigned: Partner Center signs Store submissions. The sideload build
+      # for testers is made locally with build-msix.ps1 -DevSign.
+      - name: Pack MSIX
+        shell: pwsh
+        run: |
+          .\packaging\msix\make-assets.ps1
+          .\packaging\msix\build-msix.ps1 -Version ("${{ github.ref_name }}".TrimStart('v'))
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/claude-code-usage-monitor.exe
+          files: |
+            dist/headroom.exe
+            packaging/msix/out/*.msix
           generate_release_notes: true
 
   winget:

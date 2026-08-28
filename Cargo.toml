@@ -31,6 +31,8 @@ zip = { version = "7.2", default-features = false, features = ["deflate"] }
 [dependencies.windows]
 version = "0.58"
 features = [
+    "ApplicationModel",
+    "Foundation",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",

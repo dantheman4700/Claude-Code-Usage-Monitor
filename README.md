@@ -24,3 +24,22 @@ Fireworks AI or Cognition.
 ## License
 
 MIT — see LICENSE.
+
+## Install
+
+**Microsoft Store** — coming; the first submission is being prepared.
+
+**Portable** — download `headroom.exe` from the latest release, put it
+anywhere, run it. It lives in the tray; there is nothing to install. Settings
+and history go to `%APPDATA%\Headroom`.
+
+**MSIX (sideload)** — every release also ships `Headroom_<version>_x64.msix`.
+It is unsigned (the Store signs its own copy), so to sideload it you sign it
+yourself: `packaging\msix\build-msix.ps1 -DevSign` makes a development
+certificate, signs the package and prints the two commands that trust the
+certificate and install it.
+
+If you used Claude Code Usage Monitor before, Headroom carries your settings
+and history over on first launch and takes over the "Start with Windows"
+entry.
+

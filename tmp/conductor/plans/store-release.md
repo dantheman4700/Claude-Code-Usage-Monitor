@@ -113,3 +113,37 @@ listing. Attribution: LICENSE keeps upstream's MIT line; README + About say
 - Final name (working: Headroom — no Store collision found; only the Max Headroom TV series). Partner Center reservation is first-come.
 - Publisher display name on the listing (personal name vs "ThinkBot").
 - Whether to ship a demo mode for Store testers or rely on cert notes.
+
+## Status — 2026-08-28, end of day
+
+**Done and pushed (`feat/usage-panel`):**
+- Wave 1 rebrand (e548eef), wave 2 native+WSL credentials for every provider
+  (50c9067), Store channel / crash hook / privacy / About / first run (e278655).
+- Wave 3 carve-out (5142bae + a5aba3b): widget, theme engine and Theme Studio
+  deleted; `tray.rs` / `menu.rs` / `poll.rs` / `state.rs` / `panel/` are the
+  app. src/ went from ~40k to ~13.8k lines; 116 tests; exe 5.75 MB. Lesson:
+  the hidden tray window must not share the panel's title — `focus_existing`
+  finds the panel by exact title.
+- Wave 4 packaging: `packaging/msix/{AppxManifest.xml, build-msix.ps1,
+  make-assets.ps1}`, `packaging/store/listing.md`, release workflow builds
+  exe + MSIX. Local pack verified with the Windows SDK BuildTools NuGet
+  (`Microsoft.Windows.SDK.BuildTools 10.0.26100.1`, x64 folder, all files —
+  exe/dll alone fail SxS) → `Headroom_1.0.0.0_x64.msix` 2.79 MB, resources.pri
+  indexed. "Start with Windows" on the Store channel uses the manifest's
+  `windows.startupTask` (`HeadroomStartup`) via `StartupTask`, since the HKCU
+  Run key is virtualized under MSIX.
+
+**Not verifiable here (needs the owner):**
+1. Partner Center: create the individual developer account, reserve
+   "Headroom", copy Identity Name / Publisher / PublisherDisplayName into
+   `build-msix.ps1 -IdentityName -Publisher -PublisherDisplayName` (or edit the
+   manifest defaults).
+2. Sideload test: `build-msix.ps1 -DevSign`, then as Administrator import
+   `headroom-dev.cer` into `Cert:\LocalMachine\TrustedPeople` and
+   `Add-AppxPackage`. This is the only way to exercise the Store channel
+   (updater hidden, StartupTask toggle) before submission.
+3. Screenshots for the listing (list in `packaging/store/listing.md`).
+4. Move PRIVACY.md to a plain page (GitHub Pages) for the policy URL.
+5. Known limitations to state in the listing/README: Grok token refresh not
+   wired (6h expiry); Fireworks/Devin/OpenCode readers are doc-grounded, not
+   live-verified.

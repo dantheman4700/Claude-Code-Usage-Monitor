@@ -26,3 +26,7 @@ AGENTS.md
 
 # Local WinGet manifest generation output
 /manifests/
+
+# MSIX build output and rendered Store assets (make-assets.ps1 regenerates them)
+packaging/msix/out/
+packaging/msix/Assets/

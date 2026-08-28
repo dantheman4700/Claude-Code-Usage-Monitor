@@ -661,12 +661,44 @@ fn show_error_message(hwnd: HWND, title: &str, message: &str) {
 // Start with Windows
 // ---------------------------------------------------------------------------
 
+/// The manifest's startup task, for the packaged (Store) install. Under
+/// MSIX the HKCU Run key is virtualized into the package and never runs.
+const STORE_STARTUP_TASK_ID: &str = "HeadroomStartup";
+
+fn store_startup_task() -> Option<windows::ApplicationModel::StartupTask> {
+    windows::ApplicationModel::StartupTask::GetAsync(&windows::core::HSTRING::from(STORE_STARTUP_TASK_ID))
+        .ok()?
+        .get()
+        .ok()
+}
+
 pub fn is_startup_enabled() -> bool {
+    if matches!(updater::current_install_channel(), InstallChannel::Store) {
+        use windows::ApplicationModel::StartupTaskState;
+        return store_startup_task()
+            .and_then(|task| task.State().ok())
+            .is_some_and(|state| {
+                state == StartupTaskState::Enabled || state == StartupTaskState::EnabledByPolicy
+            });
+    }
     read_run_value(STARTUP_REGISTRY_KEY)
         .is_some_and(|value| current_exe_path().is_some_and(|exe| value.eq_ignore_ascii_case(&exe)))
 }
 
 pub fn set_startup_enabled(enable: bool) {
+    if matches!(updater::current_install_channel(), InstallChannel::Store) {
+        // RequestEnableAsync can come back DisabledByUser: Windows lets the
+        // user veto startup apps in Settings, and the toggle re-reads the
+        // real state next time it is drawn.
+        if let Some(task) = store_startup_task() {
+            if enable {
+                let _ = task.RequestEnableAsync().and_then(|operation| operation.get());
+            } else {
+                let _ = task.Disable();
+            }
+        }
+        return;
+    }
     unsafe {
         let path = wide_str(STARTUP_REGISTRY_PATH);
         let mut hkey = HKEY::default();
