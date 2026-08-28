@@ -131,30 +131,67 @@ pub(super) fn path_watch_signature(distro: &str, key: &str, script: &str) -> Opt
     Some(format!("{key}:{distro}|{state}"))
 }
 
-/// Run a command in the distro and discard its output.
+/// Run a script in the distro and discard its output.
+///
+/// The script goes to `sh -l` on **stdin**, not as an argument. Arguments to
+/// `wsl.exe -- sh -lc` are expanded once by an outer shell before the inner
+/// one runs (verified from the Windows side): `$HOME` becomes a path, which is
+/// harmless, but a variable the script itself sets -- `$c` in a `for` loop,
+/// `${c%/*}` -- is expanded while still empty, and `$(...)` runs in the outer
+/// shell's bare environment. On stdin the script arrives untouched and can
+/// use every shell construct.
 ///
 /// Used for refresh commands whose only purpose is the side effect of the CLI
 /// rewriting its own credential file.
 pub(super) fn run_detached(distro: &str, script: &str, what: &str) {
+    use std::io::Write;
     diagnose::log(format!("attempting WSL {what} in distro {distro}"));
     crate::activity_log::record(
         crate::activity_log::EventKind::Refresh,
         None,
         format!("Attempted {what} in WSL ({distro})"),
     );
-    let _ = run_with_timeout(
-        Command::new("wsl.exe")
-            .arg("-d")
-            .arg(distro)
-            .arg("--")
-            .arg("sh")
-            .arg("-lc")
-            .arg(script)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-        Duration::from_secs(30),
-    );
+    let spawned = Command::new("wsl.exe")
+        .arg("-d")
+        .arg(distro)
+        .arg("--")
+        .arg("sh")
+        .arg("-l")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            diagnose::log_error(&format!("unable to start WSL {what}"), error);
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes());
+        let _ = stdin.write_all(b"\n");
+        // Dropping stdin closes it; `sh` runs the script and exits.
+    }
+    let timeout = Duration::from_secs(90);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                diagnose::log(format!("WSL {what} in {distro} finished: {status}"));
+                return;
+            }
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                diagnose::log(format!("WSL {what} in {distro} timed out after {timeout:?}"));
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => return,
+        }
+    }
 }
 
 /// `wsl.exe` emits UTF-16LE for its own messages but passes program output

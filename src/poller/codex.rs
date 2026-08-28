@@ -18,19 +18,24 @@ const WSL_READ_AUTH: &str = "cat ${CODEX_HOME:-$HOME/.codex}/auth.json";
 const WSL_WATCH_AUTH: &str = "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
      stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; else echo missing; fi";
 /// `codex exec .` is a no-op run whose only purpose is making the CLI refresh
-/// and rewrite its own credential file. It runs from $HOME with the git-repo
-/// check skipped -- from any other directory the CLI refuses ("Not inside a
+/// and rewrite its own credential file. Delivered on stdin (see
+/// [`wsl::run_detached`]), so unlike the read scripts it may use variables.
+/// It runs from $HOME with the git-repo check skipped -- from any other directory the CLI refuses ("Not inside a
 /// trusted directory") and nothing is refreshed -- and with stdin closed, or
 /// it waits for input that never comes.
 ///
 /// A login `sh` does not see the PATH a person's interactive shell has (nvm,
 /// bun and pnpm all set theirs up in .bashrc, which non-interactive shells
-/// skip), so the CLI is looked for where those tools install it.
-const WSL_REFRESH: &str = "cd $HOME && for c in $(command -v codex 2>/dev/null) \
-     $HOME/.local/bin/codex $HOME/.bun/bin/codex $HOME/.npm-global/bin/codex \
-     $HOME/.local/share/pnpm/codex $HOME/.yarn/bin/codex /usr/local/bin/codex \
-     $HOME/.nvm/versions/node/*/bin/codex $HOME/.volta/bin/codex $HOME/.fnm/aliases/default/bin/codex; do \
-     if [ -x $c ]; then exec $c exec --skip-git-repo-check . </dev/null >/dev/null 2>&1; fi; done; exit 127";
+/// skip), so the CLI is looked for where those tools install it. The CLI is a
+/// Node script, so its own directory (where nvm keeps `node`) goes on PATH
+/// before it runs.
+const WSL_REFRESH: &str = "cd $HOME && for c in $HOME/.local/bin/codex $HOME/.bun/bin/codex \
+     $HOME/.npm-global/bin/codex $HOME/.local/share/pnpm/codex $HOME/.yarn/bin/codex \
+     /usr/local/bin/codex /usr/bin/codex $HOME/.nvm/versions/node/*/bin/codex \
+     $HOME/.volta/bin/codex $HOME/.fnm/aliases/default/bin/codex; do \
+     if [ -x $c ]; then for n in $HOME/.nvm/versions/node/*/bin; do PATH=$n:$PATH; done; \
+     PATH=${c%/*}:/usr/local/bin:/usr/bin:$PATH; export PATH; \
+     exec $c exec --skip-git-repo-check . </dev/null >/dev/null 2>&1; fi; done; exit 127";
 
 /// Where a Codex token came from, so a refresh runs where the CLI actually
 /// lives instead of assuming the Windows install.
@@ -607,7 +612,7 @@ mod tests {
         assert!(WSL_REFRESH.contains("--skip-git-repo-check ."));
         assert!(WSL_REFRESH.contains("</dev/null"));
         assert!(WSL_REFRESH.contains(".nvm/versions/node/*/bin/codex"));
-        assert!(!WSL_REFRESH.contains('"'), "the WSL transport strips double quotes");
+        assert!(WSL_REFRESH.contains("PATH=${c%/*}:"), "node must be findable next to the CLI");
     }
 
     fn usage_from_json(json: &str) -> UsageData {
