@@ -43,6 +43,9 @@ pub struct HistorySample {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageHistory {
+    /// Format version; 0 is a file from before versions.
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub samples: Vec<HistorySample>,
 }

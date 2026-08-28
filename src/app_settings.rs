@@ -1,5 +1,13 @@
-//! Shared, atomically persisted state used by the widget and studio processes.
+//! The files under %APPDATA%\Headroom, and the rules for reading a version
+//! of them this build did not write.
+//!
+//! Three formats, three version constants. Each is read leniently; the rules
+//! per file for a version older than, equal to, or newer than this build's
+//! are on the loaders. The one rule they share: a file this build cannot
+//! decode because it is NEWER is never quarantined and never overwritten --
+//! a downgrade must not turn into a wipe.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,9 +32,15 @@ pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
-    /// Format version of this file, for the day a field changes meaning.
+    /// Format version of this file. Loaded as the greater of the file's and
+    /// this build's, so a newer file keeps its version through a save.
     #[serde(default)]
     pub schema_version: u32,
+    /// Per-provider on/off, keyed by the descriptor key. A provider absent
+    /// from the map follows its descriptor default, so a provider added
+    /// later starts at its default for existing users too.
+    #[serde(default)]
+    providers: BTreeMap<String, bool>,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,8 +82,16 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// Keys this build does not know, carried through a save untouched so a
+    /// newer build's settings survive a round trip through this one.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
+/// The `show_*` fields above are permanent mirrors of `providers`: a v1.0.0
+/// portable exe left on disk indefinitely reads them, drops the map it does
+/// not know, and rewrites the file. They are recomputed before every write
+/// and, in a file this build wrote, never read.
 impl Default for SettingsFile {
     fn default() -> Self {
         // Taken from the provider descriptors rather than written out again, so
@@ -77,7 +99,8 @@ impl Default for SettingsFile {
         // which of the two a caller happens to ask.
         let providers = ProviderSet::default();
         Self {
-            schema_version: SCHEMA_VERSION,
+            schema_version: SETTINGS_SCHEMA,
+            providers: BTreeMap::new(),
             poll_interval_ms: default_poll_interval(),
             language: None,
             last_update_check_unix: None,
@@ -96,6 +119,7 @@ impl Default for SettingsFile {
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
+            unknown: BTreeMap::new(),
         }
     }
 }
@@ -129,19 +153,18 @@ impl SettingsFile {
     }
 
     pub fn provider_enabled(&self, provider: ProviderId) -> bool {
-        match provider {
-            ProviderId::Claude => self.show_claude_code,
-            ProviderId::Codex => self.show_codex,
-            ProviderId::Antigravity => self.show_antigravity,
-            ProviderId::OpenCode => self.show_opencode,
-            ProviderId::Cursor => self.show_cursor,
-            ProviderId::Grok => self.show_grok,
-            ProviderId::Fireworks => self.show_fireworks,
-            ProviderId::Devin => self.show_devin,
-        }
+        self.providers
+            .get(provider.descriptor().key)
+            .copied()
+            .unwrap_or(provider.descriptor().default_enabled)
     }
 
     pub fn set_provider_enabled(&mut self, provider: ProviderId, enabled: bool) {
+        self.providers.insert(provider.descriptor().key.to_string(), enabled);
+        self.set_mirror(provider, enabled);
+    }
+
+    fn set_mirror(&mut self, provider: ProviderId, enabled: bool) {
         match provider {
             ProviderId::Claude => self.show_claude_code = enabled,
             ProviderId::Codex => self.show_codex = enabled,
@@ -154,6 +177,30 @@ impl SettingsFile {
         }
     }
 
+    /// The `show_*` field name a provider's mirror is stored under.
+    fn mirror_field(provider: ProviderId) -> &'static str {
+        match provider {
+            ProviderId::Claude => "show_claude_code",
+            ProviderId::Codex => "show_codex",
+            ProviderId::Antigravity => "show_antigravity",
+            ProviderId::OpenCode => "show_opencode",
+            ProviderId::Cursor => "show_cursor",
+            ProviderId::Grok => "show_grok",
+            ProviderId::Fireworks => "show_fireworks",
+            ProviderId::Devin => "show_devin",
+        }
+    }
+
+    /// Bring the mirrors in line with the map before a write.
+    fn refresh_mirrors(&mut self) {
+        for provider in ProviderId::ALL {
+            let enabled = self.provider_enabled(provider);
+            self.set_mirror(provider, enabled);
+        }
+    }
+
+    /// Sets every known provider; keys this build does not know are left in
+    /// the map, so a newer build's providers survive the round trip.
     pub fn set_enabled_providers(&mut self, providers: ProviderSet) {
         for provider in ProviderId::ALL {
             self.set_provider_enabled(provider, providers.contains(provider));
@@ -255,12 +302,33 @@ pub fn load_settings() -> SettingsFile {
 /// `None`: saving defaults over a file that was merely busy loses the
 /// user's settings.
 pub fn load_settings_if_readable() -> Option<SettingsFile> {
-    let path = settings_path();
-    let mut settings = match std::fs::read_to_string(&path) {
+    load_settings_from(&settings_path())
+}
+
+/// Settings from `path`, by the version rules:
+/// - older (or unversioned): the `show_*` mirrors are the truth for the
+///   providers they name; the map is ignored (an old writer could not have
+///   kept it right); the version is stamped in memory and written on the
+///   next natural save, never eagerly;
+/// - this version: the map is the truth, mirrors are ignored on read;
+/// - newer, decodes: known keys are used, unknown ones and the newer version
+///   are kept for the save;
+/// - newer, does not decode: `None` -- the same "not right now" the callers
+///   already honour by not saving -- and nothing on disk is touched;
+/// - corrupt at or below this version: quarantined, defaults.
+fn load_settings_from(path: &Path) -> Option<SettingsFile> {
+    let mut settings = match std::fs::read_to_string(path) {
         Ok(content) => match decode_settings(&content) {
-            Some(settings) => settings,
-            None => {
-                quarantine(&path, "invalid JSON", &content);
+            Ok(settings) => settings,
+            Err(SettingsDecodeError::Newer(version)) => {
+                crate::diagnose::log(format!(
+                    "{} is schema version {version}, newer than this build's {SETTINGS_SCHEMA}, and did not decode; leaving it alone",
+                    path.display()
+                ));
+                return None;
+            }
+            Err(SettingsDecodeError::Corrupt(why)) => {
+                quarantine(path, &why, &content);
                 SettingsFile::default()
             }
         },
@@ -270,7 +338,6 @@ pub fn load_settings_if_readable() -> Option<SettingsFile> {
             return None;
         }
     };
-    settings.schema_version = SCHEMA_VERSION;
     settings.normalize();
     Some(settings)
 }
@@ -281,12 +348,46 @@ pub fn save_settings(settings: &SettingsFile) -> Result<(), String> {
     write_json_atomic(&settings_path(), &settings_json(&normalized))
 }
 
-fn decode_settings(content: &str) -> Option<SettingsFile> {
-    serde_json::from_str(content).ok()
+#[derive(Debug)]
+enum SettingsDecodeError {
+    Newer(u32),
+    Corrupt(String),
+}
+
+fn decode_settings(content: &str) -> Result<SettingsFile, SettingsDecodeError> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| SettingsDecodeError::Corrupt(error.to_string()))?;
+    let on_disk = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    let mut settings: SettingsFile = match serde_json::from_value(value.clone()) {
+        Ok(settings) => settings,
+        Err(_) if on_disk > SETTINGS_SCHEMA => return Err(SettingsDecodeError::Newer(on_disk)),
+        Err(error) => return Err(SettingsDecodeError::Corrupt(error.to_string())),
+    };
+    if on_disk < SETTINGS_SCHEMA {
+        // An older writer: only the mirrors it actually wrote say anything;
+        // a provider it never heard of keeps following its default.
+        settings.providers.clear();
+        for provider in ProviderId::ALL {
+            if let Some(enabled) = value
+                .get(SettingsFile::mirror_field(provider))
+                .and_then(serde_json::Value::as_bool)
+            {
+                settings.providers.insert(provider.descriptor().key.to_string(), enabled);
+            }
+        }
+    }
+    settings.schema_version = on_disk.max(SETTINGS_SCHEMA);
+    Ok(settings)
 }
 
 fn settings_json(settings: &SettingsFile) -> serde_json::Value {
-    serde_json::to_value(settings).unwrap_or_default()
+    let mut settings = settings.clone();
+    settings.refresh_mirrors();
+    settings.schema_version = settings.schema_version.max(SETTINGS_SCHEMA);
+    serde_json::to_value(&settings).unwrap_or_default()
 }
 
 pub fn codex_credits_path() -> PathBuf {
@@ -309,11 +410,31 @@ pub fn load_usage_history() -> UsageHistory {
 /// sample -- the store collapses readings that arrive too close together, and
 /// rewriting the file for a discarded sample is pure churn.
 pub fn record_usage_history(data: &AppUsageData, now_unix: u64) {
-    let retention = u64::from(load_settings().history_retention_days) * 24 * 60 * 60;
-    let mut history = load_usage_history();
-    if history.record_with_retention(data, now_unix, retention) {
-        let _ = write_json_atomic(&usage_history_path(), &history);
+    // Retention comes from settings; a settings file that cannot be read
+    // right now must not prune a long history down to the default.
+    let Some(settings) = load_settings_if_readable() else {
+        crate::diagnose::log("history not recorded: settings unreadable right now");
+        return;
+    };
+    let retention = u64::from(settings.history_retention_days) * 24 * 60 * 60;
+    record_history_at(&usage_history_path(), data, now_unix, retention);
+}
+
+/// A history from a newer build is read-only for this session: rewriting it
+/// whole would strip whatever the newer format keeps per sample.
+fn record_history_at(path: &Path, data: &AppUsageData, now_unix: u64, retention_secs: u64) -> bool {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if on_disk_schema(&content) > HISTORY_SCHEMA {
+            crate::diagnose::log(format!("{} is from a newer build; not recording into it", path.display()));
+            return false;
+        }
     }
+    let mut history: UsageHistory = read_json(path).unwrap_or_default();
+    if !history.record_with_retention(data, now_unix, retention_secs) {
+        return false;
+    }
+    history.schema_version = HISTORY_SCHEMA;
+    write_json_atomic(path, &history).is_ok()
 }
 
 /// The cache's `updated_unix` without parsing the readings: the file's mtime.
@@ -325,15 +446,40 @@ pub fn load_usage_cache_metadata() -> Option<u64> {
         .map(|since| since.as_secs())
 }
 
+/// Older or unversioned caches load (the readings' shape is tolerant); a
+/// newer one is ignored, not quarantined -- the next poll replaces it.
 pub fn load_usage_cache() -> Option<UsageCache> {
-    read_json(&usage_cache_path())
+    load_usage_cache_from(&usage_cache_path())
+}
+
+fn load_usage_cache_from(path: &Path) -> Option<UsageCache> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if on_disk_schema(&content) > CACHE_SCHEMA {
+        crate::diagnose::log(format!("{} is from a newer build; ignoring it until the next poll", path.display()));
+        return None;
+    }
+    match serde_json::from_str(&content) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            quarantine(path, &error.to_string(), &content);
+            None
+        }
+    }
+}
+
+/// The `schema_version` a JSON file carries, 0 when absent or unreadable.
+fn on_disk_schema(content: &str) -> u32 {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("schema_version").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0) as u32
 }
 
 pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String> {
     write_json_atomic(
         &usage_cache_path(),
         &UsageCache {
-            schema_version: SCHEMA_VERSION,
+            schema_version: CACHE_SCHEMA,
             updated_unix: now_unix(),
             poll_ok,
             data: data.clone(),
@@ -341,7 +487,12 @@ pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String
     )
 }
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Settings: 2 added the `providers` map (1 was the first versioned file).
+pub const SETTINGS_SCHEMA: u32 = 2;
+/// Readings cache.
+pub const CACHE_SCHEMA: u32 = 1;
+/// History samples.
+pub const HISTORY_SCHEMA: u32 = 1;
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -487,9 +638,143 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
+    /// Exactly what the v1.0.0 writer knows: no map, no flatten. Frozen here
+    /// so the round trips below simulate the old build faithfully.
+    #[derive(Serialize, Deserialize)]
+    struct LegacySettingsV1 {
+        #[serde(default)]
+        schema_version: u32,
+        #[serde(default = "default_poll_interval")]
+        poll_interval_ms: u32,
+        #[serde(default = "default_show_claude_code")]
+        show_claude_code: bool,
+        #[serde(default = "default_show_codex")]
+        show_codex: bool,
+        #[serde(default = "default_show_antigravity")]
+        show_antigravity: bool,
+        #[serde(default = "default_show_opencode")]
+        show_opencode: bool,
+        #[serde(default = "default_show_cursor")]
+        show_cursor: bool,
+        #[serde(default = "default_show_grok")]
+        show_grok: bool,
+        #[serde(default = "default_show_fireworks")]
+        show_fireworks: bool,
+        #[serde(default = "default_show_devin")]
+        show_devin: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dashboard_width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dashboard_height: Option<f32>,
+    }
+
+    fn enabled_set(settings: &SettingsFile) -> Vec<ProviderId> {
+        ProviderId::ALL.into_iter().filter(|p| settings.provider_enabled(*p)).collect()
+    }
+
+    /// v1 file → this build → save → the old writer reads the same choices.
+    #[test]
+    fn a_v1_file_survives_the_new_build_and_back() {
+        let v1 = r#"{"schema_version":1,"poll_interval_ms":300000,"show_grok":false,"show_codex":true,"dashboard_width":1280.0,"dashboard_height":760.0}"#;
+        let loaded = decode_settings(v1).ok().unwrap();
+        assert!(!loaded.provider_enabled(ProviderId::Grok));
+        assert!(loaded.provider_enabled(ProviderId::Codex));
+        assert_eq!(loaded.schema_version, SETTINGS_SCHEMA);
+        let written = settings_json(&loaded).to_string();
+        let old_reader: LegacySettingsV1 = serde_json::from_str(&written).unwrap();
+        assert!(!old_reader.show_grok);
+        assert!(old_reader.show_codex);
+        assert_eq!(old_reader.poll_interval_ms, 300000);
+        assert_eq!(old_reader.dashboard_width, Some(1280.0));
+    }
+
+    /// v2 file → the old writer re-encodes it (map dropped, version 1) →
+    /// this build reads the same enabled set from the mirrors.
+    #[test]
+    fn the_old_writer_round_trip_keeps_the_enabled_set() {
+        let mut settings = SettingsFile::default();
+        settings.set_provider_enabled(ProviderId::Grok, false);
+        settings.set_provider_enabled(ProviderId::Fireworks, true);
+        let v2 = settings_json(&settings).to_string();
+        let old_reader: LegacySettingsV1 = serde_json::from_str(&v2).unwrap();
+        let rewritten_by_old = serde_json::to_string(&LegacySettingsV1 { schema_version: 1, ..old_reader }).unwrap();
+        let reloaded = decode_settings(&rewritten_by_old).ok().unwrap();
+        assert_eq!(enabled_set(&reloaded), enabled_set(&settings));
+    }
+
+    /// Under an old version the mirrors win; under this one the map wins.
+    #[test]
+    fn the_authoritative_field_depends_on_the_version() {
+        let old = decode_settings(r#"{"schema_version":1,"show_codex":false,"providers":{"codex":true}}"#).ok().unwrap();
+        assert!(!old.provider_enabled(ProviderId::Codex));
+        let current = decode_settings(r#"{"schema_version":2,"providers":{"codex":true},"show_codex":false}"#).ok().unwrap();
+        assert!(current.provider_enabled(ProviderId::Codex));
+    }
+
+    /// A provider this build does not know stays in the map through a toggle
+    /// and a save; a provider missing from the map follows its default.
+    #[test]
+    fn unknown_providers_and_missing_keys_behave() {
+        let mut settings = decode_settings(r#"{"schema_version":2,"providers":{"newprov":true}}"#).ok().unwrap();
+        settings.toggle_provider(ProviderId::Grok);
+        let written = settings_json(&settings);
+        assert_eq!(written["providers"]["newprov"], serde_json::Value::Bool(true));
+        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+            if descriptor.id != ProviderId::Grok {
+                assert_eq!(settings.provider_enabled(descriptor.id), descriptor.default_enabled, "{}", descriptor.display_name);
+            }
+        }
+    }
+
+    /// A newer file's unknown keys and version come back out of a save.
+    #[test]
+    fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
+        let mut settings = decode_settings(r#"{"schema_version":3,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        settings.toggle_provider(ProviderId::Grok);
+        let written = settings_json(&settings);
+        assert_eq!(written["schema_version"], serde_json::json!(3));
+        assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
+        assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
+    }
+
+    /// Newer and undecodable is "not now", never "corrupt"; corrupt at this
+    /// version is corrupt.
+    #[test]
+    fn a_newer_undecodable_file_is_left_alone() {
+        assert!(matches!(decode_settings(r#"{"schema_version":3,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(3))));
+        assert!(matches!(decode_settings(r#"{"schema_version":2,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
+    }
+
+    #[test]
+    fn newer_files_on_disk_are_not_touched() {
+        let dir = std::env::temp_dir().join(format!("headroom-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, r#"{"schema_version":9,"poll_interval_ms":"later"}"#).unwrap();
+        assert!(load_settings_from(&settings).is_none());
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"schema_version":9,"poll_interval_ms":"later"}"#);
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("corrupt")));
+        let cache = dir.join("usage-cache.json");
+        std::fs::write(&cache, r#"{"schema_version":9,"updated_unix":1,"poll_ok":true,"data":{}}"#).unwrap();
+        assert!(load_usage_cache_from(&cache).is_none());
+        std::fs::write(&cache, r#"{"updated_unix":1,"poll_ok":true,"data":{}}"#).unwrap();
+        assert!(load_usage_cache_from(&cache).is_some());
+        let history = dir.join("usage-history.json");
+        std::fs::write(&history, r#"{"schema_version":9,"samples":[]}"#).unwrap();
+        assert!(!record_history_at(&history, &AppUsageData::default(), 1_000, 86_400));
+        assert_eq!(std::fs::read_to_string(&history).unwrap(), r#"{"schema_version":9,"samples":[]}"#);
+        std::fs::write(&history, r#"{"samples":[]}"#).unwrap();
+        let mut data = AppUsageData::default();
+        data.insert(ProviderId::Claude, crate::models::UsageData::default());
+        assert!(record_history_at(&history, &data, 1_000, 86_400));
+        assert!(std::fs::read_to_string(&history).unwrap().contains("\"schema_version\": 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn providers_missing_from_an_older_settings_file_take_their_own_defaults() {
-        let settings = decode_settings(r#"{"poll_interval_ms": 300000, "show_claude_code": true}"#).unwrap();
+        let settings = decode_settings(r#"{"poll_interval_ms": 300000, "show_claude_code": true}"#).ok().unwrap();
         for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
             if descriptor.id == ProviderId::Claude {
                 continue;
