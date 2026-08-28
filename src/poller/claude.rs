@@ -10,7 +10,7 @@ use super::{
     build_agent, get_header_f64, get_header_i64, parse_iso8601, unix_to_system_time, PollError,
 };
 use crate::diagnose;
-use crate::models::{CreditsSection, Detail, ScopedLimit, UsageData, UsageSection};
+use crate::models::{CreditsSection, Detail, LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -243,7 +243,11 @@ fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
             resets_at: parse_iso8601(entry.resets_at.as_deref()).or(data.weekly.resets_at),
         };
         match model {
-            Some(label) => data.scoped.push(ScopedLimit { label, section }),
+            Some(label) => data.scoped.push(ScopedLimit {
+                label,
+                window: LimitWindow::Weekly,
+                section,
+            }),
             None => data.weekly = section,
         }
     }
@@ -253,13 +257,25 @@ fn claude_usage_from_response(response: &UsageResponse) -> UsageData {
         .as_ref()
         .and_then(|spend| claude_credits(spend, &data));
 
+    // The named seven-day buckets are per-model weekly caps by another
+    // route; they are limits, so they get rows, not a footnote. A model the
+    // `limits` array already covers is not listed twice.
     for (name, bucket) in [
-        ("Opus 7d", &response.seven_day_opus),
-        ("Sonnet 7d", &response.seven_day_sonnet),
+        ("Opus", &response.seven_day_opus),
+        ("Sonnet", &response.seven_day_sonnet),
     ] {
         if let Some(bucket) = bucket {
-            data.details
-                .push(Detail::new(name, format!("{:.0}%", bucket.utilization)));
+            if data.scoped.iter().any(|scoped| scoped.label == name) {
+                continue;
+            }
+            data.scoped.push(ScopedLimit {
+                label: name.into(),
+                window: LimitWindow::Weekly,
+                section: UsageSection {
+                    percentage: bucket.utilization,
+                    resets_at: parse_iso8601(bucket.resets_at.as_deref()).or(data.weekly.resets_at),
+                },
+            });
         }
     }
     if let Some(extra) = &response.extra_usage {
@@ -1051,5 +1067,23 @@ mod tests {
         assert_eq!(data.weekly.percentage, 60.0);
         assert_eq!(data.weekly_label, None);
         assert!(data.scoped.is_empty());
+    }
+
+    /// The named seven-day buckets are per-model caps too, and become rows
+    /// beside the plan-wide weekly rather than footnotes.
+    #[test]
+    fn named_model_buckets_become_scoped_rows() {
+        let data = usage_from_json(
+            r#"{
+                "seven_day": {"utilization": 30.0, "resets_at": null},
+                "seven_day_opus": {"utilization": 55.0, "resets_at": null},
+                "seven_day_sonnet": {"utilization": 12.0, "resets_at": null}
+            }"#,
+        );
+        assert_eq!(data.weekly.percentage, 30.0);
+        let labels: Vec<&str> = data.scoped.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["Opus", "Sonnet"]);
+        assert_eq!(data.scoped[0].section.percentage, 55.0);
+        assert!(data.details.iter().all(|d| !d.label.contains("7d")));
     }
 }

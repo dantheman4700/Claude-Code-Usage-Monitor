@@ -217,7 +217,11 @@ pub fn collect_constraints(
         for scoped in &usage.scoped {
             constraints.push(Constraint {
                 provider,
-                window: Window::Weekly,
+                window: match scoped.window {
+                    crate::models::LimitWindow::Session => Window::Session,
+                    crate::models::LimitWindow::Weekly => Window::Weekly,
+                    crate::models::LimitWindow::Monthly => Window::Monthly,
+                },
                 percentage: scoped.section.percentage,
                 resets_at: scoped.section.resets_at,
                 scope: Some(scoped.label.clone()),
@@ -688,6 +692,7 @@ mod scoped_tests {
                 weekly: UsageSection { percentage: 48.0, resets_at: None },
                 scoped: vec![ScopedLimit {
                     label: "Fable".into(),
+                    window: crate::models::LimitWindow::Weekly,
                     section: UsageSection { percentage: 75.0, resets_at: None },
                 }],
                 ..Default::default()

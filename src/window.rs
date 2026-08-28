@@ -539,9 +539,12 @@ fn fleet_tray_tooltip(data: Option<&crate::models::AppUsageData>) -> String {
             .min()
             .map(|remaining| format!("  ↻{}", short_duration(remaining)))
             .unwrap_or_default();
+        // Only the weekly-kind extras: a session-kind twin of every group
+        // would double the line for nothing the hover needs.
         let scoped: String = usage
             .scoped
             .iter()
+            .filter(|scoped| scoped.window == crate::models::LimitWindow::Weekly)
             .map(|scoped| format!(" · {} {:.0}%", scoped.label, scoped.section.percentage))
             .collect();
         let stale = if usage.stale { " (stale)" } else { "" };

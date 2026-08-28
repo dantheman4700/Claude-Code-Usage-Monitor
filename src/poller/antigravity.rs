@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{build_agent, parse_iso8601, wsl, PollError};
 use crate::diagnose;
-use crate::models::{UsageData, UsageSection};
+use crate::models::{LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 const ANTIGRAVITY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 
@@ -415,22 +415,56 @@ pub(super) fn antigravity_section_from_summary_bucket(
 pub(super) fn antigravity_usage_from_summary(
     response: AntigravityQuotaSummaryResponse,
 ) -> Option<UsageData> {
-    let mut fallback = None;
-
+    // Antigravity meters each model family separately -- "Gemini models" and
+    // "Claude and GPT models" each carry their own five-hour and weekly caps,
+    // and both hold at once. The Gemini group is the headline; every other
+    // metered group becomes a pair of scoped rows beside it rather than
+    // being dropped.
+    let mut main: Option<UsageData> = None;
+    let mut others: Vec<(String, UsageData)> = Vec::new();
     for group in response.groups.unwrap_or_default() {
         let is_gemini = is_antigravity_gemini_summary_group(&group);
-        let usage = antigravity_usage_from_summary_group(group);
-
-        if is_gemini && usage.is_some() {
-            return usage;
-        }
-
-        if fallback.is_none() {
-            fallback = usage;
+        let name = antigravity_group_label(&group);
+        let Some(usage) = antigravity_usage_from_summary_group(group) else {
+            continue;
+        };
+        if is_gemini && main.is_none() {
+            main = Some(usage);
+        } else {
+            others.push((name, usage));
         }
     }
+    let mut main = match main {
+        Some(main) => main,
+        None if others.is_empty() => return None,
+        None => others.remove(0).1,
+    };
+    for (label, usage) in others {
+        for (window, section) in [
+            (LimitWindow::Session, usage.session),
+            (LimitWindow::Weekly, usage.weekly),
+        ] {
+            if section.percentage > 0.0 || section.resets_at.is_some() {
+                main.scoped.push(ScopedLimit {
+                    label: label.clone(),
+                    window,
+                    section,
+                });
+            }
+        }
+    }
+    Some(main)
+}
 
-    fallback
+/// "Claude and GPT models" reads better as "Claude and GPT" beside a window
+/// name that already says what kind of limit it is.
+fn antigravity_group_label(group: &AntigravityQuotaSummaryGroup) -> String {
+    let name = group.display_name.as_deref().unwrap_or("Other").trim();
+    let trimmed = name
+        .strip_suffix(" models")
+        .or_else(|| name.strip_suffix(" Models"))
+        .unwrap_or(name);
+    trimmed.to_string()
 }
 
 pub(super) fn antigravity_usage_from_summary_group(
@@ -535,5 +569,60 @@ fn read_windows_generic_credential(target: &str) -> Option<String> {
         let text = String::from_utf8(bytes.to_vec()).ok();
         CredFree(credential as *mut c_void);
         text
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    fn summary(json: &str) -> UsageData {
+        let response: AntigravityQuotaSummaryResponse =
+            serde_json::from_str(json).expect("the fixture should deserialize");
+        antigravity_usage_from_summary(response).expect("usage")
+    }
+
+    /// The live response carries two model families with their own caps. The
+    /// Gemini one is the headline; the other becomes scoped rows, not silence.
+    #[test]
+    fn a_second_model_group_becomes_scoped_rows() {
+        let data = summary(
+            r#"{"groups": [
+                {"displayName": "Gemini Models", "buckets": [
+                    {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.9, "resetTime": "2026-08-25T20:58:23Z"},
+                    {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.96, "resetTime": "2026-08-20T14:29:57Z"}
+                ]},
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.4, "resetTime": "2026-08-27T10:11:58Z"},
+                    {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0, "resetTime": "2026-08-20T15:11:58Z"}
+                ]}
+            ]}"#,
+        );
+        assert!((data.weekly.percentage - 10.0).abs() < 0.01);
+        assert!((data.session.percentage - 4.0).abs() < 0.01);
+        let rows: Vec<(String, LimitWindow, f64)> = data
+            .scoped
+            .iter()
+            .map(|s| (s.label.clone(), s.window, s.section.percentage.round()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Claude and GPT".to_string(), LimitWindow::Session, 0.0),
+                ("Claude and GPT".to_string(), LimitWindow::Weekly, 60.0),
+            ]
+        );
+    }
+
+    /// Without a Gemini group the first metered group is the headline.
+    #[test]
+    fn without_a_gemini_group_the_first_group_leads() {
+        let data = summary(
+            r#"{"groups": [{"displayName": "Claude and GPT models", "buckets": [
+                {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.5}
+            ]}]}"#,
+        );
+        assert!((data.weekly.percentage - 50.0).abs() < 0.01);
+        assert!(data.scoped.is_empty());
     }
 }

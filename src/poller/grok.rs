@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use super::{build_agent, parse_iso8601, wsl, PollError};
 use crate::diagnose;
-use crate::models::{CreditsSection, Detail, UsageData};
+use crate::models::{CreditsSection, Detail, LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 /// The CLI's own billing surface. There is no documented usage endpoint on
 /// `api.x.ai`: the subscription figures live behind the chat proxy, which is
@@ -143,13 +143,20 @@ fn grok_usage_from_response(response: &GrokBillingResponse) -> Option<UsageData>
     data.weekly_label = Some("wk".into());
     data.credits = grok_credits(config);
     data.plan = response.subscription_tier.clone();
-    // Only worth listing when there is more than one product; a single entry
-    // just repeats the gauge.
+    // A per-product split is a set of caps in its own right, so each product
+    // gets a row beside the pooled figure. With a single product the row
+    // would only repeat the gauge, so it is left out.
     if config.product_usage.len() > 1 {
         for product in &config.product_usage {
             if let (Some(name), Some(percent)) = (&product.product, product.usage_percent) {
-                data.details
-                    .push(Detail::new(name.clone(), format!("{percent:.0}%")));
+                data.scoped.push(ScopedLimit {
+                    label: name.clone(),
+                    window: LimitWindow::Weekly,
+                    section: UsageSection {
+                        percentage: percent,
+                        resets_at: data.weekly.resets_at,
+                    },
+                });
             }
         }
     }
@@ -323,5 +330,28 @@ mod tests {
     #[test]
     fn an_empty_store_yields_no_token() {
         assert_eq!(parse_grok_token("{}"), None);
+    }
+
+    /// Two products means two caps; one product is just the gauge again.
+    #[test]
+    fn a_product_split_becomes_scoped_rows() {
+        let data = usage_from_json(
+            r#"{"config": {
+                "creditUsagePercent": 9.0,
+                "productUsage": [
+                    {"product": "GrokBuild", "usagePercent": 4.0},
+                    {"product": "GrokChat", "usagePercent": 5.0}
+                ]
+            }}"#,
+        )
+        .expect("usage");
+        let rows: Vec<(&str, f64)> = data.scoped.iter().map(|s| (s.label.as_str(), s.section.percentage)).collect();
+        assert_eq!(rows, vec![("GrokBuild", 4.0), ("GrokChat", 5.0)]);
+
+        let single = usage_from_json(
+            r#"{"config": {"creditUsagePercent": 4.0, "productUsage": [{"product": "GrokBuild", "usagePercent": 4.0}]}}"#,
+        )
+        .expect("usage");
+        assert!(single.scoped.is_empty());
     }
 }

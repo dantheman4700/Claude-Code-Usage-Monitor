@@ -53,6 +53,15 @@ pub(super) struct CodexUsageResponse {
     rate_limit_reset_credits: Option<CodexResetCredits>,
     #[serde(default)]
     spend_control: Option<CodexSpendControl>,
+    /// Further limits the account may carry -- a code-review allowance, and an
+    /// open-ended list of extras. Both have only ever been observed as null,
+    /// so they are read leniently from raw JSON: a shape guess that turns out
+    /// wrong yields no rows rather than a failed poll. PRESUMED SHAPE: an
+    /// object like `rate_limit`, with `primary_window`/`secondary_window`.
+    #[serde(default)]
+    code_review_rate_limit: Option<serde_json::Value>,
+    #[serde(default)]
+    additional_rate_limits: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -77,6 +86,42 @@ struct CodexCredits {
     overage_limit_reached: bool,
     /// Sent as a decimal string, in credits rather than currency.
     balance: Option<String>,
+    /// Rough message counts the balance would buy, as a low/high pair.
+    #[serde(default)]
+    approx_local_messages: [u64; 2],
+    #[serde(default)]
+    approx_cloud_messages: [u64; 2],
+}
+
+/// Read `primary_window`/`secondary_window` out of a `rate_limit`-shaped JSON
+/// value into scoped rows, classifying each by its length the way the main
+/// windows are. Anything that does not fit the shape simply yields nothing.
+fn scoped_limits_from_value(label: &str, value: &serde_json::Value) -> Vec<crate::models::ScopedLimit> {
+    let mut rows = Vec::new();
+    for (key, default_weekly) in [("primary_window", false), ("secondary_window", true)] {
+        let Some(window) = value.get(key).filter(|w| w.is_object()) else {
+            continue;
+        };
+        let Some(used) = window.get("used_percent").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        let seconds = window.get("limit_window_seconds").and_then(|v| v.as_i64());
+        let weekly = seconds.map_or(default_weekly, |s| s >= 6 * 24 * 60 * 60);
+        let reset = window.get("reset_at").and_then(|v| v.as_i64());
+        rows.push(crate::models::ScopedLimit {
+            label: label.to_string(),
+            window: if weekly {
+                crate::models::LimitWindow::Weekly
+            } else {
+                crate::models::LimitWindow::Session
+            },
+            section: UsageSection {
+                percentage: used,
+                resets_at: unix_to_system_time(reset),
+            },
+        });
+    }
+    rows
 }
 
 /// Codex bills credits at 25 to the dollar. Only the displayed amount depends
@@ -173,6 +218,32 @@ pub(super) fn codex_usage_from_response(
 ) -> Option<UsageData> {
     let credits = response.credits.flatten();
     let plan = response.plan_type.clone();
+    let mut extra_scoped = Vec::new();
+    if let Some(value) = &response.code_review_rate_limit {
+        extra_scoped.extend(scoped_limits_from_value("Code review", value));
+    }
+    if let Some(serde_json::Value::Array(items)) = &response.additional_rate_limits {
+        for item in items {
+            let label = ["name", "label", "kind", "limit_name"]
+                .iter()
+                .find_map(|key| item.get(*key).and_then(|v| v.as_str()))
+                .unwrap_or("Additional");
+            let windows = item.get("rate_limit").unwrap_or(item);
+            extra_scoped.extend(scoped_limits_from_value(label, windows));
+        }
+    }
+    let approx_messages: Vec<(&str, [u64; 2])> = credits
+        .as_ref()
+        .map(|credits| {
+            [
+                ("Local msgs", credits.approx_local_messages),
+                ("Cloud msgs", credits.approx_cloud_messages),
+            ]
+            .into_iter()
+            .filter(|(_, range)| range[1] > 0)
+            .collect()
+        })
+        .unwrap_or_default();
     let reset_credits = response
         .rate_limit_reset_credits
         .as_ref()
@@ -208,6 +279,11 @@ pub(super) fn codex_usage_from_response(
     if spend_capped {
         data.details.push(crate::models::Detail::new("Spend cap", "reached"));
     }
+    for (label, [low, high]) in approx_messages {
+        let value = if low == high { low.to_string() } else { format!("{low}–{high}") };
+        data.details.push(crate::models::Detail::new(label, format!("≈{value}")));
+    }
+    data.scoped.extend(extra_scoped);
 
     // Assign by window length, not by slot. Codex has shipped the weekly
     // allowance in `primary_window` with `secondary_window` empty while the
@@ -524,6 +600,8 @@ mod tests {
             unlimited: false,
             overage_limit_reached: false,
             balance: Some(balance.into()),
+            approx_local_messages: [0, 0],
+            approx_cloud_messages: [0, 0],
         }
     }
 
@@ -717,5 +795,54 @@ mod tests {
 
         assert_eq!(data.session.percentage, 20.0);
         assert_eq!(data.weekly.percentage, 80.0);
+    }
+
+    /// `code_review_rate_limit` has only ever been observed as null. This
+    /// pins the presumed shape -- the same as `rate_limit` -- so if it ever
+    /// populates that way it becomes rows, and if it does not, nothing breaks.
+    #[test]
+    fn a_code_review_limit_of_the_presumed_shape_becomes_scoped_rows() {
+        let data = usage_from_json(
+            r#"{
+                "rate_limit": {
+                    "primary_window": {"used_percent": 10, "limit_window_seconds": 18000, "reset_at": 1787100000},
+                    "secondary_window": {"used_percent": 20, "limit_window_seconds": 604800, "reset_at": 1787198224}
+                },
+                "code_review_rate_limit": {
+                    "primary_window": {"used_percent": 70, "limit_window_seconds": 604800, "reset_at": 1787198224}
+                },
+                "additional_rate_limits": [
+                    {"name": "Images", "rate_limit": {"primary_window": {"used_percent": 33, "limit_window_seconds": 18000}}}
+                ],
+                "credits": {"balance": "0", "approx_local_messages": [12, 30], "approx_cloud_messages": [0, 0]}
+            }"#,
+        );
+        let rows: Vec<(&str, crate::models::LimitWindow, f64)> = data
+            .scoped
+            .iter()
+            .map(|s| (s.label.as_str(), s.window, s.section.percentage))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Code review", crate::models::LimitWindow::Weekly, 70.0),
+                ("Images", crate::models::LimitWindow::Session, 33.0),
+            ]
+        );
+        assert!(data.details.iter().any(|d| d.label == "Local msgs" && d.value == "≈12–30"));
+        assert!(!data.details.iter().any(|d| d.label == "Cloud msgs"));
+    }
+
+    /// A null or unexpected shape must never cost the poll.
+    #[test]
+    fn unexpected_extra_limit_shapes_yield_nothing() {
+        let data = usage_from_json(
+            r#"{
+                "rate_limit": {"primary_window": {"used_percent": 1, "reset_at": 1787100000}},
+                "code_review_rate_limit": "surprise",
+                "additional_rate_limits": {"not": "an array"}
+            }"#,
+        );
+        assert!(data.scoped.is_empty());
     }
 }

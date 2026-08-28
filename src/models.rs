@@ -63,9 +63,23 @@ pub struct UsageData {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScopedLimit {
-    /// What the cap applies to, as the provider names it ("Fable").
+    /// What the cap applies to, as the provider names it ("Fable",
+    /// "Claude and GPT", "GrokBuild").
     pub label: String,
+    /// Which kind of window this is. Older cache entries predate the field
+    /// and were all weekly, hence the default.
+    #[serde(default)]
+    pub window: LimitWindow,
     pub section: UsageSection,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitWindow {
+    Session,
+    #[default]
+    Weekly,
+    Monthly,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
