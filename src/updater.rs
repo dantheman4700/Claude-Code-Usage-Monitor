@@ -257,12 +257,15 @@ fn fetch_latest_release() -> Result<Option<ReleaseDescriptor>, String> {
 
 /// The first hex token of the checksum file (`<hex>  headroom.exe`).
 fn fetch_checksum(agent: &ureq::Agent, url: &str) -> Result<String, String> {
-    let text = agent
+    let mut text = String::new();
+    agent
         .get(url)
         .set("User-Agent", user_agent())
         .call()
         .map_err(|e| format!("Unable to download the release checksum: {e}"))?
-        .into_string()
+        .into_reader()
+        .take(4_096)
+        .read_to_string(&mut text)
         .map_err(|e| format!("Unable to read the release checksum: {e}"))?;
     parse_checksum(&text).ok_or_else(|| "The release checksum file is not a SHA-256 digest.".to_string())
 }

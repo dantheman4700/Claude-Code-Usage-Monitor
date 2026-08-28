@@ -129,10 +129,7 @@ pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
         None => "fireworks|environment|missing".to_string(),
     }];
     if let Some(path) = windows_env_file() {
-        signatures.push(match path.metadata() {
-            Ok(metadata) => format!("fireworks|file|present|{}", metadata.len()),
-            Err(_) => "fireworks|file|missing".into(),
-        });
+        signatures.push(super::file_signature("fireworks|file", &path));
     }
     if all_sources {
         for distro in wsl::list_distros() {

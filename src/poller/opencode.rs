@@ -52,8 +52,20 @@ pub(super) fn poll_opencode() -> Result<UsageData, PollError> {
     poll_dashboard(&credentials)
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
-    vec![credential_watch_signature()]
+pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
+    let mut signatures = vec![credential_watch_signature()];
+    if all_sources {
+        // One fixed script per path: a loop variable would be expanded by
+        // the outer shell before `sh` runs (see wsl::read_file).
+        for distro in wsl::list_distros() {
+            for (label, script) in WSL_WATCH_CONFIG_SCRIPTS {
+                if let Some(signature) = wsl::path_watch_signature(&distro, label, script) {
+                    signatures.push(signature);
+                }
+            }
+        }
+    }
+    signatures
 }
 
 fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollError> {
@@ -136,6 +148,19 @@ fn read_dashboard_credentials() -> Option<DashboardCredentials> {
 /// on purpose -- see [`wsl::read_file`]. UNVERIFIED against a live install:
 /// the paths mirror the native list exactly, but no OpenCode Go setup exists
 /// on this machine to exercise them.
+const WSL_WATCH_CONFIG_SCRIPTS: &[(&str, &str)] = &[
+    (
+        "opencode-bar-wsl",
+        "if [ -f ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json ]; then \
+         stat -c 'present|%s|%Y' ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json; else echo missing; fi",
+    ),
+    (
+        "opencode-quota-wsl",
+        "if [ -f ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json ]; then \
+         stat -c 'present|%s|%Y' ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json; else echo missing; fi",
+    ),
+];
+
 const WSL_CONFIG_SCRIPTS: &[&str] = &[
     "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json",
     "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json",

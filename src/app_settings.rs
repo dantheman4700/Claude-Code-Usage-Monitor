@@ -247,20 +247,32 @@ pub fn usage_history_path() -> PathBuf {
 }
 
 pub fn load_settings() -> SettingsFile {
+    load_settings_if_readable().unwrap_or_default()
+}
+
+/// The settings, or `None` when the file exists but could not be read just
+/// now (locked, mid-write). A caller about to load-modify-save must stop on
+/// `None`: saving defaults over a file that was merely busy loses the
+/// user's settings.
+pub fn load_settings_if_readable() -> Option<SettingsFile> {
     let path = settings_path();
     let mut settings = match std::fs::read_to_string(&path) {
         Ok(content) => match decode_settings(&content) {
             Some(settings) => settings,
             None => {
-                quarantine(&path, "invalid JSON");
+                quarantine(&path, "invalid JSON", &content);
                 SettingsFile::default()
             }
         },
-        Err(_) => SettingsFile::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SettingsFile::default(),
+        Err(error) => {
+            crate::diagnose::log(format!("settings unreadable right now: {error}"));
+            return None;
+        }
     };
     settings.schema_version = SCHEMA_VERSION;
     settings.normalize();
-    settings
+    Some(settings)
 }
 
 pub fn save_settings(settings: &SettingsFile) -> Result<(), String> {
@@ -336,7 +348,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     match serde_json::from_str(&content) {
         Ok(value) => Some(value),
         Err(error) => {
-            quarantine(path, &error.to_string());
+            quarantine(path, &error.to_string(), &content);
             None
         }
     }
@@ -344,7 +356,13 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
 
 /// A file that no longer parses is moved aside, not silently replaced: the
 /// bytes stay for a bug report, and the app starts from defaults.
-fn quarantine(path: &Path, why: &str) {
+fn quarantine(path: &Path, why: &str, failed_content: &str) {
+    // The other process may have just replaced the file with a good one;
+    // only the bytes that failed to parse get moved aside.
+    match std::fs::read_to_string(path) {
+        Ok(current) if current == failed_content => {}
+        _ => return,
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -369,7 +387,14 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("state.json");
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    // Two threads of one process (tray window + update check) can save at
+    // once; a per-call sequence keeps their temp files apart and a lock
+    // keeps the rename order sane.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = parent.join(format!(".{file_name}.{}-{sequence}.tmp", std::process::id()));
     let json = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     {
         use std::io::Write;

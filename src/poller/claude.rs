@@ -722,7 +722,7 @@ fn windows_credential_watch_signature(path: &PathBuf) -> String {
                 .modified()
                 .ok()
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_secs())
+                .map(|value| value.as_millis())
                 .unwrap_or(0);
             format!("{key}|present|{}|{modified}", metadata.len())
         }

@@ -30,3 +30,7 @@ AGENTS.md
 # MSIX build output and rendered Store assets (make-assets.ps1 regenerates them)
 packaging/msix/out/
 packaging/msix/Assets/
+
+# Exported council diff (regenerate with git diff)
+tmp/conductor/council/fix-diff.patch
+tmp/conductor/council/headroom-review-bundle.md

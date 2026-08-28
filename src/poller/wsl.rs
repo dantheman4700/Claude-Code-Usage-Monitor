@@ -274,11 +274,14 @@ pub(super) fn run_with_timeout(
     // Drain stdout while waiting. A pipe the child cannot write into blocks
     // the child, which then never exits, which then looks like a timeout --
     // and a timeout looks like a missing credential file.
-    let reader = child.stdout.take().map(|mut stdout| {
+    // Bounded: a credential path pointed at something endless must not
+    // grow the tray's memory for five seconds and take it down.
+    const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+    let reader = child.stdout.take().map(|stdout| {
         std::thread::spawn(move || {
             use std::io::Read;
             let mut buffer = Vec::new();
-            let _ = stdout.read_to_end(&mut buffer);
+            let _ = stdout.take(MAX_OUTPUT_BYTES).read_to_end(&mut buffer);
             buffer
         })
     });

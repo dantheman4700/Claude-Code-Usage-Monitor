@@ -62,7 +62,6 @@ pub fn run(open_dashboard_on_start: bool) {
         );
     }
     migrate_legacy_startup_entry();
-    poller::startup_cleanup();
 
     // Second instance: hand the request to the running one and leave.
     let mutex_name = wide_str(INSTANCE_MUTEX);
@@ -82,6 +81,10 @@ pub fn run(open_dashboard_on_start: bool) {
             }
         }
     };
+
+    // Only the surviving instance sweeps temp files: a second launch must
+    // not delete a copy the running instance is querying.
+    poller::startup_cleanup();
 
     let settings = load_settings();
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
@@ -176,7 +179,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     match msg {
         WM_TIMER => {
             match wparam.0 {
-                TIMER_POLL => request_poll(hwnd),
+                TIMER_POLL => {
+                    // A tick during a round that outlasts the interval must
+                    // not queue another round behind it, or polling never
+                    // stops. The round schedules the next due itself.
+                    if !crate::state::POLL_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+                        request_poll(hwnd);
+                    }
+                }
                 TIMER_DUE => {
                     let _ = KillTimer(hwnd, TIMER_DUE);
                     request_poll(hwnd);
@@ -302,12 +312,18 @@ fn handle_command(hwnd: HWND, id: u16) {
         }
         id => {
             if let Some(provider) = menu::provider_for_command(id) {
-                if let Some(s) = lock_state().as_mut() {
-                    s.providers.toggle(provider);
-                    s.provider_backoff.remove(&provider);
-                }
+                let enabled_now = lock_state()
+                    .as_mut()
+                    .map(|s| s.providers.toggle(provider))
+                    .unwrap_or(false);
                 save_state_settings();
-                request_poll(hwnd);
+                if enabled_now {
+                    // Same gate as the panel's Retry: a toggle is not a way
+                    // around the cooldown.
+                    manual_retry(hwnd, Some(provider));
+                } else {
+                    sync_tray(hwnd);
+                }
             }
         }
     }
@@ -452,7 +468,10 @@ fn save_state_settings() {
             s.last_update_check_unix,
         )
     };
-    let mut persisted = load_settings();
+    let Some(mut persisted) = app_settings::load_settings_if_readable() else {
+        diagnose::log("settings not saved: the settings file could not be read right now");
+        return;
+    };
     persisted.poll_interval_ms = owned.0;
     persisted.set_enabled_providers(owned.1);
     persisted.language = owned.2;

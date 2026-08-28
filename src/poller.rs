@@ -192,6 +192,24 @@ pub fn credential_watch_snapshot(provider: ProviderId) -> CredentialWatchSnapsho
         .unwrap_or_default()
 }
 
+/// A watch signature for a native credential file: presence, size and
+/// millisecond mtime, so an in-place rewrite -- even one that keeps the size
+/// and lands within the same second -- reads as a change.
+pub(crate) fn file_signature(label: &str, path: &std::path::Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+                .map(|since| since.as_millis())
+                .unwrap_or(0);
+            format!("{label}|present|{}|{modified}", metadata.len())
+        }
+        Err(_) => format!("{label}|missing"),
+    }
+}
+
 /// Housekeeping at startup: sweep temp files a crash may have left.
 pub fn startup_cleanup() {
     cursor::cleanup_state_copies();

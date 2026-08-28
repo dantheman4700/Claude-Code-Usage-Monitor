@@ -147,3 +147,15 @@ listing. Attribution: LICENSE keeps upstream's MIT line; README + About say
 5. Known limitations to state in the listing/README: Grok token refresh not
    wired (6h expiry); Fireworks/Devin/OpenCode readers are doc-grounded, not
    live-verified.
+
+## Council + fix wave — 2026-08-28 evening (07e21c5)
+Four-seat pre-ship council on the code base; every finding verified in source before
+fixing. Landed: one due-time scheduler with per-provider backoff + credential watch (the
+sign-in strand is gone), watch across native+WSL for every failing provider, Grok
+size+mtime signature, probes off the UI thread, drained WSL pipes + timeout≠missing +
+docker distros skipped, claude.rs on the shared WSL layer, quota-spend rationing, no
+MessageBox under the lock, Local\ mutex, bounded timestamps, checksum-verified portable
+updates (workflow publishes `headroom.exe.sha256`), schema_version + quarantine, Cursor
+temp copy in app data, Fetch-all + per-provider Retry in the panel with cooldowns.
+Deferred as debt: see `tmp/conductor/council/synthesis.md` → Outcome. Codex validation of
+the diff requested (validator ≠ implementer).

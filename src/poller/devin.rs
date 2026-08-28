@@ -69,6 +69,9 @@ pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
         Some(_) => "devin|environment|present".to_string(),
         None => "devin|environment|missing".to_string(),
     }];
+    if let Some(path) = windows_env_file() {
+        signatures.push(super::file_signature("devin|file", &path));
+    }
     if all_sources {
         for distro in wsl::list_distros() {
             if let Some(signature) = wsl::path_watch_signature(&distro, "devin-wsl", WSL_WATCH_KEY)

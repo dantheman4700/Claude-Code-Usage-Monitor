@@ -183,7 +183,15 @@ impl PanelApp {
 
     /// Seconds left on a retry button's cooldown, if any.
     pub(crate) fn retry_cooldown_left(&self, target: Option<ProviderId>) -> Option<u64> {
-        let cooldown = if target.is_some() { 30 } else { crate::state::FETCH_ALL_COOLDOWN_SECS };
+        let cooldown = match target {
+            // Mirrors the tray: the long cooldown is for a provider with
+            // nothing current (a credential failure); a stale one is 2 s.
+            Some(provider) => {
+                let unreachable = self.usage.as_ref().and_then(|usage| usage.get(provider)).is_none();
+                if unreachable { 30 } else { 2 }
+            }
+            None => crate::state::FETCH_ALL_COOLDOWN_SECS,
+        };
         let elapsed = self.retry_pressed.get(&target)?.elapsed().as_secs();
         (elapsed < cooldown).then_some(cooldown - elapsed)
     }
@@ -304,7 +312,9 @@ impl eframe::App for PanelApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Reload first so a tray-side change made while the panel was open is
         // not overwritten by this final size save.
-        let mut settings = app_settings::load_settings();
+        let Some(mut settings) = app_settings::load_settings_if_readable() else {
+            return;
+        };
         settings.dashboard_width = self.settings.dashboard_width;
         settings.dashboard_height = self.settings.dashboard_height;
         if let Err(error) = app_settings::save_settings(&settings) {

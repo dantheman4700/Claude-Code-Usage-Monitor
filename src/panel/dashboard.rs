@@ -208,7 +208,10 @@ impl PanelApp {
                 now,
                 thresholds,
                 language,
-                self.retry_cooldown_left(Some(provider)),
+                // No retry for a provider the user has switched off; the
+                // tray would refuse it and the button would only show a
+                // cooldown for nothing.
+                self.settings.provider_enabled(provider).then(|| self.retry_cooldown_left(Some(provider))),
             );
             if retry {
                 self.request_retry(Some(provider));
@@ -420,10 +423,10 @@ fn provider_card(
     now: SystemTime,
     thresholds: Thresholds,
     language: LanguageId,
-    retry_cooldown: Option<u64>,
+    retry: Option<Option<u64>>,
 ) -> (bool, bool) {
     let mut toggled = false;
-    let mut retry = false;
+    let mut retry_clicked = false;
     egui::Frame::new()
         .fill(section_surface())
         .stroke(egui::Stroke::new(1.0, section_border()))
@@ -453,14 +456,14 @@ fn provider_card(
                     // A provider with nothing current gets its own retry:
                     // the tray drops its backoff and asks again, subject to
                     // the cooldown the button shows.
-                    if reading.is_none_or(|usage| usage.stale) {
-                        match retry_cooldown {
+                    if let Some(cooldown) = retry.filter(|_| reading.is_none_or(|usage| usage.stale)) {
+                        match cooldown {
                             Some(left) => {
                                 ui.add_enabled(false, egui::Button::new(format!("{left}s")).small());
                             }
                             None => {
                                 if ui.add(egui::Button::new(language.text("Retry")).small()).clicked() {
-                                    retry = true;
+                                    retry_clicked = true;
                                 }
                             }
                         }
@@ -468,7 +471,7 @@ fn provider_card(
                 });
             });
             let header = header.response.interact(egui::Sense::click());
-            if header.clicked() && !retry {
+            if header.clicked() && !retry_clicked {
                 toggled = true;
             }
             if header.hovered() {
@@ -554,7 +557,7 @@ fn provider_card(
                 );
             });
         });
-    (toggled, retry)
+    (toggled, retry_clicked)
 }
 
 fn detail_line(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {

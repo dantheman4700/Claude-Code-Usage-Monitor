@@ -104,7 +104,7 @@ pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
                     .modified()
                     .ok()
                     .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|since| since.as_secs())
+                    .map(|since| since.as_millis())
                     .unwrap_or(0);
                 format!("windows|{}|present|{}|{modified}", path.display(), meta.len())
             }

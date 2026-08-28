@@ -67,31 +67,46 @@ fn poll_worker(send_hwnd: SendHwnd) {
 /// plus anyone backed off on a credential failure whose credential files
 /// have changed since. Returns the set to poll and the subset whose
 /// credentials moved (their backoff ladder restarts).
+pub(crate) struct Selection {
+    pub polled: ProviderSet,
+    /// Backed-off providers whose credential files moved.
+    pub changed: ProviderSet,
+    /// The snapshots taken while deciding, from before any read: if the
+    /// provider fails again this round these are what its next watch is
+    /// based on, so a rewrite that lands between the read and the failure
+    /// still counts as a change.
+    pub snapshots: HashMap<ProviderId, CredentialWatchSnapshot>,
+}
+
 pub(crate) fn select_polled(
     enabled: ProviderSet,
     backoff: &HashMap<ProviderId, ProviderBackoff>,
     now: u64,
     watch_now: impl Fn(ProviderId) -> CredentialWatchSnapshot,
-) -> (ProviderSet, ProviderSet) {
+) -> Selection {
     let mut polled = Vec::new();
     let mut changed = Vec::new();
+    let mut snapshots = HashMap::new();
     for provider in enabled.iter() {
         match backoff.get(&provider) {
             Some(entry) if entry.next_attempt_unix > now => {
                 if let Some(watched) = &entry.watch {
-                    if watch_now(provider) != *watched {
+                    let current = watch_now(provider);
+                    if current != *watched {
                         polled.push(provider);
                         changed.push(provider);
                     }
+                    snapshots.insert(provider, current);
                 }
             }
             _ => polled.push(provider),
         }
     }
-    (
-        ProviderSet::from_enabled(polled.into_iter()),
-        ProviderSet::from_enabled(changed.into_iter()),
-    )
+    Selection {
+        polled: ProviderSet::from_enabled(polled.into_iter()),
+        changed: ProviderSet::from_enabled(changed.into_iter()),
+        snapshots,
+    }
 }
 
 /// Fold this round's failures into the backoff table. Returns each failed
@@ -179,7 +194,7 @@ fn do_poll_once(send_hwnd: SendHwnd) {
 
     // Credential-file probes spawn wsl.exe; they run here, on the worker,
     // never on the window thread.
-    let (polled, credentials_changed) =
+    let Selection { polled, changed: credentials_changed, snapshots: pre_poll } =
         select_polled(enabled, &backoff, now, poller::credential_watch_snapshot);
     if polled.is_empty() {
         schedule_next(send_hwnd);
@@ -187,11 +202,14 @@ fn do_poll_once(send_hwnd: SendHwnd) {
     }
 
     let (data, failures) = poller::poll_detailed(polled);
-    let snapshots: HashMap<ProviderId, CredentialWatchSnapshot> = failures
-        .iter()
-        .filter(|failure| failure.error.is_credential_failure())
-        .map(|failure| (failure.provider, poller::credential_watch_snapshot(failure.provider)))
-        .collect();
+    let mut snapshots: HashMap<ProviderId, CredentialWatchSnapshot> = HashMap::new();
+    for failure in failures.iter().filter(|failure| failure.error.is_credential_failure()) {
+        let snapshot = pre_poll
+            .get(&failure.provider)
+            .cloned()
+            .unwrap_or_else(|| poller::credential_watch_snapshot(failure.provider));
+        snapshots.insert(failure.provider, snapshot);
+    }
     let any_fresh = !data.is_empty();
 
     // Bookkeeping under the lock; every write to disk happens after it.
@@ -323,11 +341,11 @@ mod tests {
         let mut backoff = HashMap::new();
         backoff.insert(ProviderId::Grok, backed_off(PollError::NoCredentials, 10_000, Some(&["grok|missing"])));
         let enabled = set(&[ProviderId::Claude, ProviderId::Grok]);
-        let (polled, changed) = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|present|1644|99".into()]);
+        let Selection { polled, changed, .. } = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|present|1644|99".into()]);
         assert!(polled.contains(ProviderId::Grok));
         assert!(polled.contains(ProviderId::Claude));
         assert!(changed.contains(ProviderId::Grok));
-        let (polled, changed) = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|missing".into()]);
+        let Selection { polled, changed, .. } = select_polled(enabled, &backoff, 5_000, |_| vec!["grok|missing".into()]);
         assert!(!polled.contains(ProviderId::Grok));
         assert!(changed.is_empty());
     }
@@ -337,9 +355,9 @@ mod tests {
         let mut backoff = HashMap::new();
         backoff.insert(ProviderId::Codex, backed_off(PollError::RequestFailed, 10_000, None));
         let enabled = set(&[ProviderId::Codex]);
-        let (polled, _) = select_polled(enabled, &backoff, 9_999, |_| unreachable!("no watch for transient failures"));
+        let Selection { polled, .. } = select_polled(enabled, &backoff, 9_999, |_| unreachable!("no watch for transient failures"));
         assert!(polled.is_empty());
-        let (polled, _) = select_polled(enabled, &backoff, 10_000, |_| unreachable!());
+        let Selection { polled, .. } = select_polled(enabled, &backoff, 10_000, |_| unreachable!());
         assert!(polled.contains(ProviderId::Codex));
     }
 
