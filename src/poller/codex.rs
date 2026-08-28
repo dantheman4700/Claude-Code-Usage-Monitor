@@ -18,9 +18,19 @@ const WSL_READ_AUTH: &str = "cat ${CODEX_HOME:-$HOME/.codex}/auth.json";
 const WSL_WATCH_AUTH: &str = "if [ -f ${CODEX_HOME:-$HOME/.codex}/auth.json ]; then \
      stat -c 'present|%s|%Y' ${CODEX_HOME:-$HOME/.codex}/auth.json; else echo missing; fi";
 /// `codex exec .` is a no-op run whose only purpose is making the CLI refresh
-/// and rewrite its own credential file.
-const WSL_REFRESH: &str = "if command -v codex >/dev/null 2>&1; then codex exec .; \
-     elif [ -x $HOME/.local/bin/codex ]; then $HOME/.local/bin/codex exec .; else exit 127; fi";
+/// and rewrite its own credential file. It runs from $HOME with the git-repo
+/// check skipped -- from any other directory the CLI refuses ("Not inside a
+/// trusted directory") and nothing is refreshed -- and with stdin closed, or
+/// it waits for input that never comes.
+///
+/// A login `sh` does not see the PATH a person's interactive shell has (nvm,
+/// bun and pnpm all set theirs up in .bashrc, which non-interactive shells
+/// skip), so the CLI is looked for where those tools install it.
+const WSL_REFRESH: &str = "cd $HOME && for c in $(command -v codex 2>/dev/null) \
+     $HOME/.local/bin/codex $HOME/.bun/bin/codex $HOME/.npm-global/bin/codex \
+     $HOME/.local/share/pnpm/codex $HOME/.yarn/bin/codex /usr/local/bin/codex \
+     $HOME/.nvm/versions/node/*/bin/codex $HOME/.volta/bin/codex $HOME/.fnm/aliases/default/bin/codex; do \
+     if [ -x $c ]; then exec $c exec --skip-git-repo-check . </dev/null >/dev/null 2>&1; fi; done; exit 127";
 
 /// Where a Codex token came from, so a refresh runs where the CLI actually
 /// lives instead of assuming the Windows install.
@@ -497,7 +507,7 @@ fn cli_refresh_codex_token() {
         "attempting Windows Codex token refresh via {codex_path}"
     ));
 
-    let args: &[&str] = &["exec", "."];
+    let args: &[&str] = &["exec", "--skip-git-repo-check", "."];
     let mut command = if is_cmd {
         let mut command = Command::new("cmd.exe");
         command.arg("/c").arg(&codex_path).args(args);
@@ -518,6 +528,7 @@ fn cli_refresh_codex_token() {
         command
     };
     command
+        .current_dir(dirs::home_dir().unwrap_or_else(std::env::temp_dir))
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -587,6 +598,17 @@ fn wait_for_refresh(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI refuses to run outside a trusted directory and waits on an
+    /// open stdin; the refresh script has to avoid both or it never refreshes.
+    #[test]
+    fn refresh_script_runs_where_the_cli_will_actually_run() {
+        assert!(WSL_REFRESH.starts_with("cd $HOME && "));
+        assert!(WSL_REFRESH.contains("--skip-git-repo-check ."));
+        assert!(WSL_REFRESH.contains("</dev/null"));
+        assert!(WSL_REFRESH.contains(".nvm/versions/node/*/bin/codex"));
+        assert!(!WSL_REFRESH.contains('"'), "the WSL transport strips double quotes");
+    }
 
     fn usage_from_json(json: &str) -> UsageData {
         let response: CodexUsageResponse =

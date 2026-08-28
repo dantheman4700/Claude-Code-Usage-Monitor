@@ -30,21 +30,21 @@ pub struct SettingsFile {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_check_unix: Option<u64>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_show_claude_code")]
     show_claude_code: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_codex")]
     show_codex: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_antigravity")]
     show_antigravity: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_opencode")]
     show_opencode: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_cursor")]
     show_cursor: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_grok")]
     show_grok: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_fireworks")]
     show_fireworks: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_devin")]
     show_devin: bool,
     /// Usage at or above this is shown as a warning.
     #[serde(default = "default_warn_percent")]
@@ -358,6 +358,41 @@ fn default_critical_percent() -> u8 {
 fn default_history_retention_days() -> u16 {
     14
 }
+// A provider absent from an older settings file starts at its own default,
+// not at `false`: that is how Grok stayed off for everyone who had settings
+// from before it existed.
+fn default_show_claude_code() -> bool {
+    ProviderId::Claude.descriptor().default_enabled
+}
+
+fn default_show_codex() -> bool {
+    ProviderId::Codex.descriptor().default_enabled
+}
+
+fn default_show_antigravity() -> bool {
+    ProviderId::Antigravity.descriptor().default_enabled
+}
+
+fn default_show_opencode() -> bool {
+    ProviderId::OpenCode.descriptor().default_enabled
+}
+
+fn default_show_cursor() -> bool {
+    ProviderId::Cursor.descriptor().default_enabled
+}
+
+fn default_show_grok() -> bool {
+    ProviderId::Grok.descriptor().default_enabled
+}
+
+fn default_show_fireworks() -> bool {
+    ProviderId::Fireworks.descriptor().default_enabled
+}
+
+fn default_show_devin() -> bool {
+    ProviderId::Devin.descriptor().default_enabled
+}
+
 fn default_true() -> bool {
     true
 }
@@ -374,6 +409,17 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn providers_missing_from_an_older_settings_file_take_their_own_defaults() {
+        let settings = decode_settings(r#"{"poll_interval_ms": 300000, "show_claude_code": true}"#).unwrap();
+        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+            if descriptor.id == ProviderId::Claude {
+                continue;
+            }
+            assert_eq!(settings.provider_enabled(descriptor.id), descriptor.default_enabled, "{}", descriptor.display_name);
+        }
+    }
 
     #[test]
     fn settings_never_disable_every_provider() {
