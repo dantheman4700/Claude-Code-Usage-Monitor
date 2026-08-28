@@ -85,7 +85,7 @@ fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, Po
     fetch_devin_usage(&credentials, period, now)
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
     credentials::watch_snapshot(&SPEC)
 }
 

@@ -80,7 +80,7 @@ fn attempt(content: &str, source: &credentials::Source) -> Result<UsageData, Pol
     poll_dashboard(&credentials)
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
     credentials::watch_snapshot(&SPEC)
 }
 

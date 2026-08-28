@@ -403,7 +403,7 @@ pub(super) fn codex_section_from_window(window: &CodexRateLimitWindow) -> UsageS
     }
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
     credentials::watch_snapshot(&SPEC)
 }
 

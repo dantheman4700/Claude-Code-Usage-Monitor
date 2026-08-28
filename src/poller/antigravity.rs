@@ -5,29 +5,36 @@ use std::hash::{Hash, Hasher};
 
 use serde::Deserialize;
 
-use super::{build_agent, parse_iso8601, wsl, PollError};
+use super::{build_agent, credentials, parse_iso8601, PollError};
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 const ANTIGRAVITY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_TOKEN: &str = "cat ~/.gemini/antigravity-cli/antigravity-oauth-token";
-const WSL_WATCH_TOKEN: &str = "if [ -f ~/.gemini/antigravity-cli/antigravity-oauth-token ]; then \
-     stat -c 'present|%s|%Y' ~/.gemini/antigravity-cli/antigravity-oauth-token; \
-     else echo missing; fi";
+/// Quote-free path expression -- see [`credentials`].
+const WSL_TOKEN_PATH: &str = "~/.gemini/antigravity-cli/antigravity-oauth-token";
 /// Listing models is the cheapest call that makes the CLI notice its token has
 /// expired and write a fresh one; there is no dedicated refresh command.
 const WSL_REFRESH: &str = "if command -v agy >/dev/null 2>&1; then agy models; \
      elif [ -x $HOME/.local/bin/agy ]; then $HOME/.local/bin/agy models; else exit 127; fi";
 
-/// Where an Antigravity token came from. Windows keeps it in the credential
-/// manager; WSL installs keep it in a file under the home directory.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum AntigravityCredentialSource {
-    Windows,
-    Wsl { distro: String },
-}
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Antigravity,
+    env: &[],
+    native_files: Vec::new,
+    native_extra: &[credentials::NativeExtra {
+        // Windows keeps the token in the credential manager; the Windows
+        // CLI refreshes it on its own schedule.
+        label: "antigravity:credential-manager",
+        read: read_windows_credential_blob,
+        signature: antigravity_credential_watch_signature,
+        refresh: None,
+    }],
+    native_refresh: None,
+    wsl_paths: &[WSL_TOKEN_PATH],
+    wsl_refresh: Some(WSL_REFRESH),
+};
 const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
     "https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -137,64 +144,26 @@ extern "system" {
 }
 
 pub(super) fn poll_antigravity() -> Result<UsageData, PollError> {
-    let (creds, source) = match read_first_antigravity_credentials() {
-        Some(found) => found,
-        None => {
-            diagnose::log("Antigravity usage poll failed: no Antigravity credentials found");
-            return Err(PollError::NoCredentials);
-        }
-    };
-
-    match fetch_antigravity_usage(&creds.access_token) {
-        Err(PollError::AuthRequired) => {
-            // The Windows CLI refreshes on its own schedule; a WSL install
-            // only rewrites its token when something asks it to.
-            let AntigravityCredentialSource::Wsl { distro } = &source else {
-                return Err(PollError::AuthRequired);
-            };
-            wsl::run_detached(distro, WSL_REFRESH, "Antigravity token refresh");
-            let refreshed = read_wsl_antigravity_credentials(distro).ok_or(PollError::TokenExpired)?;
-            fetch_antigravity_usage(&refreshed.access_token)
-        }
-        result => result,
-    }
+    credentials::poll(&SPEC, attempt)
 }
 
-/// The first usable Antigravity token, from Windows and then any WSL distro.
-fn read_first_antigravity_credentials(
-) -> Option<(AntigravityTokenData, AntigravityCredentialSource)> {
-    if let Some(token) = read_antigravity_credentials() {
-        return Some((token, AntigravityCredentialSource::Windows));
+fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, PollError> {
+    let auth: AntigravityAuthFile = serde_json::from_str(content).map_err(|_| PollError::NoCredentials)?;
+    if auth.token.access_token.is_empty() {
+        return Err(PollError::NoCredentials);
     }
-    for distro in wsl::list_distros() {
-        if let Some(token) = read_wsl_antigravity_credentials(&distro) {
-            return Some((token, AntigravityCredentialSource::Wsl { distro }));
-        }
-    }
-    None
+    fetch_antigravity_usage(&auth.token.access_token)
 }
 
-fn read_wsl_antigravity_credentials(distro: &str) -> Option<AntigravityTokenData> {
-    let content = wsl::read_file(distro, WSL_READ_TOKEN, "Antigravity credentials")?;
-    let auth: AntigravityAuthFile = serde_json::from_str(&content).ok()?;
-    (!auth.token.access_token.is_empty()).then_some(auth.token)
+fn read_windows_credential_blob() -> Option<String> {
+    read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET)
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let mut signatures = vec![antigravity_credential_watch_signature()];
-    if all_sources {
-        for distro in wsl::list_distros() {
-            if let Some(signature) =
-                wsl::path_watch_signature(&distro, "antigravity-wsl", WSL_WATCH_TOKEN)
-            {
-                signatures.push(signature);
-            }
-        }
-    }
-    signatures
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
-pub(super) fn antigravity_credential_watch_signature() -> String {
+fn antigravity_credential_watch_signature() -> String {
     let Some(content) = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET) else {
         return format!("{ANTIGRAVITY_CREDENTIAL_TARGET}|missing");
     };
@@ -535,12 +504,6 @@ pub(super) fn is_antigravity_display_model(model: &str) -> bool {
         || model.starts_with("gpt")
         || model.starts_with("image")
         || model.starts_with("imagen")
-}
-
-fn read_antigravity_credentials() -> Option<AntigravityTokenData> {
-    let content = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET)?;
-    let auth: AntigravityAuthFile = serde_json::from_str(&content).ok()?;
-    (!auth.token.access_token.is_empty()).then_some(auth.token)
 }
 
 fn read_windows_generic_credential(target: &str) -> Option<String> {

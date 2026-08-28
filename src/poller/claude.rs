@@ -9,16 +9,15 @@ use super::claude_desktop;
 use super::{
     build_agent, get_header_f64, get_header_i64, parse_iso8601, unix_to_system_time, PollError,
 };
-use super::wsl;
+use super::credentials;
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{CreditsSection, Detail, LimitWindow, ScopedLimit, UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_CREDENTIALS: &str = "cat ~/.claude/.credentials.json";
-const WSL_WATCH_CREDENTIALS: &str = "if [ -f ~/.claude/.credentials.json ]; then \
-     stat -c 'present|%s|%Y' ~/.claude/.credentials.json; else echo missing; fi";
+/// Quote-free path expression -- see [`credentials`].
+const WSL_CREDENTIALS_PATH: &str = "~/.claude/.credentials.json";
 /// `claude -p .` is a no-op turn whose only purpose is making the CLI refresh
 /// its token. Delivered on stdin (see [`wsl::run_detached`]); looked for where
 /// the installers put it, since a login `sh` has none of the interactive PATH.
@@ -120,33 +119,64 @@ struct UsageBucket {
 struct Credentials {
     access_token: String,
     expires_at: Option<i64>,
-    source: CredentialSource,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CredentialSource {
-    Windows(PathBuf),
-    /// The Claude desktop app's own token cache, used when Claude Code has
-    /// only ever run inside the desktop app and no CLI login wrote
-    /// `~/.claude/.credentials.json`.
-    DesktopApp(PathBuf),
-    Wsl {
-        distro: String,
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Claude,
+    env: &[],
+    native_files: || {
+        dirs::home_dir()
+            .map(|home| home.join(".claude").join(".credentials.json"))
+            .into_iter()
+            .collect()
     },
-}
+    native_extra: &[credentials::NativeExtra {
+        // The desktop app's own token cache, for a machine where Claude Code
+        // has only ever run inside the desktop app and no CLI login wrote
+        // `~/.claude/.credentials.json`. The app refreshes it itself, so
+        // there is nothing to drive from here.
+        label: "claude:desktop-cache",
+        read: read_desktop_app_cache,
+        signature: desktop_app_cache_signature,
+        refresh: None,
+    }],
+    native_refresh: Some(cli_refresh_windows_token),
+    wsl_paths: &[WSL_CREDENTIALS_PATH],
+    wsl_refresh: Some(WSL_REFRESH),
+};
 
 pub(super) fn poll_claude_code() -> Result<UsageData, PollError> {
-    let creds = match read_first_credentials() {
-        Some(c) => c,
-        None => {
-            diagnose::log("poll failed: no Claude credentials found");
-            return Err(PollError::NoCredentials);
-        }
-    };
+    credentials::poll(&SPEC, attempt)
+}
 
-    let creds = refresh_or_fallback(creds)?;
-
+fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, PollError> {
+    let creds = parse_credentials(content).ok_or(PollError::NoCredentials)?;
+    // A token known to be expired is not worth an HTTPS call; the engine
+    // refreshes it where it lives and asks again.
+    if is_token_expired(creds.expires_at) {
+        return Err(PollError::TokenExpired);
+    }
     fetch_usage_with_fallback(&creds.access_token)
+}
+
+/// The desktop cache, re-emitted in the credential file's own shape so one
+/// parser serves both.
+fn read_desktop_app_cache() -> Option<String> {
+    let token = claude_desktop::read_token(&claude_desktop::config_path()?)?;
+    diagnose::log("using the Claude desktop app token cache");
+    Some(
+        serde_json::json!({
+            "claudeAiOauth": { "accessToken": token.access_token, "expiresAt": token.expires_at }
+        })
+        .to_string(),
+    )
+}
+
+fn desktop_app_cache_signature() -> String {
+    match claude_desktop::config_path() {
+        Some(path) => claude_desktop::watch_signature(&path),
+        None => "claude:desktop-cache|missing".to_string(),
+    }
 }
 
 pub(super) fn fetch_usage_with_fallback(token: &str) -> Result<UsageData, PollError> {
@@ -445,63 +475,8 @@ pub(super) fn parse_rate_limit_headers(response: &ureq::Response) -> UsageData {
     data
 }
 
-pub(super) fn credential_watch_snapshot(all_sources: bool) -> Vec<String> {
-    let sources = if all_sources {
-        all_known_credential_sources()
-    } else {
-        read_first_credentials()
-            .map(|credentials| vec![credentials.source])
-            .unwrap_or_else(all_known_credential_sources)
-    };
-
-    let mut snapshot: Vec<String> = sources
-        .into_iter()
-        .filter_map(|source| credential_watch_signature(&source))
-        .collect();
-    snapshot.sort();
-    snapshot.dedup();
-    snapshot
-}
-
-fn refresh_or_fallback(mut credentials: Credentials) -> Result<Credentials, PollError> {
-    loop {
-        if !is_token_expired(credentials.expires_at) {
-            return Ok(credentials);
-        }
-
-        let source = credentials.source.clone();
-        cli_refresh_token(&source);
-
-        match read_credentials_from_source(&source) {
-            Some(refreshed) if !is_token_expired(refreshed.expires_at) => return Ok(refreshed),
-            Some(_) => diagnose::log(format!(
-                "credentials from {source:?} still expired after refresh attempt"
-            )),
-            None => diagnose::log(format!(
-                "credentials from {source:?} unavailable after refresh attempt"
-            )),
-        }
-
-        match read_next_credentials_after(&source) {
-            Some(next) => credentials = next,
-            None => return Err(PollError::TokenExpired),
-        }
-    }
-}
-
-fn cli_refresh_token(source: &CredentialSource) {
-    if !super::spend_allowed("claude token refresh") {
-        return;
-    }
-    match source {
-        CredentialSource::Windows(_) => cli_refresh_windows_token(),
-        // The desktop app owns this token and refreshes it itself, so there is
-        // nothing to drive from here; re-reading the cache is the whole retry.
-        CredentialSource::DesktopApp(_) => {
-            diagnose::log("Claude desktop app refreshes its own token; re-reading the cache")
-        }
-        CredentialSource::Wsl { distro } => cli_refresh_wsl_token(distro),
-    }
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
 fn cli_refresh_windows_token() {
@@ -537,10 +512,6 @@ fn cli_refresh_windows_token() {
         }
     };
     wait_for_refresh(&mut child);
-}
-
-fn cli_refresh_wsl_token(distro: &str) {
-    wsl::run_detached(distro, WSL_REFRESH, "Claude token refresh");
 }
 
 fn resolve_windows_claude_path() -> String {
@@ -614,124 +585,14 @@ fn bundled_claude_version(path: &Path) -> Option<Vec<u64>> {
         .ok()
 }
 
-fn read_first_credentials() -> Option<Credentials> {
-    credential_sources_in_order().find_map(|source| read_credentials_from_source(&source))
-}
-
-fn read_windows_credentials(path: &Path) -> Option<Credentials> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) => {
-            if diagnose::is_enabled() {
-                diagnose::log_error(
-                    &format!("unable to read Windows credentials at {}", path.display()),
-                    error,
-                );
-            }
-            return None;
-        }
-    };
-    parse_credentials(&content, CredentialSource::Windows(path.to_path_buf()))
-}
-
-fn read_desktop_app_credentials(path: &Path) -> Option<Credentials> {
-    let token = claude_desktop::read_token(path)?;
-    diagnose::log("using the Claude desktop app token cache");
-    Some(Credentials {
-        access_token: token.access_token,
-        expires_at: token.expires_at,
-        source: CredentialSource::DesktopApp(path.to_path_buf()),
-    })
-}
-
-fn read_credentials_from_source(source: &CredentialSource) -> Option<Credentials> {
-    match source {
-        CredentialSource::Windows(path) => read_windows_credentials(path),
-        CredentialSource::DesktopApp(path) => read_desktop_app_credentials(path),
-        CredentialSource::Wsl { distro } => read_wsl_credentials(distro),
-    }
-}
-
-fn read_wsl_credentials(distro: &str) -> Option<Credentials> {
-    let content = wsl::read_file(distro, WSL_READ_CREDENTIALS, "Claude credentials")?;
-    parse_credentials(
-        &content,
-        CredentialSource::Wsl {
-            distro: distro.to_string(),
-        },
-    )
-}
-
-fn parse_credentials(content: &str, source: CredentialSource) -> Option<Credentials> {
+fn parse_credentials(content: &str) -> Option<Credentials> {
     let json: serde_json::Value = serde_json::from_str(content).ok()?;
     let oauth = json.get("claudeAiOauth")?;
-    Some(Credentials {
-        access_token: oauth.get("accessToken")?.as_str()?.to_string(),
+    let access_token = oauth.get("accessToken")?.as_str()?.to_string();
+    (!access_token.is_empty()).then_some(Credentials {
+        access_token,
         expires_at: oauth.get("expiresAt").and_then(|value| value.as_i64()),
-        source,
     })
-}
-
-fn read_next_credentials_after(source: &CredentialSource) -> Option<Credentials> {
-    credential_sources_in_order()
-        .skip_while(|candidate| candidate != source)
-        .skip(1)
-        .find_map(|candidate| read_credentials_from_source(&candidate))
-}
-
-/// Credential sources, cheapest first. The WSL probe stays lazy so a machine
-/// that resolves a token locally never has to spawn `wsl.exe`.
-fn credential_sources_in_order() -> impl Iterator<Item = CredentialSource> {
-    windows_credential_source()
-        .into_iter()
-        .chain(desktop_app_credential_source())
-        .chain(
-            std::iter::once_with(wsl::list_distros)
-                .flatten()
-                .map(|distro| CredentialSource::Wsl { distro }),
-        )
-}
-
-fn all_known_credential_sources() -> Vec<CredentialSource> {
-    credential_sources_in_order().collect()
-}
-
-fn windows_credential_source() -> Option<CredentialSource> {
-    Some(CredentialSource::Windows(
-        dirs::home_dir()?.join(".claude").join(".credentials.json"),
-    ))
-}
-
-fn desktop_app_credential_source() -> Option<CredentialSource> {
-    claude_desktop::config_path().map(CredentialSource::DesktopApp)
-}
-
-fn credential_watch_signature(source: &CredentialSource) -> Option<String> {
-    match source {
-        CredentialSource::Windows(path) => Some(windows_credential_watch_signature(path)),
-        CredentialSource::DesktopApp(path) => Some(claude_desktop::watch_signature(path)),
-        CredentialSource::Wsl { distro } => wsl_credential_watch_signature(distro),
-    }
-}
-
-fn windows_credential_watch_signature(path: &PathBuf) -> String {
-    let key = format!("win:{}", path.display());
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_millis())
-                .unwrap_or(0);
-            format!("{key}|present|{}|{modified}", metadata.len())
-        }
-        Err(_) => format!("{key}|missing"),
-    }
-}
-
-fn wsl_credential_watch_signature(distro: &str) -> Option<String> {
-    wsl::path_watch_signature(distro, "claude-wsl", WSL_WATCH_CREDENTIALS)
 }
 
 fn is_token_expired(expires_at: Option<i64>) -> bool {
@@ -762,6 +623,18 @@ fn wait_for_refresh(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An expired token is reported as such without an HTTPS call, so the
+    /// engine refreshes it and moves on -- and a desktop-only account whose
+    /// cached token expired yields TokenExpired, never NoCredentials.
+    #[test]
+    fn an_expired_token_is_expired_before_any_request() {
+        let source = credentials::Source::Extra("claude:desktop-cache");
+        let expired = r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1}}"#;
+        assert_eq!(attempt(expired, &source), Err(PollError::TokenExpired));
+        assert_eq!(attempt(r#"{"claudeAiOauth":{"accessToken":""}}"#, &source), Err(PollError::NoCredentials));
+        assert_eq!(attempt("not json", &source), Err(PollError::NoCredentials));
+    }
     use std::path::Path;
 
     #[test]

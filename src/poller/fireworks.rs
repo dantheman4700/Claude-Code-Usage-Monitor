@@ -131,7 +131,7 @@ fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, Po
     Ok(fireworks_usage(&account, &quotas.quotas, spend_usd, month_end))
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
     credentials::watch_snapshot(&SPEC)
 }
 

@@ -1,11 +1,10 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, parse_iso8601, wsl, PollError};
+use super::{build_agent, credentials, parse_iso8601, PollError};
+use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{LimitWindow, ScopedLimit, UsageData, UsageSection};
 
@@ -36,76 +35,61 @@ struct CursorPlanUsage {
     total_percent_used: Option<f64>,
 }
 
+/// Quote-free path expression -- see [`credentials`].
+const WSL_AGENT_AUTH_PATH: &str = "~/.config/cursor/auth.json";
+
+const SPEC: credentials::Spec = credentials::Spec {
+    provider: ProviderId::Cursor,
+    env: &[&[CURSOR_SESSION_TOKEN_ENV]],
+    native_files: || cursor_agent_auth_path().into_iter().collect(),
+    native_extra: &[credentials::NativeExtra {
+        // The desktop app's own session token, in its SQLite state store.
+        label: "cursor:state-db",
+        read: read_cursor_access_token_from_state_db,
+        signature: state_db_signature,
+        refresh: None,
+    }],
+    native_refresh: None,
+    wsl_paths: &[WSL_AGENT_AUTH_PATH],
+    wsl_refresh: None,
+};
+
 pub(super) fn poll_cursor() -> Result<UsageData, PollError> {
-    let cookie = read_cursor_session_cookie().ok_or_else(|| {
-        diagnose::log(
-            "Cursor usage poll failed: no Cursor session found (sign in to Cursor or set CURSOR_SESSION_TOKEN)",
-        );
-        PollError::NoCredentials
-    })?;
+    credentials::poll(&SPEC, attempt)
+}
+
+/// Every source yields the same session JWT the desktop app stores, so
+/// every source builds the same cookie; only the environment may already
+/// hold a finished cookie.
+fn attempt(content: &str, source: &credentials::Source) -> Result<UsageData, PollError> {
+    let cookie = session_cookie(content, source).ok_or(PollError::NoCredentials)?;
     fetch_cursor_usage(&cookie)
 }
 
-pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
-    let environment = non_empty_environment(CURSOR_SESSION_TOKEN_ENV)
-        .map(|value| secret_signature("environment", &value))
-        .unwrap_or_else(|| "environment|missing".into());
-    let database = cursor_state_db_path()
-        .map(|path| path_signature("database", &path))
-        .unwrap_or_else(|| "database|missing".into());
-    let agent = cursor_agent_auth_path()
-        .map(|path| path_signature("agent", &path))
-        .unwrap_or_else(|| "agent|missing".into());
-    let mut signatures = vec![environment, database, agent];
-    if _all_sources {
-        for distro in wsl::list_distros() {
-            if let Some(signature) =
-                wsl::path_watch_signature(&distro, "cursor-agent-wsl", WSL_WATCH_AGENT_AUTH)
-            {
-                signatures.push(signature);
-            }
-        }
+fn session_cookie(content: &str, source: &credentials::Source) -> Option<String> {
+    match source {
+        credentials::Source::Env(_) => credentials::env_value(content, CURSOR_SESSION_TOKEN_ENV)
+            .and_then(|token| normalize_cursor_session_cookie(&token)),
+        credentials::Source::Extra(_) => cursor_cookie_from_access_token(content.trim()),
+        _ => parse_cursor_agent_access_token(content)
+            .and_then(|token| cursor_cookie_from_access_token(&token)),
     }
-    signatures
 }
 
-/// Resolve a Cursor dashboard session cookie. An explicit environment value
-/// takes priority; then the desktop app's own token; then the token the
-/// `cursor-agent` CLI keeps, on Windows or inside a WSL distro. The CLI's
-/// token is the same session JWT the desktop app stores, so it builds the
-/// same cookie.
-fn read_cursor_session_cookie() -> Option<String> {
-    if let Some(token) = non_empty_environment(CURSOR_SESSION_TOKEN_ENV) {
-        return normalize_cursor_session_cookie(&token);
-    }
-
-    let access_token = read_cursor_access_token_from_state_db()
-        .or_else(read_cursor_agent_access_token)
-        .or_else(read_wsl_cursor_agent_access_token)?;
-    cursor_cookie_from_access_token(&access_token)
+pub(super) fn credential_watch_snapshot() -> Vec<String> {
+    credentials::watch_snapshot(&SPEC)
 }
 
-/// Quote-free on purpose -- see [`wsl::read_file`].
-const WSL_READ_AGENT_AUTH: &str = "cat ~/.config/cursor/auth.json";
-const WSL_WATCH_AGENT_AUTH: &str = "if [ -f ~/.config/cursor/auth.json ]; then \
-     stat -c 'present|%s|%Y' ~/.config/cursor/auth.json; else echo missing; fi";
+fn state_db_signature() -> String {
+    match cursor_state_db_path() {
+        Some(path) => super::file_signature("cursor:state-db", &path),
+        None => "cursor:state-db|missing".to_string(),
+    }
+}
 
 /// Where a native `cursor-agent` install keeps its login.
 fn cursor_agent_auth_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("cursor").join("auth.json"))
-}
-
-fn read_cursor_agent_access_token() -> Option<String> {
-    let path = cursor_agent_auth_path()?;
-    let content = std::fs::read_to_string(path).ok()?;
-    parse_cursor_agent_access_token(&content)
-}
-
-fn read_wsl_cursor_agent_access_token() -> Option<String> {
-    wsl::list_distros().into_iter().find_map(|distro| {
-        wsl::read_file(&distro, WSL_READ_AGENT_AUTH, "Cursor agent credentials")
-            .and_then(|content| parse_cursor_agent_access_token(&content))
-    })
 }
 
 /// The CLI writes `{"accessToken": "<jwt>", "refreshToken": "<jwt>"}`.
@@ -321,41 +305,25 @@ fn cursor_usage_from_summary(response: CursorUsageSummaryResponse) -> Option<Usa
     })
 }
 
-fn non_empty_environment(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn secret_signature(source: &str, value: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{source}|present|{}|{:x}", value.len(), hasher.finish())
-}
-
-fn path_signature(kind: &str, path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_secs())
-                .unwrap_or(0);
-            format!(
-                "{kind}:{}|present|{}|{modified}",
-                path.display(),
-                metadata.len()
-            )
-        }
-        Err(_) => format!("{kind}:{}|missing", path.display()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same JWT builds the same cookie whichever store it came from; only
+    /// the environment may already hold a finished cookie.
+    #[test]
+    fn every_source_yields_the_same_cookie() {
+        let jwt = "header.eyJzdWIiOiJhdXRoMHx1c2VyXzEyMyJ9.signature";
+        let expected = format!("user_123%3A%3A{jwt}");
+        let file = credentials::Source::File(PathBuf::from("auth.json"));
+        assert_eq!(session_cookie(&format!("{{\"accessToken\": \"{jwt}\"}}"), &file).as_deref(), Some(expected.as_str()));
+        let extra = credentials::Source::Extra("cursor:state-db");
+        assert_eq!(session_cookie(&format!("{jwt}\n"), &extra).as_deref(), Some(expected.as_str()));
+        let env = credentials::Source::Env(&[CURSOR_SESSION_TOKEN_ENV]);
+        assert_eq!(session_cookie(&format!("{CURSOR_SESSION_TOKEN_ENV}={jwt}\n"), &env).as_deref(), Some(expected.as_str()));
+        assert_eq!(session_cookie(&format!("{CURSOR_SESSION_TOKEN_ENV}=user_123::{jwt}\n"), &env).as_deref(), Some(expected.as_str()));
+        assert_eq!(session_cookie("{}", &file), None);
+    }
 
     #[test]
     fn extracts_cursor_user_id_from_a_jwt() {

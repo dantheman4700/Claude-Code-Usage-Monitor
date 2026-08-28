@@ -115,7 +115,7 @@ mod wsl;
 struct ProviderPoller {
     id: ProviderId,
     poll: fn() -> Result<UsageData, PollError>,
-    credential_watch: fn(bool) -> CredentialWatchSnapshot,
+    credential_watch: fn() -> CredentialWatchSnapshot,
 }
 
 const PROVIDER_POLLERS: [ProviderPoller; 8] = [
@@ -132,7 +132,7 @@ const PROVIDER_POLLERS: [ProviderPoller; 8] = [
     ProviderPoller {
         id: ProviderId::Antigravity,
         poll: antigravity::poll_antigravity,
-        credential_watch: antigravity_credential_watch_snapshot,
+        credential_watch: antigravity::credential_watch_snapshot,
     },
     ProviderPoller {
         id: ProviderId::OpenCode,
@@ -201,7 +201,7 @@ fn poll_provider(provider: ProviderId) -> Result<UsageData, PollError> {
 /// source -- native and every WSL distro. A sign-in anywhere changes it.
 pub fn credential_watch_snapshot(provider: ProviderId) -> CredentialWatchSnapshot {
     provider_poller(provider)
-        .map(|poller| (poller.credential_watch)(true))
+        .map(|poller| (poller.credential_watch)())
         .unwrap_or_default()
 }
 
@@ -257,10 +257,6 @@ pub(crate) fn spend_allowed(key: &'static str) -> bool {
     }
     last.push((key, now));
     true
-}
-
-fn antigravity_credential_watch_snapshot(all_sources: bool) -> CredentialWatchSnapshot {
-    antigravity::credential_watch_snapshot(all_sources)
 }
 
 fn build_agent() -> Result<ureq::Agent, PollError> {
