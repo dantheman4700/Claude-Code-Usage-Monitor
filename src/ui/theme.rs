@@ -228,18 +228,6 @@ pub(crate) fn selected_menu_fill() -> egui::Color32 {
     egui::Color32::from_rgb(42, 38, 96)
 }
 
-pub(crate) fn helper_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(13, 11, 34)
-}
-
-pub(crate) fn helper_card_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(18, 16, 44)
-}
-
-pub(crate) fn helper_border() -> egui::Color32 {
-    egui::Color32::from_rgb(46, 42, 104)
-}
-
 pub(crate) fn success() -> egui::Color32 {
     egui::Color32::from_rgb(74, 222, 128)
 }
@@ -264,22 +252,6 @@ pub(crate) fn toggle_label() -> egui::Color32 {
     egui::Color32::from_rgb(230, 227, 255)
 }
 
-pub(crate) fn anchor_outline() -> egui::Color32 {
-    egui::Color32::from_rgb(139, 136, 190)
-}
-
-pub(crate) fn anchor_idle_fill() -> egui::Color32 {
-    egui::Color32::from_rgb(24, 21, 58)
-}
-
-pub(crate) fn checkerboard_dark() -> egui::Color32 {
-    egui::Color32::from_gray(72)
-}
-
-pub(crate) fn checkerboard_light() -> egui::Color32 {
-    egui::Color32::from_gray(176)
-}
-
 pub(crate) fn section_surface() -> egui::Color32 {
     egui::Color32::from_rgb(26, 23, 64)
 }
@@ -298,30 +270,6 @@ pub(crate) fn menu_hover() -> egui::Color32 {
 
 pub(crate) fn menu_text() -> egui::Color32 {
     egui::Color32::from_rgb(244, 242, 255)
-}
-
-pub(crate) fn asset_card_selected() -> egui::Color32 {
-    egui::Color32::from_rgb(68, 44, 110)
-}
-
-pub(crate) fn asset_card_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(22, 19, 56)
-}
-
-pub(crate) fn asset_card_border() -> egui::Color32 {
-    egui::Color32::from_rgb(50, 46, 112)
-}
-
-pub(crate) fn asset_preview_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(14, 12, 36)
-}
-
-pub(crate) fn splitter_hover_surface() -> egui::Color32 {
-    egui::Color32::from_rgb(30, 27, 75)
-}
-
-pub(crate) fn splitter_idle() -> egui::Color32 {
-    egui::Color32::from_rgb(66, 62, 128)
 }
 
 pub(crate) fn text() -> egui::Color32 {

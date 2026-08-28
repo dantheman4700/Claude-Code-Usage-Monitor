@@ -182,8 +182,3 @@ pub fn close_existing() -> bool {
     }
 }
 
-pub fn toggle(owner: HWND) {
-    if !close_existing() {
-        show(owner);
-    }
-}

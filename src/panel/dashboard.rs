@@ -24,7 +24,7 @@ const SPARK_HEIGHT: f32 = 28.0;
 const LABEL_COLUMN: f32 = 84.0;
 const ACTIVITY_ROWS: usize = 100;
 
-impl StudioApp {
+impl PanelApp {
     fn dashboard_inputs(&mut self) -> Option<(AppUsageData, Insights, Thresholds, SystemTime)> {
         let now = SystemTime::now();
         let thresholds = Thresholds::from_settings(&self.settings);

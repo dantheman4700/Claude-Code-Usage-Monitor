@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::diagnose;
-use crate::models::{AppUsageData, UsageData, UsageSection};
+use crate::models::{AppUsageData, UsageData};
 use crate::providers::{ProviderId, ProviderSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,42 +283,6 @@ fn parse_datetime_to_unix(s: &str, _fmt: &str) -> Result<u64, ()> {
 
 fn is_leap(y: u64) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
-}
-
-/// Calculate how long until the display text would change
-pub fn time_until_display_change(resets_at: Option<SystemTime>) -> Option<Duration> {
-    let reset = resets_at?;
-    let remaining = reset.duration_since(SystemTime::now()).ok()?;
-    Some(time_until_display_change_from_secs(remaining.as_secs()))
-}
-
-fn time_until_display_change_from_secs(total_secs: u64) -> Duration {
-    let total_mins = total_secs / 60;
-    let total_hours = total_secs / 3600;
-    let total_days = total_secs / 86400;
-
-    let current_bucket_start = if total_days >= 1 {
-        total_days * 86400
-    } else if total_hours >= 1 {
-        total_hours * 3600
-    } else if total_mins >= 1 {
-        total_mins * 60
-    } else {
-        total_secs
-    };
-
-    Duration::from_secs(total_secs.saturating_sub(current_bucket_start) + 1)
-}
-
-/// Returns true if either section has reached "now" (reset time has passed).
-pub fn is_past_reset(data: &UsageData) -> bool {
-    let now = SystemTime::now();
-    let past = |s: &UsageSection| matches!(s.resets_at, Some(t) if now.duration_since(t).is_ok());
-    past(&data.session) || past(&data.weekly)
-}
-
-pub fn app_is_past_reset(data: &AppUsageData) -> bool {
-    data.iter().any(|(_, usage)| is_past_reset(usage))
 }
 
 #[cfg(test)]

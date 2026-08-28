@@ -134,6 +134,7 @@ impl LanguageId {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub struct Strings {
     pub window_title: &'static str,
     pub refresh: &'static str,

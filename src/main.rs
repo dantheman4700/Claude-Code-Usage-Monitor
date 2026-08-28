@@ -2,26 +2,23 @@
 
 mod activity_log;
 mod app_settings;
-mod context_menu;
 mod dashboard;
-mod desktop_compositor;
 mod diagnose;
-mod font_catalog;
 mod insights;
 mod localization;
+mod menu;
 mod models;
 mod native_interop;
+mod panel;
+mod poll;
 mod poller;
 mod providers;
-mod studio_app;
-mod theme;
-mod theme_engine;
-mod theme_package;
+mod state;
+mod tray;
 mod tray_icon;
 mod ui;
 mod updater;
 mod usage_history;
-mod window;
 mod winsqlite;
 
 fn main() {
@@ -34,30 +31,24 @@ fn main() {
         } else {
             diagnose::init()
         };
-        match init_result {
-            Ok(path) => diagnose::log(format!("startup args={args:?} log_path={}", path.display())),
-            Err(error) => {
-                // Logging may not be available yet, but keep startup behavior unchanged.
-                let _ = error;
-            }
+        if let Ok(path) = init_result {
+            diagnose::log(format!("startup args={args:?} log_path={}", path.display()));
         }
     }
 
-    if studio_app::handle_cli_mode(&args) {
+    if panel::handle_cli_mode(&args) {
         return;
     }
-
     if let Some(exit_code) = updater::handle_cli_mode(&args) {
-        if diagnose_enabled {
-            diagnose::log(format!("cli mode exited with code {exit_code}"));
-        }
         std::process::exit(exit_code);
     }
 
-    if diagnose_enabled {
-        diagnose::log("entering window::run");
-    }
-    window::run();
+    // A fresh install opens the panel so the first thing a new user sees is
+    // what the app does, not an empty tray.
+    let fresh_install = !app_settings::settings_path().exists()
+        && !app_settings::legacy_settings_present();
+    let open_panel = fresh_install || args.iter().any(|arg| arg == "--dashboard");
+    tray::run(open_panel);
 }
 
 /// Write what a panic was to a file before the process aborts.
@@ -71,17 +62,10 @@ fn install_crash_hook() {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
-        let message = format!(
-            "[{unix}] Headroom {} panicked: {info}\n",
-            env!("CARGO_PKG_VERSION")
-        );
+        let message = format!("[{unix}] Headroom {} panicked: {info}\n", env!("CARGO_PKG_VERSION"));
         diagnose::log(message.trim_end());
         let path = std::env::temp_dir().join("headroom-crash.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             use std::io::Write;
             let _ = file.write_all(message.as_bytes());
         }

@@ -1,3 +1,4 @@
+use crate::models::UsageSection;
 use super::*;
 
 fn usage_with_session_percent(percentage: f64) -> UsageData {

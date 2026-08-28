@@ -24,21 +24,6 @@ pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
-    #[serde(default, skip_serializing)]
-    pub tray_offset: i32,
-    #[serde(default, skip_serializing)]
-    pub taskbar_index: usize,
-    /// True only when the settings file still contains the pre-theme placement
-    /// fields. While this remains true, ordinary settings saves preserve those
-    /// fields so only the startup migration can consume them.
-    #[serde(skip)]
-    pub legacy_placement_pending: bool,
-    #[serde(default = "default_true", skip_serializing)]
-    pub widget_visible: bool,
-    /// True only while the pre-theme `widget_visible` value still needs to be
-    /// transferred to the main root's Render expression.
-    #[serde(skip)]
-    pub legacy_visibility_pending: bool,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,11 +46,6 @@ pub struct SettingsFile {
     show_fireworks: bool,
     #[serde(default)]
     show_devin: bool,
-    /// Set once the taskbar widget has been hidden on this install. The hide is
-    /// applied to whichever theme is active at the time and then never again,
-    /// so choosing "Show widget" afterwards sticks.
-    #[serde(default)]
-    pub taskbar_widget_retired: bool,
     /// Usage at or above this is shown as a warning.
     #[serde(default = "default_warn_percent")]
     pub warn_percent: u8,
@@ -81,10 +61,6 @@ pub struct SettingsFile {
     /// Cleared once the first-run notice has been dismissed.
     #[serde(default)]
     pub first_run_seen: bool,
-    #[serde(default = "default_true")]
-    pub custom_theme_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_theme_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,11 +74,6 @@ impl Default for SettingsFile {
         // which of the two a caller happens to ask.
         let providers = ProviderSet::default();
         Self {
-            tray_offset: 0,
-            taskbar_index: 0,
-            legacy_placement_pending: false,
-            widget_visible: true,
-            legacy_visibility_pending: false,
             poll_interval_ms: default_poll_interval(),
             language: None,
             last_update_check_unix: None,
@@ -114,24 +85,15 @@ impl Default for SettingsFile {
             show_grok: providers.contains(ProviderId::Grok),
             show_fireworks: providers.contains(ProviderId::Fireworks),
             show_devin: providers.contains(ProviderId::Devin),
-            taskbar_widget_retired: false,
             warn_percent: default_warn_percent(),
             critical_percent: default_critical_percent(),
             history_retention_days: default_history_retention_days(),
             show_unreachable_providers: true,
             first_run_seen: false,
-            custom_theme_enabled: true,
-            active_theme_path: None,
             dashboard_width: None,
             dashboard_height: None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LegacyPlacement {
-    pub tray_offset: i32,
-    pub taskbar_index: usize,
 }
 
 impl SettingsFile {
@@ -150,38 +112,8 @@ impl SettingsFile {
         if self.enabled_providers().is_empty() {
             self.set_enabled_providers(ProviderSet::default());
         }
-        // The widget and Theme Studio are now one system. Keep accepting this
-        // legacy setting so older settings files migrate cleanly.
-        self.custom_theme_enabled = true;
         self.dashboard_width = valid_dashboard_dimension(self.dashboard_width);
         self.dashboard_height = valid_dashboard_dimension(self.dashboard_height);
-    }
-
-    pub fn legacy_placement(&self) -> Option<LegacyPlacement> {
-        self.legacy_placement_pending.then_some(LegacyPlacement {
-            tray_offset: self.tray_offset,
-            taskbar_index: self.taskbar_index,
-        })
-    }
-
-    pub fn consume_legacy_placement(&mut self) -> Option<LegacyPlacement> {
-        let placement = self.legacy_placement()?;
-        self.legacy_placement_pending = false;
-        self.tray_offset = 0;
-        self.taskbar_index = 0;
-        Some(placement)
-    }
-
-    pub fn legacy_widget_visibility(&self) -> Option<bool> {
-        self.legacy_visibility_pending
-            .then_some(self.widget_visible)
-    }
-
-    pub fn consume_legacy_widget_visibility(&mut self) -> Option<bool> {
-        let visible = self.legacy_widget_visibility()?;
-        self.legacy_visibility_pending = false;
-        self.widget_visible = true;
-        Some(visible)
     }
 
     pub fn enabled_providers(&self) -> ProviderSet {
@@ -282,25 +214,20 @@ pub fn migrate_legacy_app_data() -> bool {
         Ok(())
     }
     match copy_tree(&legacy, &current) {
-        Ok(()) => {
-            // The saved theme path inside settings names the old directory;
-            // point it at the copy so the user's theme keeps loading.
-            let mut settings = load_settings();
-            if let Some(path) = settings.active_theme_path.as_deref() {
-                let old_prefix = legacy.to_string_lossy().into_owned();
-                if let Some(rest) = path.strip_prefix(&old_prefix) {
-                    settings.active_theme_path =
-                        Some(format!("{}{rest}", current.to_string_lossy()));
-                    let _ = save_settings(&settings);
-                }
-            }
-            true
-        }
+        Ok(()) => true,
         Err(error) => {
             crate::diagnose::log(format!("unable to migrate legacy app data: {error}"));
             false
         }
     }
+}
+
+/// Whether the pre-Headroom install left a settings file behind.
+pub fn legacy_settings_present() -> bool {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join(LEGACY_APP_DATA_DIRECTORY_NAME).join("settings.json").exists())
+        .unwrap_or(false)
 }
 
 pub fn settings_path() -> PathBuf {
@@ -329,33 +256,11 @@ pub fn save_settings(settings: &SettingsFile) -> Result<(), String> {
 }
 
 fn decode_settings(content: &str) -> Option<SettingsFile> {
-    let value: serde_json::Value = serde_json::from_str(content).ok()?;
-    let legacy_placement_pending = value.as_object().is_some_and(|object| {
-        object.contains_key("tray_offset") || object.contains_key("taskbar_index")
-    });
-    let legacy_visibility_pending = value
-        .as_object()
-        .is_some_and(|object| object.contains_key("widget_visible"));
-    let mut settings: SettingsFile = serde_json::from_value(value).ok()?;
-    settings.legacy_placement_pending = legacy_placement_pending;
-    settings.legacy_visibility_pending = legacy_visibility_pending;
-    Some(settings)
+    serde_json::from_str(content).ok()
 }
 
 fn settings_json(settings: &SettingsFile) -> serde_json::Value {
-    let mut value = serde_json::to_value(settings).unwrap_or_default();
-    if settings.legacy_placement_pending {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("tray_offset".into(), settings.tray_offset.into());
-            object.insert("taskbar_index".into(), settings.taskbar_index.into());
-        }
-    }
-    if settings.legacy_visibility_pending {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("widget_visible".into(), settings.widget_visible.into());
-        }
-    }
-    value
+    serde_json::to_value(settings).unwrap_or_default()
 }
 
 pub fn codex_credits_path() -> PathBuf {
@@ -519,70 +424,6 @@ mod tests {
             settings.enabled_providers(),
             ProviderSet::from_enabled([ProviderId::Claude])
         );
-    }
-
-    #[test]
-    fn settings_always_use_the_theme_widget() {
-        let mut settings = SettingsFile {
-            custom_theme_enabled: false,
-            ..Default::default()
-        };
-        settings.normalize();
-        assert!(settings.custom_theme_enabled);
-    }
-
-    #[test]
-    fn legacy_widget_visibility_is_preserved_until_migration_consumes_it() {
-        let mut settings = decode_settings(r#"{"widget_visible":false}"#).unwrap();
-        assert_eq!(settings.legacy_widget_visibility(), Some(false));
-        assert_eq!(settings_json(&settings)["widget_visible"], false);
-
-        assert_eq!(settings.consume_legacy_widget_visibility(), Some(false));
-        assert_eq!(settings.legacy_widget_visibility(), None);
-        assert!(settings_json(&settings).get("widget_visible").is_none());
-    }
-
-    #[test]
-    fn legacy_placement_is_preserved_until_the_migration_consumes_it() {
-        let mut settings = decode_settings(
-            r#"{
-                "tray_offset": 144,
-                "taskbar_index": 2,
-                "poll_interval_ms": 60000,
-                "show_claude_code": true
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            settings.legacy_placement(),
-            Some(LegacyPlacement {
-                tray_offset: 144,
-                taskbar_index: 2,
-            })
-        );
-        let pending = settings_json(&settings);
-        assert_eq!(pending["tray_offset"], 144);
-        assert_eq!(pending["taskbar_index"], 2);
-
-        settings.consume_legacy_placement();
-        let migrated = settings_json(&settings);
-        assert!(migrated.get("tray_offset").is_none());
-        assert!(migrated.get("taskbar_index").is_none());
-        assert_eq!(migrated["poll_interval_ms"], 60000);
-    }
-
-    #[test]
-    fn modern_settings_do_not_request_legacy_migration() {
-        let settings = decode_settings(
-            r#"{
-                "poll_interval_ms": 900000,
-                "active_theme_path": "migrated-theme.json"
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(settings.legacy_placement(), None);
-        assert_eq!(settings.legacy_widget_visibility(), None);
     }
 
     #[test]

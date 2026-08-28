@@ -132,11 +132,6 @@ impl AppUsageData {
         self.providers.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (ProviderId, &UsageData)> {
-        self.providers
-            .iter()
-            .map(|(provider, usage)| (*provider, usage))
-    }
 }
 
 impl FromIterator<(ProviderId, UsageData)> for AppUsageData {
