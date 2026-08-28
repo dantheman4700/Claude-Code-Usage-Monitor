@@ -250,16 +250,18 @@ const LEGACY_APP_DATA_DIRECTORY_NAME: &str = "ClaudeCodeUsageMonitor";
 
 /// Carry settings, readings and history over from the previous name, once.
 ///
-/// Only when the new directory does not exist yet: a user who has already run
-/// Headroom has newer files there, and the old directory is left untouched
-/// either way so nothing is lost if this goes wrong.
+/// The trigger is the absence of a settings file, not of the directory: the
+/// directory is easy to create by accident -- the panel opening before the
+/// tray, a test run -- and keying on it would silently drop a user's
+/// settings. Files already present are never overwritten, and the old
+/// directory is left untouched, so nothing is lost if this goes wrong.
 pub fn migrate_legacy_app_data() -> bool {
     let root = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let legacy = root.join(LEGACY_APP_DATA_DIRECTORY_NAME);
     let current = app_data_directory();
-    if current.exists() || !legacy.is_dir() {
+    if current.join("settings.json").exists() || !legacy.join("settings.json").exists() {
         return false;
     }
     fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -269,14 +271,27 @@ pub fn migrate_legacy_app_data() -> bool {
             let target = to.join(entry.file_name());
             if entry.file_type()?.is_dir() {
                 copy_tree(&entry.path(), &target)?;
-            } else {
+            } else if !target.exists() {
                 std::fs::copy(entry.path(), target)?;
             }
         }
         Ok(())
     }
     match copy_tree(&legacy, &current) {
-        Ok(()) => true,
+        Ok(()) => {
+            // The saved theme path inside settings names the old directory;
+            // point it at the copy so the user's theme keeps loading.
+            let mut settings = load_settings();
+            if let Some(path) = settings.active_theme_path.as_deref() {
+                let old_prefix = legacy.to_string_lossy().into_owned();
+                if let Some(rest) = path.strip_prefix(&old_prefix) {
+                    settings.active_theme_path =
+                        Some(format!("{}{rest}", current.to_string_lossy()));
+                    let _ = save_settings(&settings);
+                }
+            }
+            true
+        }
         Err(error) => {
             crate::diagnose::log(format!("unable to migrate legacy app data: {error}"));
             false

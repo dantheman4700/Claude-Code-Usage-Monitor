@@ -91,6 +91,19 @@ hardening → 3 carve-out (new tray layer, delete studio/theme) → 4 MSIX +
 listing. Attribution: LICENSE keeps upstream's MIT line; README + About say
 "inspired by Claude Code Usage Monitor by Craig Constable (MIT)".
 
+## Credential sources: native Windows AND WSL for every provider (owner, 2026-08-28)
+
+| provider    | native Windows                                   | WSL (per distro)                                   | status |
+|-------------|--------------------------------------------------|----------------------------------------------------|--------|
+| Claude      | ~/.claude/.credentials.json, desktop token cache | ~/.claude/.credentials.json                        | done   |
+| Codex       | %CODEX_HOME% or ~/.codex/auth.json               | ${CODEX_HOME:-~/.codex}/auth.json                  | done   |
+| Antigravity | credential manager gemini:antigravity            | ~/.gemini/antigravity-cli/antigravity-oauth-token  | done   |
+| Grok        | ~/.grok/auth.json                                | ~/.grok/auth.json                                  | done   |
+| Cursor      | desktop app state.vscdb; cursor-agent auth.json  | ~/.config/cursor/auth.json (cursor-agent)          | TODO   |
+| OpenCode    | env, %APPDATA%/opencode-go, XDG helper configs   | same XDG paths inside the distro                   | TODO   |
+| Fireworks   | env, ~/.claude/.env.fireworks                    | ~/.claude/.env.fireworks                           | done   |
+| Devin       | env, ~/.claude/.env.devin                        | ~/.claude/.env.devin                               | done   |
+
 ## Explicitly NOT in scope for v1.0
 - Cursor/OpenCode/Fireworks/Devin live verification (no credentials here).
 - Grok token refresh (6h expiry) — document as known limitation.

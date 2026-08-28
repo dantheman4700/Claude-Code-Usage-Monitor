@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, parse_iso8601, PollError};
+use super::{build_agent, parse_iso8601, wsl, PollError};
 use crate::diagnose;
 use crate::models::{LimitWindow, ScopedLimit, UsageData, UsageSection};
 
@@ -53,18 +53,66 @@ pub(super) fn credential_watch_snapshot(_all_sources: bool) -> Vec<String> {
     let database = cursor_state_db_path()
         .map(|path| path_signature("database", &path))
         .unwrap_or_else(|| "database|missing".into());
-    vec![environment, database]
+    let agent = cursor_agent_auth_path()
+        .map(|path| path_signature("agent", &path))
+        .unwrap_or_else(|| "agent|missing".into());
+    let mut signatures = vec![environment, database, agent];
+    if _all_sources {
+        for distro in wsl::list_distros() {
+            if let Some(signature) =
+                wsl::path_watch_signature(&distro, "cursor-agent-wsl", WSL_WATCH_AGENT_AUTH)
+            {
+                signatures.push(signature);
+            }
+        }
+    }
+    signatures
 }
 
 /// Resolve a Cursor dashboard session cookie. An explicit environment value
-/// takes priority over the access token persisted by Cursor itself.
+/// takes priority; then the desktop app's own token; then the token the
+/// `cursor-agent` CLI keeps, on Windows or inside a WSL distro. The CLI's
+/// token is the same session JWT the desktop app stores, so it builds the
+/// same cookie.
 fn read_cursor_session_cookie() -> Option<String> {
     if let Some(token) = non_empty_environment(CURSOR_SESSION_TOKEN_ENV) {
         return normalize_cursor_session_cookie(&token);
     }
 
-    let access_token = read_cursor_access_token_from_state_db()?;
+    let access_token = read_cursor_access_token_from_state_db()
+        .or_else(read_cursor_agent_access_token)
+        .or_else(read_wsl_cursor_agent_access_token)?;
     cursor_cookie_from_access_token(&access_token)
+}
+
+/// Quote-free on purpose -- see [`wsl::read_file`].
+const WSL_READ_AGENT_AUTH: &str = "cat ~/.config/cursor/auth.json";
+const WSL_WATCH_AGENT_AUTH: &str = "if [ -f ~/.config/cursor/auth.json ]; then \
+     stat -c 'present|%s|%Y' ~/.config/cursor/auth.json; else echo missing; fi";
+
+/// Where a native `cursor-agent` install keeps its login.
+fn cursor_agent_auth_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config").join("cursor").join("auth.json"))
+}
+
+fn read_cursor_agent_access_token() -> Option<String> {
+    let path = cursor_agent_auth_path()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    parse_cursor_agent_access_token(&content)
+}
+
+fn read_wsl_cursor_agent_access_token() -> Option<String> {
+    wsl::list_distros().into_iter().find_map(|distro| {
+        wsl::read_file(&distro, WSL_READ_AGENT_AUTH, "Cursor agent credentials")
+            .and_then(|content| parse_cursor_agent_access_token(&content))
+    })
+}
+
+/// The CLI writes `{"accessToken": "<jwt>", "refreshToken": "<jwt>"}`.
+fn parse_cursor_agent_access_token(content: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    let token = value.get("accessToken")?.as_str()?.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn normalize_cursor_session_cookie(token: &str) -> Option<String> {
@@ -337,5 +385,34 @@ mod tests {
         );
         assert_eq!(data.session.percentage, 0.0, "Cursor bills no session window");
         assert_eq!(data.weekly.percentage, 0.0, "nor a weekly one");
+    }
+
+    /// The CLI's auth store is the same session JWT the desktop app keeps, so
+    /// it builds the same cookie: user id from the JWT's `sub`, then the token.
+    #[test]
+    fn a_cursor_agent_token_becomes_a_session_cookie() {
+        let payload = base64_url_encode(br#"{"sub":"auth0|user_01ABC","type":"session"}"#);
+        let jwt = format!("eyJhbGciOiJIUzI1NiJ9.{payload}.sig");
+        let content = format!(r#"{{"accessToken": "{jwt}", "refreshToken": "x.y.z"}}"#);
+        let token = parse_cursor_agent_access_token(&content).expect("token");
+        assert_eq!(token, jwt);
+        let cookie = cursor_cookie_from_access_token(&token).expect("cookie");
+        assert!(cookie.starts_with("user_01ABC%3A%3A"), "{cookie}");
+        assert_eq!(parse_cursor_agent_access_token("{}"), None);
+    }
+
+    fn base64_url_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut buffer = [0u8; 3];
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            let n = u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+            let count = chunk.len() + 1;
+            for index in 0..count {
+                out.push(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize] as char);
+            }
+        }
+        out
     }
 }

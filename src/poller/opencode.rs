@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::{build_agent, PollError};
+use super::{build_agent, PollError, wsl};
 use crate::diagnose;
 use crate::models::{UsageData, UsageSection};
 
@@ -129,11 +129,40 @@ fn read_dashboard_credentials() -> Option<DashboardCredentials> {
     dashboard_config_paths()
         .into_iter()
         .find_map(|path| read_dashboard_config(&path))
+        .or_else(read_wsl_dashboard_config)
+}
+
+/// The same helper-config files, inside each WSL distro. Quote-free scripts
+/// on purpose -- see [`wsl::read_file`]. UNVERIFIED against a live install:
+/// the paths mirror the native list exactly, but no OpenCode Go setup exists
+/// on this machine to exercise them.
+const WSL_CONFIG_SCRIPTS: &[&str] = &[
+    "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json",
+    "cat ${XDG_CONFIG_HOME:-$HOME/.config}/opencode-quota/opencode-go.json",
+];
+
+fn read_wsl_dashboard_config() -> Option<DashboardCredentials> {
+    for distro in wsl::list_distros() {
+        for script in WSL_CONFIG_SCRIPTS {
+            if let Some(content) = wsl::read_file(&distro, script, "OpenCode config") {
+                if let Some(credentials) =
+                    dashboard_credentials_from_content(&content, &format!("wsl:{distro}"))
+                {
+                    return Some(credentials);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn read_dashboard_config(path: &Path) -> Option<DashboardCredentials> {
     let content = std::fs::read_to_string(path).ok()?;
-    let config: DashboardConfig = serde_json::from_str(&content).ok()?;
+    dashboard_credentials_from_content(&content, &path.display().to_string())
+}
+
+fn dashboard_credentials_from_content(content: &str, source: &str) -> Option<DashboardCredentials> {
+    let config: DashboardConfig = serde_json::from_str(content).ok()?;
     let workspace_id = config.workspace_id.trim().to_string();
     let auth_cookie = config.auth_cookie.trim().to_string();
     if !valid_workspace_id(&workspace_id) || !valid_cookie(&auth_cookie) {
@@ -142,7 +171,7 @@ fn read_dashboard_config(path: &Path) -> Option<DashboardCredentials> {
     Some(DashboardCredentials {
         workspace_id,
         auth_cookie,
-        source: path.display().to_string(),
+        source: source.to_string(),
     })
 }
 
