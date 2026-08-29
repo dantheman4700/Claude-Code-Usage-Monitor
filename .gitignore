@@ -39,3 +39,4 @@ dist/staged/
 # Conductor run state (contracts are recorded in tmp/conductor/plans)
 .claude/state/
 tmp/conductor/council/debt-diff.patch
+tmp/conductor/council/wave-abc-diff.patch

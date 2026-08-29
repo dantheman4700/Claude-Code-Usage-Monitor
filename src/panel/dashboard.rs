@@ -174,7 +174,9 @@ impl PanelApp {
                     FailureKind::NotSignedIn => 3,
                     _ => 2,
                 },
-                (None, None) => 4,
+                // No report yet: the first round has not finished. Shown,
+                // not folded away as "not installed".
+                (None, None) => 2,
             }
         };
         let mut order: Vec<(ProviderId, u8, Severity, f64)> = ProviderId::ALL
@@ -249,7 +251,9 @@ impl PanelApp {
                 .iter()
                 .map(|provider| (*provider, self.failures.get(provider)))
                 .collect();
-            not_installed_card(ui, &entries, language);
+            if let Some(provider) = not_installed_card(ui, &entries, language) {
+                self.request_retry(Some(provider));
+            }
         }
         if !drew_any {
             ui.label(egui::RichText::new(language.text("Nothing is reporting.")).color(muted()));
@@ -438,7 +442,8 @@ fn headline(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: L
 
 /// The providers with nothing on this PC, on one card: their names, and
 /// (opened) where Headroom looked for each and what to run.
-fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&ProviderFailure>)], language: LanguageId) {
+fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&ProviderFailure>)], language: LanguageId) -> Option<ProviderId> {
+    let mut retry = None;
     egui::Frame::new()
         .fill(section_surface())
         .stroke(egui::Stroke::new(1.0, section_border()))
@@ -456,8 +461,14 @@ fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&Provide
             .show(ui, |ui| {
                 for (provider, failure) in entries {
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new(language.text(provider_name(*provider))).strong().size(12.5));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(language.text(provider_name(*provider))).strong().size(12.5));
+                        if ui.add(egui::Button::new(language.text("Retry")).small()).clicked() {
+                            retry = Some(*provider);
+                        }
+                    });
                     if let Some(failure) = failure {
+                        ui.label(egui::RichText::new(&failure.summary).size(11.5));
                         if !failure.hint.is_empty() {
                             ui.label(egui::RichText::new(&failure.hint).color(muted()).size(11.5));
                         }
@@ -475,6 +486,7 @@ fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&Provide
             });
         });
     ui.add_space(8.0);
+    retry
 }
 
 /// One provider. Returns whether the header was clicked to open or close it.
@@ -698,6 +710,7 @@ fn status_chip(
         None => match failure.map(|failure| failure.kind) {
             Some(FailureKind::NotInstalled) => (language.text("not installed"), muted()),
             Some(FailureKind::NotSignedIn) => (language.text("not signed in"), warning()),
+            Some(FailureKind::Unreadable) => (language.text("could not read"), danger()),
             Some(FailureKind::Expired) => (language.text("login expired"), warning()),
             Some(FailureKind::Rejected) => (language.text("login rejected"), danger()),
             Some(FailureKind::RateLimited) => (language.text("rate limited"), warning()),

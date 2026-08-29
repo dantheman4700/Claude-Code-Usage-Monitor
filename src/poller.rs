@@ -265,10 +265,17 @@ fn poll_provider(provider: ProviderId) -> Result<UsageData, PollError> {
     // "sign in" one.
     match result {
         Err(PollError::NoCredentials) if wsl::took_timeout() => {
-            diagnose::log(format!(
-                "{} credentials unreadable because a WSL probe timed out; will retry soon",
-                provider.descriptor().display_name
-            ));
+            let name = provider.descriptor().display_name;
+            diagnose::log(format!("{name} credentials unreadable because a WSL probe timed out; will retry soon"));
+            // The card must say the same thing the scheduler acts on.
+            let looked = take_last_failure().map(|report| report.looked).unwrap_or_default();
+            set_last_failure(ProviderFailure {
+                kind: FailureKind::Offline,
+                summary: format!("WSL did not answer in time while looking for {name}'s login."),
+                looked,
+                hint: "Nothing to do unless WSL is stuck; Headroom retries in a couple of minutes.".to_string(),
+                at_unix: now_unix(),
+            });
             Err(PollError::RequestFailed)
         }
         other => other,
@@ -365,7 +372,10 @@ pub(crate) fn spend_allowed(key: &'static str) -> bool {
 }
 
 fn build_agent() -> Result<Http, PollError> {
-    let tls = native_tls::TlsConnector::new().map_err(|_| PollError::RequestFailed)?;
+    let tls = native_tls::TlsConnector::new().map_err(|error| {
+        TRANSPORT.with(|cell| *cell.borrow_mut() = Some(Transport::Offline(format!("TLS unavailable: {error}"))));
+        PollError::RequestFailed
+    })?;
     Ok(Http(
         ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(30))

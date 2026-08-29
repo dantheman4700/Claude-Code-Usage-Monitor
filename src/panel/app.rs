@@ -40,10 +40,14 @@ pub(crate) struct PanelApp {
     /// a newer build): what is in memory is a default, and saving it would
     /// overwrite the real file.
     settings_writable: bool,
-    /// Distros found on the machine, fetched once the settings page needs them.
+    /// Distros found on the machine, detected on a thread the first time the
+    /// settings page asks (wsl.exe can take seconds when WSL is cold).
     pub wsl_distros_detected: Option<Vec<String>>,
-    /// Edit buffers for the extra-paths boxes, keyed by provider key.
+    pub wsl_distros_pending: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    /// Edit buffers for the extra-paths boxes and the WSL user boxes, so
+    /// typing survives across frames; committed to settings as it changes.
     pub credential_path_text: std::collections::BTreeMap<String, String>,
+    pub wsl_user_text: std::collections::BTreeMap<String, String>,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
     /// Why each enabled provider without a reading has none.
@@ -125,6 +129,7 @@ impl PanelApp {
         let loaded = app_settings::load_settings_if_readable();
         let settings_writable = loaded.is_some();
         let settings = loaded.unwrap_or_default();
+        let wsl_user_text = settings.wsl_users.clone();
         let credential_path_text: std::collections::BTreeMap<String, String> = settings
             .credential_paths
             .iter()
@@ -146,7 +151,9 @@ impl PanelApp {
             settings_error: None,
             settings_writable,
             wsl_distros_detected: None,
+            wsl_distros_pending: None,
             credential_path_text,
+            wsl_user_text,
             failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),
@@ -210,6 +217,31 @@ impl PanelApp {
         self.retry_pressed.insert(target, Instant::now());
     }
 
+    /// The distros on this machine, or `None` while a detection thread runs.
+    pub(crate) fn detected_distros(&mut self) -> Option<Vec<String>> {
+        if let Some(found) = &self.wsl_distros_detected {
+            return Some(found.clone());
+        }
+        match &self.wsl_distros_pending {
+            None => {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = sender.send(crate::poller::detected_wsl_distros());
+                });
+                self.wsl_distros_pending = Some(receiver);
+                None
+            }
+            Some(receiver) => match receiver.try_recv() {
+                Ok(found) => {
+                    self.wsl_distros_detected = Some(found.clone());
+                    self.wsl_distros_pending = None;
+                    Some(found)
+                }
+                Err(_) => None,
+            },
+        }
+    }
+
     /// Seconds left on a retry button's cooldown, if any.
     pub(crate) fn retry_cooldown_left(&self, target: Option<ProviderId>) -> Option<u64> {
         let cooldown = match target {
@@ -247,9 +279,10 @@ impl PanelApp {
 
     fn update_usage_cache(&mut self, cache: UsageCache) {
         let poll_ok = cache.poll_ok;
-        let changed = self.usage.as_ref() != Some(&cache.data) || self.usage_poll_ok != poll_ok;
+        let failures = failures_by_provider(&cache);
+        let changed = self.usage.as_ref() != Some(&cache.data) || self.usage_poll_ok != poll_ok || self.failures != failures;
         if changed {
-            self.failures = failures_by_provider(&cache);
+            self.failures = failures;
             self.usage = Some(cache.data);
             self.usage_poll_ok = poll_ok;
             self.usage_has_error = !poll_ok;
@@ -345,6 +378,13 @@ impl eframe::App for PanelApp {
         };
         settings.dashboard_width = self.settings.dashboard_width;
         settings.dashboard_height = self.settings.dashboard_height;
+        // Location edits are committed as typed; a box that never lost
+        // focus before the window closed is still in these fields.
+        if self.settings_writable {
+            settings.credential_paths = self.settings.credential_paths.clone();
+            settings.wsl_distros = self.settings.wsl_distros.clone();
+            settings.wsl_users = self.settings.wsl_users.clone();
+        }
         if let Err(error) = app_settings::save_settings(&settings) {
             crate::diagnose::log(format!("panel size save failed: {error}"));
         }

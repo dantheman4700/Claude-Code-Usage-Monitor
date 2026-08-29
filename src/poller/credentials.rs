@@ -284,41 +284,57 @@ fn native_sources(spec: &Spec) -> Vec<Source> {
         .collect()
 }
 
+/// What reading a source produced. "Not there" and "there but could not be
+/// read" are different diagnoses: one means install or sign in, the other
+/// means permissions, a wrong WSL user, or a distro that did not start.
+pub enum Read {
+    Missing,
+    Unreadable(String),
+    Content(String),
+}
+
 /// A source's raw content. Environment groups arrive as `NAME=value` lines,
 /// the same shape as an env file, so one parser serves both.
-pub fn read(spec: &Spec, source: &Source) -> Option<String> {
+pub fn read(spec: &Spec, source: &Source) -> Read {
     match source {
         Source::Env(vars) => {
             let mut content = String::new();
             for var in *vars {
-                let value = non_empty_environment(var)?;
+                let Some(value) = non_empty_environment(var) else {
+                    return Read::Missing;
+                };
                 content.push_str(var);
                 content.push('=');
                 content.push_str(&value);
                 content.push('\n');
             }
-            Some(content)
+            Read::Content(content)
         }
         Source::File(path) => match std::fs::read_to_string(path) {
-            Ok(content) => Some(content),
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::NotFound && diagnose::is_enabled() {
-                    diagnose::log_error(&format!("unable to read {}", path.display()), error);
-                }
-                None
-            }
+            Ok(content) => Read::Content(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Missing,
+            Err(error) => Read::Unreadable(error.kind().to_string()),
         },
-        Source::Extra(label) => spec
+        Source::Extra(label) => match spec
             .native_extra
             .iter()
             .find(|extra| extra.label == *label)
-            .and_then(|extra| (extra.read)()),
-        Source::Wsl { distro, path } => wsl::read_file(
+            .and_then(|extra| (extra.read)())
+        {
+            Some(content) => Read::Content(content),
+            None => Read::Missing,
+        },
+        Source::Wsl { distro, path } => match wsl::read_file(
             distro,
             config().user_for(distro).as_deref(),
-            &format!("cat {path}"),
+            &format!("cat {}", shell_path(path)),
             spec.provider.descriptor().display_name,
-        ),
+        ) {
+            Ok(content) => Read::Content(content),
+            Err(wsl::ReadError::Missing) => Read::Missing,
+            Err(wsl::ReadError::TimedOut) => Read::Unreadable("WSL did not answer in time".to_string()),
+            Err(wsl::ReadError::Failed(status)) => Read::Unreadable(format!("wsl.exe failed ({status})")),
+        },
     }
 }
 
@@ -350,11 +366,18 @@ pub(super) struct Trail {
     pub looked: Vec<String>,
     /// How many sources existed at all (a file, a store, a set variable).
     pub stores_found: usize,
+    /// How many existed but could not be read.
+    pub unreadable: usize,
 }
 
 fn failure_report(spec: &Spec, error: PollError, trail: &Trail) -> ProviderFailure {
     let name = spec.provider.descriptor().display_name;
     let (kind, summary, hint) = match error {
+        PollError::NoCredentials if trail.stores_found == 0 && trail.unreadable > 0 => (
+            FailureKind::Unreadable,
+            format!("A place {name} keeps its login could not be read."),
+            "Check permissions, the WSL user in Settings, or whether the distro starts.".to_string(),
+        ),
         PollError::NoCredentials if trail.stores_found == 0 => (
             FailureKind::NotInstalled,
             format!("No {name} login found on this PC or in WSL."),
@@ -395,7 +418,7 @@ fn failure_report(spec: &Spec, error: PollError, trail: &Trail) -> ProviderFailu
 /// The loop itself, over any sources, so it can be tested without a disk.
 pub(super) fn poll_sources(
     sources: impl Iterator<Item = Source>,
-    mut read: impl FnMut(&Source) -> Option<String>,
+    mut read: impl FnMut(&Source) -> Read,
     attempt: impl Fn(&str, &Source) -> Result<UsageData, PollError>,
     mut refresh: impl FnMut(&Source) -> bool,
     name: &str,
@@ -403,9 +426,17 @@ pub(super) fn poll_sources(
 ) -> Result<UsageData, PollError> {
     let mut credential_error: Option<PollError> = None;
     for source in sources {
-        let Some(content) = read(&source) else {
-            trail.looked.push(format!("{source} — not found"));
-            continue;
+        let content = match read(&source) {
+            Read::Content(content) => content,
+            Read::Missing => {
+                trail.looked.push(format!("{source} — not found"));
+                continue;
+            }
+            Read::Unreadable(why) => {
+                trail.looked.push(format!("{source} — could not be read ({why})"));
+                trail.unreadable += 1;
+                continue;
+            }
         };
         trail.stores_found += 1;
         let error = match attempt(&content, &source) {
@@ -438,7 +469,7 @@ pub(super) fn poll_sources(
         // reported as the rejection, which is what it was.
         let mut error = error;
         if refresh(&source) {
-            if let Some(again) = read(&source) {
+            if let Read::Content(again) = read(&source) {
                 match attempt(&again, &source) {
                     Ok(usage) => return Ok(usage),
                     Err(PollError::NoCredentials) => {}
@@ -558,7 +589,65 @@ pub fn watch_snapshot(spec: &Spec) -> Vec<String> {
 }
 
 fn watch_script(path: &str) -> String {
+    let path = shell_path(path);
     format!("if [ -f {path} ]; then stat -c 'present|%s|%Y' {path}; else echo missing; fi")
+}
+
+/// A path as exactly one shell word, with only two expansions ever allowed:
+/// a leading `~/` or `$HOME/`, and the shipped `${VAR:-$HOME/...}` idiom.
+///
+/// The shipped path expressions are made of path characters only and go
+/// bare. Anything else -- a user's own path -- is single-quoted, which the
+/// wsl.exe round trip preserves (the `stat -c '...'` scripts prove it) and
+/// which expands nothing; a `~/` or `$HOME/` prefix stays outside the quotes
+/// so it still expands. A `$`, `;`, `(` or space inside a user path is
+/// therefore never seen by the shell as anything but a path character.
+fn shell_path(path: &str) -> String {
+    if is_shipped_path_expression(path) {
+        return path.to_string();
+    }
+    let (prefix, rest) = if let Some(rest) = path.strip_prefix("~/") {
+        ("~/", rest)
+    } else if let Some(rest) = path.strip_prefix("$HOME/") {
+        ("$HOME/", rest)
+    } else {
+        ("", path)
+    };
+    if rest.is_empty() {
+        return prefix.trim_end_matches('/').to_string();
+    }
+    format!("{prefix}'{}'", rest.replace('\'', "'\\''"))
+}
+
+/// Path characters plus the `${NAME:-$HOME/...}` idiom, nothing else: the
+/// shape of every path expression a provider ships.
+fn is_shipped_path_expression(path: &str) -> bool {
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '~');
+    let mut rest = path;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("$HOME") {
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("${") {
+            // ${NAME:-default}
+            let Some(close) = after.find('}') else { return false };
+            let inner = &after[..close];
+            let Some((name, default)) = inner.split_once(":-") else { return false };
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                return false;
+            }
+            if !is_shipped_path_expression(default) {
+                return false;
+            }
+            rest = &after[close + 1..];
+        } else {
+            let c = rest.chars().next().unwrap();
+            if !plain(c) {
+                return false;
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    true
 }
 
 /// An environment variable, trimmed, `None` when unset or blank.
@@ -649,7 +738,7 @@ mod tests {
         let contents: HashMap<Source, &str> = [(file("native"), "stale"), (wsl("~/x"), "fresh")].into();
         let result = poll_sources(
             [file("native"), wsl("~/x")].into_iter(),
-            |source| contents.get(source).map(|c| c.to_string()),
+            |source| contents.get(source).map(|c| Read::Content(c.to_string())).unwrap_or(Read::Missing),
             |content, _| if content == "fresh" { Ok(UsageData::default()) } else { Err(PollError::AuthRequired) },
             |_| false,
             "test",
@@ -666,7 +755,7 @@ mod tests {
             [file("native"), wsl("~/x")].into_iter(),
             |source| {
                 visited.borrow_mut().push(source.to_string());
-                Some("token".into())
+                Read::Content("token".into())
             },
             |_, _| Err(PollError::RequestFailed),
             |_| false,
@@ -684,7 +773,7 @@ mod tests {
         let attempts = RefCell::new(0);
         let result = poll_sources(
             [file("native")].into_iter(),
-            |_| Some(if *refreshed.borrow() > 0 { "renewed".to_string() } else { "old".to_string() }),
+            |_| Read::Content(if *refreshed.borrow() > 0 { "renewed".to_string() } else { "old".to_string() }),
             |content, _| {
                 *attempts.borrow_mut() += 1;
                 if content == "renewed" { Ok(UsageData::default()) } else { Err(PollError::AuthRequired) }
@@ -703,20 +792,20 @@ mod tests {
 
     #[test]
     fn end_states_say_what_was_found() {
-        let none = poll_sources([file("a")].into_iter(), |_| None, |_, _| unreachable!(), |_| false, "test", &mut Trail::default());
+        let none = poll_sources([file("a")].into_iter(), |_| Read::Missing, |_, _| unreachable!(), |_| false, "test", &mut Trail::default());
         assert_eq!(none, Err(PollError::NoCredentials));
-        let unparseable = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::NoCredentials), |_| false, "test", &mut Trail::default());
+        let unparseable = poll_sources([file("a")].into_iter(), |_| Read::Content("x".into()), |_, _| Err(PollError::NoCredentials), |_| false, "test", &mut Trail::default());
         assert_eq!(unparseable, Err(PollError::NoCredentials));
         let expired_then_rejected = poll_sources(
             [file("a"), file("b")].into_iter(),
-            |_| Some("x".into()),
+            |_| Read::Content("x".into()),
             |_, source| Err(if *source == file("a") { PollError::TokenExpired } else { PollError::AuthRequired }),
             |_| false,
             "test",
             &mut Trail::default(),
         );
         assert_eq!(expired_then_rejected, Err(PollError::AuthRequired));
-        let only_expired = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::TokenExpired), |_| false, "test", &mut Trail::default());
+        let only_expired = poll_sources([file("a")].into_iter(), |_| Read::Content("x".into()), |_, _| Err(PollError::TokenExpired), |_| false, "test", &mut Trail::default());
         assert_eq!(only_expired, Err(PollError::TokenExpired));
     }
 
@@ -727,7 +816,7 @@ mod tests {
         let first = RefCell::new(true);
         let result = poll_sources(
             [file("a")].into_iter(),
-            |_| Some("x".into()),
+            |_| Read::Content("x".into()),
             |_, _| {
                 if first.replace(false) { Err(PollError::AuthRequired) } else { Err(PollError::RequestFailed) }
             },
@@ -749,7 +838,7 @@ mod tests {
             [file("a"), file("b")].into_iter(),
             |_| {
                 *visited.borrow_mut() += 1;
-                Some("x".into())
+                Read::Content("x".into())
             },
             |_, _| {
                 *calls.borrow_mut() += 1;
@@ -764,7 +853,7 @@ mod tests {
         let calls = RefCell::new(0);
         let upgraded = poll_sources(
             [file("a")].into_iter(),
-            |_| Some("x".into()),
+            |_| Read::Content("x".into()),
             |_, _| {
                 *calls.borrow_mut() += 1;
                 Err(if *calls.borrow() == 1 { PollError::TokenExpired } else { PollError::AuthRequired })
@@ -782,7 +871,7 @@ mod tests {
     fn a_later_transient_failure_keeps_an_earlier_rejection() {
         let result = poll_sources(
             [file("a"), file("b")].into_iter(),
-            |_| Some("x".into()),
+            |_| Read::Content("x".into()),
             |_, source| Err(if *source == file("a") { PollError::AuthRequired } else { PollError::RequestFailed }),
             |_| false,
             "test",
@@ -818,13 +907,13 @@ mod tests {
     #[test]
     fn the_trail_distinguishes_missing_from_empty() {
         let mut trail = Trail::default();
-        let _ = poll_sources([file("a"), file("b")].into_iter(), |_| None, |_, _| unreachable!(), |_| false, "test", &mut trail);
+        let _ = poll_sources([file("a"), file("b")].into_iter(), |_| Read::Missing, |_, _| unreachable!(), |_| false, "test", &mut trail);
         assert_eq!(trail.stores_found, 0);
         assert_eq!(trail.looked, vec!["file a — not found", "file b — not found"]);
         let mut trail = Trail::default();
         let _ = poll_sources(
             [file("a")].into_iter(),
-            |_| Some("{}".into()),
+            |_| Read::Content("{}".into()),
             |_, _| Err(PollError::NoCredentials),
             |_| false,
             "test",
@@ -832,6 +921,10 @@ mod tests {
         );
         assert_eq!(trail.stores_found, 1);
         assert_eq!(trail.looked, vec!["file a — found, but no login in it"]);
+        let mut trail = Trail::default();
+        let _ = poll_sources([file("a")].into_iter(), |_| Read::Unreadable("PermissionDenied".into()), |_, _| unreachable!(), |_| false, "test", &mut trail);
+        assert_eq!(trail.unreadable, 1);
+        assert_eq!(trail.looked, vec!["file a — could not be read (PermissionDenied)"]);
     }
 
     #[test]
@@ -840,6 +933,23 @@ mod tests {
         assert_eq!(env_value("DEVIN_API_KEY='apk'\nDEVIN_ACU_ALLOWANCE = 250\n", "DEVIN_ACU_ALLOWANCE").as_deref(), Some("250"));
         assert_eq!(env_value("OTHER=1\n", "FIREWORKS_API_KEY"), None);
         assert_eq!(env_value("FIREWORKS_API_KEY=\n", "FIREWORKS_API_KEY"), None);
+    }
+
+    #[test]
+    fn user_paths_are_one_shell_word_and_expand_nothing() {
+        // Shipped shapes go bare.
+        assert_eq!(shell_path("~/.codex/auth.json"), "~/.codex/auth.json");
+        assert_eq!(shell_path("${CODEX_HOME:-$HOME/.codex}/auth.json"), "${CODEX_HOME:-$HOME/.codex}/auth.json");
+        assert_eq!(shell_path("${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json"), "${XDG_CONFIG_HOME:-$HOME/.config}/opencode-bar/opencode-go.json");
+        // Anything else is quoted; only a leading ~/ or $HOME/ expands.
+        assert_eq!(shell_path("/opt/my tools/auth.json"), "'/opt/my tools/auth.json'");
+        assert_eq!(shell_path("/opt/x;rm -rf /"), "'/opt/x;rm -rf /'");
+        assert_eq!(shell_path("$HOME/x;touch /tmp/pwned"), "$HOME/'x;touch /tmp/pwned'");
+        assert_eq!(shell_path("~/x$(id)/a"), "~/'x$(id)/a'");
+        assert_eq!(shell_path("$HOME$(id)"), "'$HOME$(id)'");
+        assert_eq!(shell_path("${EVIL:-$(id)}/a"), "'${EVIL:-$(id)}/a'");
+        assert_eq!(shell_path("/opt/it's/auth.json"), "'/opt/it'\\''s/auth.json'");
+        assert!(watch_script("/opt/my tools/a").contains("-f '/opt/my tools/a' "));
     }
 
     #[test]

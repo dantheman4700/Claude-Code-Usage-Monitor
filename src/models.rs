@@ -121,6 +121,9 @@ pub enum FailureKind {
     NotInstalled,
     /// A credential store exists but holds no usable login.
     NotSignedIn,
+    /// A place to look exists but could not be read: permissions, a wrong
+    /// WSL user, a distro that did not start.
+    Unreadable,
     /// The saved login has passed its own expiry.
     Expired,
     /// The provider answered 401 to the saved login.

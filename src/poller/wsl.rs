@@ -76,9 +76,14 @@ pub(super) fn home_dirs_if_root(distro: &str) -> Vec<String> {
     }
     // Quote-free, variable-free: see read_file. `id -u` first, then the
     // homes, one per line.
-    let dirs = read_file(distro, None, "id -u; ls -d /home/*/", "home scan")
-        .map(|output| parse_home_scan(&output))
-        .unwrap_or_default();
+    let dirs = match read_file(distro, None, "id -u; ls -d /home/*/", "home scan") {
+        Ok(output) => parse_home_scan(&output),
+        // `ls` exits 1 for an empty /home; the uid line still came through.
+        Err(ReadError::Missing) => Vec::new(),
+        // A timeout or a distro that would not start is not an answer; ask
+        // again next round rather than remembering "no homes" for ten minutes.
+        Err(_) => return Vec::new(),
+    };
     if let Ok(mut homes) = HOMES.lock() {
         homes
             .get_or_insert_with(Default::default)
@@ -96,6 +101,7 @@ fn parse_home_scan(output: &str) -> Vec<String> {
     lines
         .filter(|line| line.starts_with("/home/"))
         .map(|line| line.trim_end_matches('/').to_string())
+        .filter(|home| !home.ends_with("/lost+found"))
         .collect()
 }
 
@@ -163,7 +169,18 @@ fn wsl_command(distro: &str, user: Option<&str>) -> Command {
 /// shell expands `$var` and strips escaped quotes first. `~` and
 /// `${VAR:-default}` survive the round trip; shell locals and embedded double
 /// quotes do not.
-pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &str) -> Option<String> {
+/// Why a read produced nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ReadError {
+    /// The command reported nothing to read (exit 1: no such file, or a
+    /// permission it does not have).
+    Missing,
+    TimedOut,
+    /// wsl.exe itself failed: the distro did not start, a bad user, etc.
+    Failed(String),
+}
+
+pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &str) -> Result<String, ReadError> {
     let Some(output) = run_with_timeout(
         wsl_command(distro, user)
             .arg("--")
@@ -182,18 +199,23 @@ pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &s
             "WSL {what} probe timed out after {}s in distro {distro}",
             WSL_TIMEOUT.as_secs()
         ));
-        return None;
+        return Err(ReadError::TimedOut);
     };
 
     if !output.status.success() {
+        // `cat` says 1 for a file it cannot open; wsl.exe says other things
+        // (0xFFFFFFFF and friends) when the distro or user is the problem.
+        if output.status.code() == Some(1) {
+            return Err(ReadError::Missing);
+        }
         diagnose::log(format!(
             "WSL {what} probe failed for distro {distro} with status {}",
             output.status
         ));
-        return None;
+        return Err(ReadError::Failed(output.status.to_string()));
     }
 
-    String::from_utf8(output.stdout).ok()
+    String::from_utf8(output.stdout).map_err(|_| ReadError::Failed("not UTF-8".to_string()))
 }
 
 /// A cheap fingerprint of a path inside `distro`, used to notice that
@@ -371,7 +393,7 @@ mod home_scan_tests {
 
     #[test]
     fn only_a_root_default_yields_homes() {
-        assert_eq!(parse_home_scan("0\n/home/alice/\n/home/bob/\n"), vec!["/home/alice", "/home/bob"]);
+        assert_eq!(parse_home_scan("0\n/home/alice/\n/home/bob/\n/home/lost+found/\n"), vec!["/home/alice", "/home/bob"]);
         assert!(parse_home_scan("1000\n/home/alice/\n").is_empty());
         assert!(parse_home_scan("0\n").is_empty());
         assert!(parse_home_scan("").is_empty());

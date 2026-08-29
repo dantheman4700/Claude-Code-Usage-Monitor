@@ -135,17 +135,19 @@ impl PanelApp {
                 );
                 ui.add_space(6.0);
                 // WSL: which distros, and as which user.
-                let detected = self
-                    .wsl_distros_detected
-                    .get_or_insert_with(crate::poller::detected_wsl_distros)
-                    .clone();
-                if detected.is_empty() {
+                let detected = self.detected_distros();
+                if detected.is_none() {
+                    ui.label(egui::RichText::new(language.text("Looking for WSL distros…")).color(crate::ui::theme::muted()).size(11.5));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                }
+                let detected = detected.unwrap_or_default();
+                if detected.is_empty() && self.wsl_distros_detected.is_some() {
                     ui.label(egui::RichText::new(language.text("No WSL distros found on this PC.")).color(crate::ui::theme::muted()).size(11.5));
-                } else {
+                } else if !detected.is_empty() {
                     ui.label(egui::RichText::new(language.text("WSL distros")).strong().size(12.5));
                     for distro in &detected {
                         let mut read = self.settings.wsl_distros.as_ref().is_none_or(|chosen| chosen.contains(distro));
-                        let mut user = self.settings.wsl_users.get(distro).cloned().unwrap_or_default();
+                        let user = self.wsl_user_text.entry(distro.clone()).or_default();
                         setting_row(ui, distro, language.text("Read this distro's login files"), |ui| {
                             if Toggle::new(&mut read).labels(language.text("Read"), language.text("Skip")).show(ui).changed() {
                                 let mut chosen: Vec<String> = self
@@ -161,13 +163,17 @@ impl PanelApp {
                                 changed = true;
                             }
                             ui.label(egui::RichText::new(language.text("as user")).color(crate::ui::theme::muted()).size(11.0));
-                            if ui.add(egui::TextEdit::singleline(&mut user).desired_width(90.0).hint_text("default")).lost_focus() {
+                            let edit = ui.add(egui::TextEdit::singleline(user).desired_width(90.0).hint_text("default"));
+                            if edit.changed() {
+                                // Committed as typed; saved when the box is left.
                                 let trimmed = user.trim().to_string();
                                 if trimmed.is_empty() {
                                     self.settings.wsl_users.remove(distro);
                                 } else {
                                     self.settings.wsl_users.insert(distro.clone(), trimmed);
                                 }
+                            }
+                            if edit.lost_focus() {
                                 changed = true;
                             }
                         });
@@ -187,13 +193,16 @@ impl PanelApp {
                             .desired_width(f32::INFINITY)
                             .hint_text(language.text("Extra login files, one per line: C:\\path\\to\\file, ~/path, or wsl:<distro>:~/path")),
                     );
-                    if edit.lost_focus() {
+                    if edit.changed() {
+                        // Committed as typed; saved when the box is left.
                         let paths: Vec<String> = text.lines().map(str::trim).filter(|line| !line.is_empty()).map(String::from).collect();
                         if paths.is_empty() {
                             self.settings.credential_paths.remove(descriptor.key);
                         } else {
                             self.settings.credential_paths.insert(descriptor.key.to_string(), paths);
                         }
+                    }
+                    if edit.lost_focus() {
                         changed = true;
                     }
                 }

@@ -159,3 +159,6 @@ updates (workflow publishes `headroom.exe.sha256`), schema_version + quarantine,
 temp copy in app data, Fetch-all + per-provider Retry in the panel with cooldowns.
 Deferred as debt: see `tmp/conductor/council/synthesis.md` → Outcome. Codex validation of
 the diff requested (validator ≠ implementer).
+
+## Owner rulings — 2026-08-28 late (commits 90a9c9d, 15b5d17, afc02ce)
+Every provider on by default (schema 3 migration); precise per-provider failure model (kind + sentence + command + every place looked) through one HTTP client and the credential engine's trail, shown on the cards with not-installed providers folded into one; Settings → Where to look (extra login files per provider, WSL distros to read, user per distro); CLAUDE_CONFIG_DIR; root-default WSL distros read /home/*. Validators (Codex + Grok) on the diff requested. Owner's standing priority: functionality and production-grade behaviour before looks/infra.
