@@ -1,18 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="16" height="16">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1E1B4B"/>
-      <stop offset="1" stop-color="#0B1020"/>
-    </linearGradient>
-    <linearGradient id="sweep" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#F97316"/>
-      <stop offset="0.5" stop-color="#EC4899"/>
-      <stop offset="1" stop-color="#8B5CF6"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
-  <!-- A 270° dial sweep, open at the bottom, orange to violet -->
-  <path d="M 74.3 181.7 A 76 76 0 1 1 181.7 181.7" fill="none" stroke="url(#sweep)"
-        stroke-width="34" stroke-linecap="round"/>
-  <circle cx="128" cy="128" r="22" fill="#FFFFFF"/>
+  <rect width="16" height="16" rx="56.3" fill="#000"/>
+  <path fill="#fff" fill-opacity="0.38" d="M73.69 182.31 A76.80 76.80 0 1 1 182.31 182.31 L163.30 163.30 A49.92 49.92 0 1 0 92.70 163.30 Z"/>
+  <path fill="#fff" fill-opacity="1" d="M73.69 182.31 A76.80 76.80 0 0 1 172.05 65.09 L156.63 87.11 A49.92 49.92 0 0 0 92.70 163.30 Z"/>
+  <circle cx="128" cy="128" r="15.36" fill="#fff"/>
 </svg>

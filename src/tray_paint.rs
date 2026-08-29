@@ -349,6 +349,135 @@ fn glyph(c: char) -> Option<&'static [u8; 5]> {
     c.to_digit(10).map(|d| &DIGITS[d as usize])
 }
 
+/// The application icon: the gauge in white on a black rounded plate, so
+/// it reads on any background the desktop, taskbar or Store puts it on.
+pub fn render_app_icon(size: usize) -> Render {
+    let mut canvas = Canvas::new(size.max(8));
+    let n = canvas.size as f32;
+    let radius = n * 0.22;
+    // Plate: a rounded square.
+    canvas.paint(1.0, move |x, y| {
+        let (cx, cy) = ((x - n / 2.0).abs(), (y - n / 2.0).abs());
+        let half = n / 2.0 - 0.5;
+        let (qx, qy) = ((cx - (half - radius)).max(0.0), (cy - (half - radius)).max(0.0));
+        cx <= half && cy <= half && qx * qx + qy * qy <= radius * radius
+    });
+    let plate: Vec<f32> = canvas.coverage.clone();
+    // Glyph: the logo at 64% of the plate, painted as its own coverage so
+    // the plate stays black underneath.
+    let mut glyph = Canvas::new(canvas.size);
+    let (cx, cy) = (n / 2.0, n / 2.0);
+    let (r_out, r_in) = (n * 0.30, n * 0.195);
+    glyph.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, 0.38);
+    glyph.ring_arc(cx, cy, r_in, r_out, 225.0, 170.0, 1.0);
+    glyph.disc(cx, cy, n * 0.06, 1.0);
+    let mut rgba = Vec::with_capacity(canvas.size * canvas.size * 4);
+    for (plate_cov, glyph_cov) in plate.iter().zip(glyph.coverage.iter()) {
+        // White glyph over black plate; alpha is the plate's.
+        let white = glyph_cov.clamp(0.0, 1.0);
+        let level = (white * 255.0).round() as u8;
+        rgba.extend_from_slice(&[level, level, level, (plate_cov.clamp(0.0, 1.0) * 255.0).round() as u8]);
+    }
+    Render { size: canvas.size, rgba }
+}
+
+/// The app icon as PNGs at the sizes Windows and the Store use, plus an
+/// `icon.ico` holding them (PNG-compressed entries) and an SVG of the same
+/// geometry. `--render-app-icon <dir>`.
+pub fn write_app_icon(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let sizes = [16usize, 20, 24, 32, 48, 64, 128, 256];
+    let mut pngs: Vec<(usize, Vec<u8>)> = Vec::new();
+    for size in sizes {
+        let render = render_app_icon(size);
+        let image = image::RgbaImage::from_raw(size as u32, size as u32, render.rgba.clone()).ok_or("bad buffer")?;
+        image.save(dir.join(format!("{size}x{size}.png"))).map_err(|e| e.to_string())?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        pngs.push((size, png.into_inner()));
+    }
+    // ICO: header, one directory entry per image, then the payloads. Sizes
+    // up to 64 are classic 32-bit DIBs (every loader reads those); 128 and
+    // 256 are PNG-compressed, the convention since Vista.
+    let payloads: Vec<(usize, Vec<u8>)> = pngs
+        .iter()
+        .map(|(size, png)| (*size, if *size >= 128 { png.clone() } else { ico_dib(&render_app_icon(*size)) }))
+        .collect();
+    let mut ico: Vec<u8> = Vec::new();
+    ico.extend_from_slice(&[0, 0, 1, 0]);
+    ico.extend_from_slice(&(payloads.len() as u16).to_le_bytes());
+    let mut offset = 6 + 16 * payloads.len();
+    for (size, payload) in &payloads {
+        let dimension = if *size >= 256 { 0u8 } else { *size as u8 };
+        ico.extend_from_slice(&[dimension, dimension, 0, 0, 1, 0, 32, 0]);
+        ico.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += payload.len();
+    }
+    for (_, payload) in &payloads {
+        ico.extend_from_slice(payload);
+    }
+    std::fs::write(dir.join("icon.ico"), ico).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("icon.svg"), app_icon_svg()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// An ICO image entry as a 32-bit DIB: a BITMAPINFOHEADER whose height
+/// counts both the colour rows and the mask rows, bottom-up BGRA pixels
+/// (straight alpha), then an all-zero 1-bit AND mask padded to 32-bit rows.
+fn ico_dib(render: &Render) -> Vec<u8> {
+    let size = render.size;
+    let mut out = Vec::with_capacity(40 + size * size * 4 + size * 4);
+    let header: [u32; 3] = [40, size as u32, (size * 2) as u32];
+    for word in header {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&((size * size * 4) as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 16]); // resolution, colours used/important
+    for y in (0..size).rev() {
+        for x in 0..size {
+            let i = (y * size + x) * 4;
+            let px = &render.rgba[i..i + 4];
+            out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+    }
+    let mask_row = size.div_ceil(32) * 4;
+    out.extend(std::iter::repeat_n(0u8, mask_row * size));
+    out
+}
+
+/// The same geometry as `render_app_icon`, as an SVG on a 256 grid.
+fn app_icon_svg() -> String {
+    let n = 256.0f32;
+    let (cx, cy) = (n / 2.0, n / 2.0);
+    let (r_out, r_in) = (n * 0.30, n * 0.195);
+    // A ring arc from `start` degrees (clockwise from twelve) over `span`.
+    let arc = |start: f32, span: f32, opacity: f32| {
+        let point = |r: f32, deg: f32| {
+            let rad = deg.to_radians();
+            (cx + r * rad.sin(), cy - r * rad.cos())
+        };
+        let (ax, ay) = point(r_out, start);
+        let (bx, by) = point(r_out, start + span);
+        let (cx2, cy2) = point(r_in, start + span);
+        let (dx, dy) = point(r_in, start);
+        let large = if span > 180.0 { 1 } else { 0 };
+        format!(
+            "  <path fill=\"#fff\" fill-opacity=\"{opacity}\" d=\"M{ax:.2} {ay:.2} A{r_out:.2} {r_out:.2} 0 {large} 1 {bx:.2} {by:.2} L{cx2:.2} {cy2:.2} A{r_in:.2} {r_in:.2} 0 {large} 0 {dx:.2} {dy:.2} Z\"/>\n"
+        )
+    };
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 256 256\" width=\"256\" height=\"256\">\n  <rect width=\"256\" height=\"256\" rx=\"{:.1}\" fill=\"#000\"/>\n{}{}  <circle cx=\"{cx}\" cy=\"{cy}\" r=\"{:.2}\" fill=\"#fff\"/>\n</svg>\n",
+        n * 0.22,
+        arc(225.0, 270.0, 0.38),
+        arc(225.0, 170.0, 1.0),
+        n * 0.06
+    )
+}
+
 /// Every mode and style at the sizes the taskbar uses, written as PNGs for
 /// a look before shipping. `--render-tray-previews <dir>`.
 pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
@@ -488,6 +617,23 @@ mod tests {
         let render = super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Number }, 16, true);
         let (min, max) = lit_columns(&render);
         assert!(max - min >= 10, "three digits should span most of the width: {min}..{max}");
+    }
+
+    #[test]
+    fn the_app_icon_is_a_black_plate_with_a_white_glyph() {
+        let render = render_app_icon(64);
+        let px = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            (&render.rgba[i..i + 4]).to_vec()
+        };
+        assert_eq!(px(0, 0)[3], 0, "the corner is outside the rounded plate");
+        assert_eq!(px(32, 8)[3], 255, "inside the plate is opaque");
+        assert_eq!(px(32, 8)[0], 0, "and black where the glyph is not");
+        assert_eq!(px(32, 32)[0], 255, "the hub is white");
+        assert!(app_icon_svg().contains("<rect") && app_icon_svg().contains("<circle"));
+        let dib = ico_dib(&render_app_icon(16));
+        assert_eq!(dib.len(), 40 + 16 * 16 * 4 + 4 * 16);
+        assert_eq!(u32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]), 32, "height counts colour and mask rows");
     }
 
     #[test]

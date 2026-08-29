@@ -55,6 +55,20 @@ impl PanelApp {
                     },
                 );
                 setting_separator(ui);
+                setting_row(ui, language.text("Appearance"), language.text("Auto follows Windows' app mode"), |ui| {
+                    use crate::app_settings::Appearance;
+                    let current = match self.settings.appearance {
+                        Appearance::Auto => "Auto",
+                        Appearance::Dark => "Dark",
+                        Appearance::Light => "Light",
+                    };
+                    Dropdown::from_id_salt("appearance").width(220.0).selected_text(language.text(current)).show_ui(ui, |ui| {
+                        for (value, label) in [(Appearance::Auto, "Auto"), (Appearance::Dark, "Dark"), (Appearance::Light, "Light")] {
+                            changed |= dropdown_selectable_value(ui, &mut self.settings.appearance, value, language.text(label)).changed();
+                        }
+                    });
+                });
+                setting_separator(ui);
                 setting_row(
                     ui,
                     language.text("Language"),

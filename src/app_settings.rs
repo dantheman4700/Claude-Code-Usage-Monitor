@@ -30,6 +30,17 @@ pub const POLL_5_MIN: u32 = POLL_5_MIN_SECONDS * 1_000;
 pub const POLL_15_MIN: u32 = POLL_15_MIN_SECONDS * 1_000;
 pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 
+/// The panel's palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Appearance {
+    /// Follow Windows' app mode.
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
 /// What the tray icon shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -140,6 +151,9 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// The panel's palette.
+    #[serde(default)]
+    pub appearance: Appearance,
     /// What the tray icon shows.
     #[serde(default)]
     pub tray_icon: TrayIconSettings,
@@ -192,6 +206,7 @@ impl Default for SettingsFile {
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
+            appearance: Appearance::Auto,
             tray_icon: TrayIconSettings::default(),
             credential_paths: BTreeMap::new(),
             wsl_distros: None,

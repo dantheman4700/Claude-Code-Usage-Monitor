@@ -51,6 +51,10 @@ pub(crate) struct PanelApp {
     /// The settings-page preview of the tray icon: key it was painted for,
     /// and the two textures (dark taskbar, light taskbar).
     pub tray_preview: Option<(String, egui::TextureHandle, egui::TextureHandle)>,
+    /// The panel's own window, for recolouring the title bar.
+    hwnd: isize,
+    /// The palette in effect, to notice when the setting or Windows changes it.
+    dark: bool,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
     /// Why each enabled provider without a reading has none.
@@ -141,8 +145,12 @@ impl PanelApp {
         let language = localization::resolve_language(
             settings.language.as_deref().and_then(LanguageId::from_code),
         );
+        let dark = resolve_dark(settings.appearance);
+        crate::ui::theme::set_dark(dark);
         configure_style(&context.egui_ctx, language);
-        style_native_titlebar(context);
+        let hwnd = window_hwnd(context);
+        style_native_titlebar(hwnd, dark);
+        set_window_icons(hwnd);
         let cache = app_settings::load_usage_cache();
         let usage_poll_ok = cache.as_ref().is_some_and(|cache| cache.poll_ok);
         let usage_has_error = cache.as_ref().is_some_and(|cache| !cache.poll_ok);
@@ -158,6 +166,8 @@ impl PanelApp {
             credential_path_text,
             wsl_user_text,
             tray_preview: None,
+            hwnd,
+            dark,
             failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),
@@ -261,12 +271,26 @@ impl PanelApp {
         (elapsed < cooldown).then_some(cooldown - elapsed)
     }
 
+    /// Re-resolve the palette; the Appearance setting or Windows' app mode
+    /// may have changed.
+    pub(crate) fn refresh_appearance(&mut self, ctx: &egui::Context) {
+        let dark = resolve_dark(self.settings.appearance);
+        if dark != self.dark {
+            self.dark = dark;
+            crate::ui::theme::set_dark(dark);
+            configure_style(ctx, self.language());
+            style_native_titlebar(self.hwnd, dark);
+            self.tray_preview = None;
+        }
+    }
+
     /// Pick up the tray's latest reading, at most once a second.
     fn refresh_usage_cache(&mut self) {
         if self.last_cache_read.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last_cache_read = Instant::now();
+        self.refresh_appearance_from_windows_tick();
         // A stat per second is nothing; a parse per second of a file that
         // has not changed was most of the panel's idle work.
         let modified = std::fs::metadata(app_settings::usage_cache_path())
@@ -332,12 +356,13 @@ impl PanelApp {
                     ui.set_min_height(full_height);
                     if let Some(error) = self.settings_error.clone() {
                         egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(70, 34, 34))
+                            .fill(crate::ui::theme::section_surface())
+                            .stroke(egui::Stroke::new(1.0, crate::ui::theme::danger()))
                             .corner_radius(egui::CornerRadius::same(5))
                             .inner_margin(egui::Margin::symmetric(10, 7))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.colored_label(egui::Color32::from_rgb(255, 190, 178), error);
+                                    ui.colored_label(crate::ui::theme::danger(), error);
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui.add(crate::ui::components::icon::icon_only_button(lucide_icons::Icon::X)).clicked() {
                                             self.settings_error = None;
@@ -367,6 +392,7 @@ impl eframe::App for PanelApp {
             self.settings.dashboard_height = Some(size.y);
         }
         self.refresh_usage_cache();
+        self.refresh_appearance(ui.ctx());
         egui::Frame::new()
             .fill(menu_surface())
             .inner_margin(egui::Margin { left: 10, right: 10, top: 0, bottom: 10 })
@@ -395,6 +421,53 @@ impl eframe::App for PanelApp {
     }
 }
 
+impl PanelApp {
+    /// Once a second, alongside the cache read: cheap registry look-up.
+    fn refresh_appearance_from_windows_tick(&mut self) {
+        if self.settings.appearance == crate::app_settings::Appearance::Auto {
+            let dark = resolve_dark(self.settings.appearance);
+            if dark != self.dark {
+                // Applied on the next frame through refresh_appearance.
+                self.dark = !dark;
+            }
+        }
+    }
+}
+
+fn resolve_dark(appearance: crate::app_settings::Appearance) -> bool {
+    match appearance {
+        crate::app_settings::Appearance::Dark => true,
+        crate::app_settings::Appearance::Light => false,
+        crate::app_settings::Appearance::Auto => !crate::ui::theme::windows_apps_use_light_theme(),
+    }
+}
+
+fn window_hwnd(context: &eframe::CreationContext<'_>) -> isize {
+    let Ok(window_handle) = context.window_handle() else {
+        return 0;
+    };
+    match window_handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+        _ => 0,
+    }
+}
+
+fn set_window_icons(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd as *mut _);
+    let (large_icon, small_icon) = crate::tray_icon::load_app_icons();
+    unsafe {
+        if !large_icon.is_invalid() {
+            let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(large_icon.0 as isize));
+        }
+        if !small_icon.is_invalid() {
+            let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(small_icon.0 as isize));
+        }
+    }
+}
+
 fn failures_by_provider(cache: &UsageCache) -> std::collections::BTreeMap<ProviderId, crate::models::ProviderFailure> {
     cache
         .failures
@@ -403,34 +476,22 @@ fn failures_by_provider(cache: &UsageCache) -> std::collections::BTreeMap<Provid
         .collect()
 }
 
-/// The caption takes the panel's own indigo, so the title bar, the panel and
-/// the tray icon read as one thing.
-fn style_native_titlebar(context: &eframe::CreationContext<'_>) {
-    let Ok(window_handle) = context.window_handle() else {
+/// The caption matches the palette, so the title bar, the panel and the
+/// window edge read as one surface.
+fn style_native_titlebar(hwnd: isize, dark: bool) {
+    if hwnd == 0 {
         return;
-    };
-    let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
-        return;
-    };
-    let hwnd = HWND(handle.hwnd.get() as *mut _);
-    let (large_icon, small_icon) = crate::tray_icon::load_app_icons();
+    }
+    let hwnd = HWND(hwnd as *mut _);
     // COLORREF is 0x00BBGGRR.
-    let surface_color = 0x0028_0E10u32; // rgb(16, 14, 40)
-    let border_color = 0x0068_2A2Eu32; // rgb(46, 42, 104)
-    let text_color = 0x00FF_F2F4u32; // rgb(244, 242, 255)
+    let (caption, border, text): (u32, u32, u32) = if dark {
+        (0x0017_1717, 0x003D_3D3D, 0x00EC_ECEC)
+    } else {
+        (0x00F9_F9F9, 0x00E3_E3E3, 0x000D_0D0D)
+    };
     unsafe {
-        if !large_icon.is_invalid() {
-            let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(large_icon.0 as isize));
-        }
-        if !small_icon.is_invalid() {
-            let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(small_icon.0 as isize));
-        }
-        for (attribute, color) in [
-            (DWMWA_CAPTION_COLOR, surface_color),
-            (DWMWA_BORDER_COLOR, border_color),
-            (DWMWA_TEXT_COLOR, text_color),
-        ] {
-            let _ = DwmSetWindowAttribute(hwnd, attribute, std::ptr::from_ref(&color).cast(), std::mem::size_of_val(&color) as u32);
+        for (attribute, colour) in [(DWMWA_CAPTION_COLOR, caption), (DWMWA_BORDER_COLOR, border), (DWMWA_TEXT_COLOR, text)] {
+            let _ = DwmSetWindowAttribute(hwnd, attribute, std::ptr::from_ref(&colour).cast(), std::mem::size_of_val(&colour) as u32);
         }
     }
 }

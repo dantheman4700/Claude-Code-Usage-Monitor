@@ -45,6 +45,14 @@ fn main() {
         }
         return;
     }
+    if let Some(index) = args.iter().position(|arg| arg == "--render-app-icon") {
+        let dir = std::path::PathBuf::from(args.get(index + 1).map(String::as_str).unwrap_or("app-icon"));
+        match tray_paint::write_app_icon(&dir) {
+            Ok(()) => diagnose::log(format!("wrote the app icon set to {}", dir.display())),
+            Err(error) => diagnose::log(format!("app icon failed: {error}")),
+        }
+        return;
+    }
     if panel::handle_cli_mode(&args) {
         return;
     }
