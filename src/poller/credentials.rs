@@ -211,19 +211,57 @@ pub fn sources(spec: &Spec) -> impl Iterator<Item = Source> + '_ {
             std::iter::once_with(move || config.distros())
                 .flatten()
                 .flat_map(move |distro| {
-                    let extras: Vec<Source> = extra_wsl
+                    let paths: Vec<String> = spec
+                        .wsl_paths
                         .iter()
-                        .filter(|(target, _)| target == "*" || *target == distro)
-                        .map(|(_, path)| Source::Wsl { distro: distro.clone(), path: path.clone() })
+                        .map(|path| path.to_string())
+                        .chain(
+                            extra_wsl
+                                .iter()
+                                .filter(|(target, _)| target == "*" || *target == distro)
+                                .map(|(_, path)| path.clone()),
+                        )
                         .collect();
-                    spec.wsl_paths
-                        .iter()
-                        .map(move |path| Source::Wsl { distro: distro.clone(), path: path.to_string() })
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .chain(extras)
+                    distro_sources(&distro, config_user(&distro), paths)
                 }),
         )
+}
+
+fn config_user(distro: &str) -> Option<String> {
+    config().user_for(distro)
+}
+
+/// The paths to try in one distro: as the user Headroom reads it as, and --
+/// when that is root by default and nobody named another user -- under
+/// every `/home/<name>` as well, since `~` would only look in `/root`.
+fn distro_sources(distro: &str, user: Option<String>, paths: Vec<String>) -> Vec<Source> {
+    let mut out: Vec<Source> = paths
+        .iter()
+        .map(|path| Source::Wsl { distro: distro.to_string(), path: path.clone() })
+        .collect();
+    if user.is_none() {
+        for home in wsl::home_dirs_if_root(distro) {
+            for path in &paths {
+                if let Some(under_home) = path_under_home(path, &home) {
+                    out.push(Source::Wsl { distro: distro.to_string(), path: under_home });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `~/x` and `$HOME/x` (including inside `${VAR:-$HOME/x}`) rewritten for a
+/// specific home; a path that does not depend on the home is `None`, so it
+/// is not tried twice.
+pub(super) fn path_under_home(path: &str, home: &str) -> Option<String> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Some(format!("{home}/{rest}"));
+    }
+    if path.contains("$HOME") {
+        return Some(path.replace("$HOME", home));
+    }
+    None
 }
 
 /// The native half of the order: environment, then extras that sit before
@@ -497,12 +535,16 @@ pub fn watch_snapshot(spec: &Spec) -> Vec<String> {
     }
     for distro in config.distros() {
         let user = config.user_for(&distro);
-        let paths = spec
+        let paths: Vec<String> = spec
             .wsl_paths
             .iter()
             .map(|path| path.to_string())
-            .chain(extra_wsl.iter().filter(|(target, _)| target == "*" || *target == distro).map(|(_, path)| path.clone()));
-        for (index, path) in paths.enumerate() {
+            .chain(extra_wsl.iter().filter(|(target, _)| target == "*" || *target == distro).map(|(_, path)| path.clone()))
+            .collect();
+        for (index, source) in distro_sources(&distro, user.clone(), paths).into_iter().enumerate() {
+            let Source::Wsl { path, .. } = source else {
+                continue;
+            };
             let label = format!("{key}:wsl{index}");
             if let Some(signature) = wsl::path_watch_signature(&distro, user.as_deref(), &label, &watch_script(&path)) {
                 out.push(signature);
@@ -579,6 +621,16 @@ mod tests {
         std::env::set_var("HEADROOM_TEST_DIR", "C:\\probe");
         assert_eq!(expand_native_path("%HEADROOM_TEST_DIR%\\auth.json"), PathBuf::from("C:\\probe\\auth.json"));
         assert_eq!(expand_native_path("C:\\plain\\auth.json"), PathBuf::from("C:\\plain\\auth.json"));
+    }
+
+    #[test]
+    fn home_relative_paths_are_rewritten_for_each_home() {
+        assert_eq!(path_under_home("~/.codex/auth.json", "/home/alice").as_deref(), Some("/home/alice/.codex/auth.json"));
+        assert_eq!(
+            path_under_home("${CODEX_HOME:-$HOME/.codex}/auth.json", "/home/bob").as_deref(),
+            Some("${CODEX_HOME:-/home/bob/.codex}/auth.json")
+        );
+        assert_eq!(path_under_home("/opt/tokens/auth.json", "/home/alice"), None);
     }
 
     #[test]

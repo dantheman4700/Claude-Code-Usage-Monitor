@@ -50,6 +50,53 @@ pub fn invalidate_distro_cache() {
     if let Ok(mut cache) = CACHE.lock() {
         *cache = None;
     }
+    if let Ok(mut homes) = HOMES.lock() {
+        *homes = None;
+    }
+}
+
+/// Per-distro home scan: when it was taken, and the homes found.
+type HomeScans = std::collections::HashMap<String, (Instant, Vec<String>)>;
+
+static HOMES: Mutex<Option<HomeScans>> = Mutex::new(None);
+
+/// The home directories under `/home` in `distro`, when the distro's default
+/// user is root -- the case where `~` points at `/root` while the person
+/// who signed in lives under `/home/<name>`. Empty for a distro whose default
+/// user is a normal account (their own `~` is the right place already).
+/// One spawn per distro, cached like the distro list.
+pub(super) fn home_dirs_if_root(distro: &str) -> Vec<String> {
+    const TTL: Duration = Duration::from_secs(10 * 60);
+    if let Ok(homes) = HOMES.lock() {
+        if let Some((fetched_at, dirs)) = homes.as_ref().and_then(|homes| homes.get(distro)) {
+            if fetched_at.elapsed() < TTL {
+                return dirs.clone();
+            }
+        }
+    }
+    // Quote-free, variable-free: see read_file. `id -u` first, then the
+    // homes, one per line.
+    let dirs = read_file(distro, None, "id -u; ls -d /home/*/", "home scan")
+        .map(|output| parse_home_scan(&output))
+        .unwrap_or_default();
+    if let Ok(mut homes) = HOMES.lock() {
+        homes
+            .get_or_insert_with(Default::default)
+            .insert(distro.to_string(), (Instant::now(), dirs.clone()));
+    }
+    dirs
+}
+
+/// `0` on the first line means root; every following line is a home.
+fn parse_home_scan(output: &str) -> Vec<String> {
+    let mut lines = output.lines().map(str::trim).filter(|line| !line.is_empty());
+    if lines.next() != Some("0") {
+        return Vec::new();
+    }
+    lines
+        .filter(|line| line.starts_with("/home/"))
+        .map(|line| line.trim_end_matches('/').to_string())
+        .collect()
 }
 
 /// Utility distros that ship with Docker Desktop, Rancher Desktop and Podman.
@@ -316,4 +363,17 @@ pub(super) fn run_with_timeout(
         stdout,
         stderr: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod home_scan_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_root_default_yields_homes() {
+        assert_eq!(parse_home_scan("0\n/home/alice/\n/home/bob/\n"), vec!["/home/alice", "/home/bob"]);
+        assert!(parse_home_scan("1000\n/home/alice/\n").is_empty());
+        assert!(parse_home_scan("0\n").is_empty());
+        assert!(parse_home_scan("").is_empty());
+    }
 }

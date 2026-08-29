@@ -11,6 +11,9 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/ccum-upstream-target}"
 TARGET=x86_64-pc-windows-gnu
 TEMP_DIR="${HEADROOM_TEMP:-/mnt/c/Users/$USER/AppData/Local/Temp}"
 
+# A stale result from a previous run must never satisfy a later check.
+rm -f "$CARGO_TARGET_DIR/tests.out" "$CARGO_TARGET_DIR/tests.json"
+
 echo "== clippy"
 cargo clippy --target "$TARGET" --locked -- -D warnings 2>&1 | grep -vE "font subset|^\s*Compiling|^\s*Checking|^\s*Finished" || true
 cargo clippy --target "$TARGET" --locked -- -D warnings > /dev/null 2>&1
