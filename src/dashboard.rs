@@ -30,6 +30,16 @@ fn language() -> crate::localization::LanguageId {
 }
 
 pub fn show(owner: HWND) {
+    show_page(owner, false);
+}
+
+/// Open the panel on its Settings page; an already-open panel is brought
+/// forward as it is.
+pub fn show_settings(owner: HWND) {
+    show_page(owner, true);
+}
+
+fn show_page(owner: HWND, settings: bool) {
     if focus_existing() {
         return;
     }
@@ -51,6 +61,9 @@ pub fn show(owner: HWND) {
         .arg("--studio")
         .arg("--owner")
         .arg((owner.0 as isize).to_string());
+    if settings {
+        command.arg("--settings");
+    }
     if crate::diagnose::is_enabled() {
         command.arg("--diagnose").arg("--diagnose-append");
     }

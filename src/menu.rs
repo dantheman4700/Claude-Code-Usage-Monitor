@@ -1,17 +1,28 @@
 //! The tray icon's right-click menu, built in Rust.
 //!
 //! Every item is a plain command: no document, no editor, no expression
-//! language. What the user can do from the tray is short enough to read here.
+//! language. What the user can do from the tray is short enough to read
+//! here, and it mirrors the panel's Settings page: the same switches, the
+//! same current values, so a change made in one shows in the other.
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TrackPopupMenu,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
+    HMENU, MENU_ITEM_FLAGS, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
-use crate::app_settings::{POLL_15_MIN, POLL_1_HOUR, POLL_1_MIN, POLL_5_MIN};
+/// Appends one command to a menu.
+type ItemFn<'a> = dyn Fn(HMENU, MENU_ITEM_FLAGS, u16, &str) + 'a;
+/// Appends a submenu, filled by the callback.
+type SubmenuFn<'a> = dyn Fn(HMENU, &str, &dyn Fn(HMENU)) + 'a;
+
+use crate::app_settings::{
+    Appearance, TrayIconMark, TrayIconMeasure, TrayIconMetric, TrayIconMode, TrayIconSettings,
+    TrayIconStyle, TrayIconTone, POLL_15_MIN, POLL_1_HOUR, POLL_1_MIN, POLL_5_MIN,
+};
+use crate::localization::LanguageId;
 use crate::native_interop::wide_str;
 use crate::providers::{ProviderId, PROVIDER_DESCRIPTORS};
 use crate::state::lock_state;
@@ -22,18 +33,186 @@ pub const CMD_REFRESH: u16 = 11;
 pub const CMD_STARTUP: u16 = 12;
 pub const CMD_UPDATES: u16 = 13;
 pub const CMD_EXIT: u16 = 14;
+pub const CMD_SETTINGS: u16 = 15;
 pub const CMD_FREQ_1MIN: u16 = 20;
 pub const CMD_FREQ_5MIN: u16 = 21;
 pub const CMD_FREQ_15MIN: u16 = 22;
 pub const CMD_FREQ_1HOUR: u16 = 23;
-// Provider toggles use each descriptor's own command id (60..).
+// The first tray icon's options, 30..53; its provider, 70..77.
+pub const CMD_TRAY_MODE_LOGO: u16 = 30;
+pub const CMD_TRAY_MODE_TIGHTEST: u16 = 31;
+pub const CMD_TRAY_MODE_PROVIDER: u16 = 32;
+pub const CMD_TRAY_MODE_RUNDOWN: u16 = 33;
+pub const CMD_TRAY_STYLE_NUMBER: u16 = 34;
+pub const CMD_TRAY_STYLE_BAR: u16 = 35;
+pub const CMD_TRAY_STYLE_RING: u16 = 36;
+pub const CMD_TRAY_STYLE_COLUMN: u16 = 37;
+pub const CMD_TRAY_TONE_AUTO: u16 = 38;
+pub const CMD_TRAY_TONE_LIGHT: u16 = 39;
+pub const CMD_TRAY_TONE_DARK: u16 = 40;
+pub const CMD_APPEARANCE_AUTO: u16 = 41;
+pub const CMD_APPEARANCE_DARK: u16 = 42;
+pub const CMD_APPEARANCE_LIGHT: u16 = 43;
+pub const CMD_TRAY_METRIC_TIGHTEST: u16 = 44;
+pub const CMD_TRAY_METRIC_SESSION: u16 = 45;
+pub const CMD_TRAY_METRIC_WEEKLY: u16 = 46;
+pub const CMD_TRAY_METRIC_MONTHLY: u16 = 47;
+pub const CMD_TRAY_MEASURE_USED: u16 = 48;
+pub const CMD_TRAY_MEASURE_REMAINING: u16 = 49;
+pub const CMD_TRAY_MARK_DIGITS: u16 = 50;
+pub const CMD_TRAY_MARK_INITIALS: u16 = 51;
+pub const CMD_TRAY_MARK_NONE: u16 = 52;
+pub const CMD_TRAY_ALERT_COLOUR: u16 = 53;
+const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
+// Provider on/off toggles use each descriptor's own command id (60..).
+
+/// What a menu command changes on the first tray icon, if it is one of
+/// those. Plain data so the mapping can be tested without a menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayIconChange {
+    Mode(TrayIconMode),
+    Provider(ProviderId),
+    Metric(TrayIconMetric),
+    Measure(TrayIconMeasure),
+    Style(TrayIconStyle),
+    Mark(TrayIconMark),
+    Tone(TrayIconTone),
+    ToggleAlertColour,
+}
+
+impl TrayIconChange {
+    pub fn for_command(id: u16) -> Option<Self> {
+        Some(match id {
+            CMD_TRAY_MODE_LOGO => Self::Mode(TrayIconMode::Logo),
+            CMD_TRAY_MODE_TIGHTEST => Self::Mode(TrayIconMode::Tightest),
+            CMD_TRAY_MODE_PROVIDER => Self::Mode(TrayIconMode::Provider),
+            CMD_TRAY_MODE_RUNDOWN => Self::Mode(TrayIconMode::Rundown),
+            CMD_TRAY_STYLE_NUMBER => Self::Style(TrayIconStyle::Number),
+            CMD_TRAY_STYLE_BAR => Self::Style(TrayIconStyle::Bar),
+            CMD_TRAY_STYLE_RING => Self::Style(TrayIconStyle::Ring),
+            CMD_TRAY_STYLE_COLUMN => Self::Style(TrayIconStyle::Column),
+            CMD_TRAY_TONE_AUTO => Self::Tone(TrayIconTone::Auto),
+            CMD_TRAY_TONE_LIGHT => Self::Tone(TrayIconTone::Light),
+            CMD_TRAY_TONE_DARK => Self::Tone(TrayIconTone::Dark),
+            CMD_TRAY_METRIC_TIGHTEST => Self::Metric(TrayIconMetric::Tightest),
+            CMD_TRAY_METRIC_SESSION => Self::Metric(TrayIconMetric::Session),
+            CMD_TRAY_METRIC_WEEKLY => Self::Metric(TrayIconMetric::Weekly),
+            CMD_TRAY_METRIC_MONTHLY => Self::Metric(TrayIconMetric::Monthly),
+            CMD_TRAY_MEASURE_USED => Self::Measure(TrayIconMeasure::Used),
+            CMD_TRAY_MEASURE_REMAINING => Self::Measure(TrayIconMeasure::Remaining),
+            CMD_TRAY_MARK_DIGITS => Self::Mark(TrayIconMark::Digits),
+            CMD_TRAY_MARK_INITIALS => Self::Mark(TrayIconMark::Initials),
+            CMD_TRAY_MARK_NONE => Self::Mark(TrayIconMark::None),
+            CMD_TRAY_ALERT_COLOUR => Self::ToggleAlertColour,
+            id => {
+                let index = id.checked_sub(CMD_TRAY_PROVIDER_FIRST)? as usize;
+                Self::Provider(*ProviderId::ALL.get(index)?)
+            }
+        })
+    }
+
+    /// Apply to an icon's settings; true when something changed.
+    pub fn apply(self, icon: &mut TrayIconSettings) -> bool {
+        let before = icon.clone();
+        match self {
+            Self::Mode(mode) => icon.mode = mode,
+            Self::Provider(provider) => {
+                icon.provider = Some(provider.descriptor().key.to_string());
+                icon.mode = TrayIconMode::Provider;
+            }
+            Self::Metric(metric) => icon.metric = metric,
+            Self::Measure(measure) => icon.measure = measure,
+            Self::Style(style) => icon.style = style,
+            Self::Mark(mark) => icon.mark = mark,
+            Self::Tone(tone) => icon.tone = tone,
+            Self::ToggleAlertColour => icon.alert_colour = !icon.alert_colour,
+        }
+        *icon != before
+    }
+}
+
+/// The appearance a menu command picks, if it is one of those.
+pub fn appearance_for_command(id: u16) -> Option<Appearance> {
+    match id {
+        CMD_APPEARANCE_AUTO => Some(Appearance::Auto),
+        CMD_APPEARANCE_DARK => Some(Appearance::Dark),
+        CMD_APPEARANCE_LIGHT => Some(Appearance::Light),
+        _ => None,
+    }
+}
+
+/// The names the Settings page uses, so the two read alike.
+pub fn mode_label(mode: TrayIconMode) -> &'static str {
+    match mode {
+        TrayIconMode::Logo => "The logo",
+        TrayIconMode::Tightest => "Tightest limit across providers",
+        TrayIconMode::Provider => "One provider",
+        TrayIconMode::Rundown => "Every provider, as bars",
+    }
+}
+
+pub fn metric_label(metric: TrayIconMetric) -> &'static str {
+    match metric {
+        TrayIconMetric::Tightest => "Tightest window",
+        TrayIconMetric::Session => "Session",
+        TrayIconMetric::Weekly => "Weekly",
+        TrayIconMetric::Monthly => "Monthly (weekly where there is none)",
+    }
+}
+
+pub fn measure_label(measure: TrayIconMeasure) -> &'static str {
+    match measure {
+        TrayIconMeasure::Used => "What is used",
+        TrayIconMeasure::Remaining => "What is left",
+    }
+}
+
+pub fn style_label(style: TrayIconStyle) -> &'static str {
+    match style {
+        TrayIconStyle::Number => "A number",
+        TrayIconStyle::Bar => "A bar that fills",
+        TrayIconStyle::Ring => "A ring that fills",
+        TrayIconStyle::Column => "A column that fills",
+    }
+}
+
+pub fn mark_label(mark: TrayIconMark) -> &'static str {
+    match mark {
+        TrayIconMark::Digits => "The percent",
+        TrayIconMark::Initials => "The provider's initials",
+        TrayIconMark::None => "Nothing",
+    }
+}
+
+pub fn tone_label(tone: TrayIconTone) -> &'static str {
+    match tone {
+        TrayIconTone::Auto => "Auto",
+        TrayIconTone::Light => "Light (for a dark taskbar)",
+        TrayIconTone::Dark => "Dark (for a light taskbar)",
+    }
+}
+
+pub fn appearance_label(appearance: Appearance) -> &'static str {
+    match appearance {
+        Appearance::Auto => "Auto",
+        Appearance::Dark => "Dark",
+        Appearance::Light => "Light",
+    }
+}
 
 /// Show the menu at the cursor and return the chosen command, if any.
 pub fn show(hwnd: HWND) -> Option<u16> {
-    let (language, interval, providers, install_channel) = {
+    let (language, interval, providers, install_channel, icon, appearance) = {
         let state = lock_state();
         let s = state.as_ref()?;
-        (s.language, s.poll_interval_ms, s.providers, s.install_channel)
+        (
+            s.language,
+            s.poll_interval_ms,
+            s.providers,
+            s.install_channel,
+            s.tray_icons.first().cloned().unwrap_or_default(),
+            s.appearance,
+        )
     };
     let startup = crate::tray::is_startup_enabled();
 
@@ -44,25 +223,33 @@ pub fn show(hwnd: HWND) -> Option<u16> {
             let _ = AppendMenuW(menu, flags, id as usize, PCWSTR::from_raw(wide.as_ptr()));
         };
         let checked = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let submenu = |parent: HMENU, label: &str, fill: &dyn Fn(HMENU)| {
+            if let Ok(child) = CreatePopupMenu() {
+                fill(child);
+                let wide = wide_str(label);
+                let _ = AppendMenuW(parent, MF_POPUP, child.0 as usize, PCWSTR::from_raw(wide.as_ptr()));
+            }
+        };
+        let separator = |menu| {
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        };
 
         item(menu, MF_STRING, CMD_OPEN, language.text("Open Headroom"));
         item(menu, MF_STRING, CMD_REFRESH, language.text("Refresh"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        separator(menu);
 
-        if let Ok(frequency) = CreatePopupMenu() {
+        submenu(menu, language.text("Update frequency"), &|frequency| {
             for (id, value, label) in [
-                (CMD_FREQ_1MIN, POLL_1_MIN, language.text("Every minute")),
-                (CMD_FREQ_5MIN, POLL_5_MIN, language.text("Every 5 minutes")),
-                (CMD_FREQ_15MIN, POLL_15_MIN, language.text("Every 15 minutes")),
-                (CMD_FREQ_1HOUR, POLL_1_HOUR, language.text("Every hour")),
+                (CMD_FREQ_1MIN, POLL_1_MIN, "Every minute"),
+                (CMD_FREQ_5MIN, POLL_5_MIN, "Every 5 minutes"),
+                (CMD_FREQ_15MIN, POLL_15_MIN, "Every 15 minutes"),
+                (CMD_FREQ_1HOUR, POLL_1_HOUR, "Every hour"),
             ] {
-                item(frequency, checked(interval == value), id, label);
+                item(frequency, checked(interval == value), id, language.text(label));
             }
-            let wide = wide_str(language.text("Update frequency"));
-            let _ = AppendMenuW(menu, MF_POPUP, frequency.0 as usize, PCWSTR::from_raw(wide.as_ptr()));
-        }
+        });
 
-        if let Ok(providers_menu) = CreatePopupMenu() {
+        submenu(menu, language.text("Providers"), &|providers_menu| {
             for descriptor in PROVIDER_DESCRIPTORS {
                 item(
                     providers_menu,
@@ -71,15 +258,26 @@ pub fn show(hwnd: HWND) -> Option<u16> {
                     language.text(descriptor.display_name),
                 );
             }
-            let wide = wide_str(language.text("Providers"));
-            let _ = AppendMenuW(menu, MF_POPUP, providers_menu.0 as usize, PCWSTR::from_raw(wide.as_ptr()));
-        }
+        });
+
+        submenu(menu, language.text("Tray icon"), &|tray| fill_tray_icon_menu(tray, &icon, language, &item, &submenu, &separator));
+
+        submenu(menu, language.text("Appearance"), &|looks| {
+            for (id, value) in [
+                (CMD_APPEARANCE_AUTO, Appearance::Auto),
+                (CMD_APPEARANCE_DARK, Appearance::Dark),
+                (CMD_APPEARANCE_LIGHT, Appearance::Light),
+            ] {
+                item(looks, checked(appearance == value), id, language.text(appearance_label(value)));
+            }
+        });
 
         item(menu, checked(startup), CMD_STARTUP, language.text("Start with Windows"));
         if !matches!(install_channel, InstallChannel::Store) {
             item(menu, MF_STRING, CMD_UPDATES, language.text("Check for updates"));
         }
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        item(menu, MF_STRING, CMD_SETTINGS, language.text("Settings…"));
+        separator(menu);
         item(menu, MF_STRING, CMD_EXIT, language.text("Exit"));
 
         // The menu only dismisses on an outside click if this window is in
@@ -102,7 +300,137 @@ pub fn show(hwnd: HWND) -> Option<u16> {
     }
 }
 
-/// The provider a menu command toggles, if it is one.
+/// The first icon's options, in the order the Settings page lists them.
+/// Options that do not apply to the current mode are left out, as the page
+/// leaves them out, so the menu never offers a switch that does nothing.
+fn fill_tray_icon_menu(
+    tray: HMENU,
+    icon: &TrayIconSettings,
+    language: LanguageId,
+    item: &ItemFn<'_>,
+    submenu: &SubmenuFn<'_>,
+    separator: &dyn Fn(HMENU),
+) {
+    let checked = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
+    for (id, mode) in [
+        (CMD_TRAY_MODE_LOGO, TrayIconMode::Logo),
+        (CMD_TRAY_MODE_TIGHTEST, TrayIconMode::Tightest),
+        (CMD_TRAY_MODE_PROVIDER, TrayIconMode::Provider),
+        (CMD_TRAY_MODE_RUNDOWN, TrayIconMode::Rundown),
+    ] {
+        item(tray, checked(icon.mode == mode), id, language.text(mode_label(mode)));
+    }
+    let chosen_provider = icon.provider.as_deref().and_then(ProviderId::from_key);
+    let shows_value = matches!(icon.mode, TrayIconMode::Tightest | TrayIconMode::Provider);
+    if icon.mode != TrayIconMode::Logo {
+        separator(tray);
+    }
+    if icon.mode == TrayIconMode::Provider {
+        submenu(tray, language.text("Provider"), &|providers| {
+            for (index, provider) in ProviderId::ALL.into_iter().enumerate() {
+                item(
+                    providers,
+                    checked(chosen_provider == Some(provider)),
+                    CMD_TRAY_PROVIDER_FIRST + index as u16,
+                    language.text(provider.descriptor().display_name),
+                );
+            }
+        });
+    }
+    if icon.mode != TrayIconMode::Logo {
+        submenu(tray, language.text("Window"), &|window| {
+            for (id, metric) in [
+                (CMD_TRAY_METRIC_TIGHTEST, TrayIconMetric::Tightest),
+                (CMD_TRAY_METRIC_SESSION, TrayIconMetric::Session),
+                (CMD_TRAY_METRIC_WEEKLY, TrayIconMetric::Weekly),
+                (CMD_TRAY_METRIC_MONTHLY, TrayIconMetric::Monthly),
+            ] {
+                item(window, checked(icon.metric == metric), id, language.text(metric_label(metric)));
+            }
+        });
+        submenu(tray, language.text("Shows"), &|shows| {
+            for (id, measure) in [
+                (CMD_TRAY_MEASURE_USED, TrayIconMeasure::Used),
+                (CMD_TRAY_MEASURE_REMAINING, TrayIconMeasure::Remaining),
+            ] {
+                item(shows, checked(icon.measure == measure), id, language.text(measure_label(measure)));
+            }
+        });
+    }
+    if shows_value {
+        submenu(tray, language.text("Style"), &|style_menu| {
+            for (id, style) in [
+                (CMD_TRAY_STYLE_RING, TrayIconStyle::Ring),
+                (CMD_TRAY_STYLE_BAR, TrayIconStyle::Bar),
+                (CMD_TRAY_STYLE_COLUMN, TrayIconStyle::Column),
+                (CMD_TRAY_STYLE_NUMBER, TrayIconStyle::Number),
+            ] {
+                item(style_menu, checked(icon.style == style), id, language.text(style_label(style)));
+            }
+        });
+        if icon.style == TrayIconStyle::Ring {
+            submenu(tray, language.text("Inside the ring"), &|marks| {
+                for (id, mark) in [
+                    (CMD_TRAY_MARK_DIGITS, TrayIconMark::Digits),
+                    (CMD_TRAY_MARK_INITIALS, TrayIconMark::Initials),
+                    (CMD_TRAY_MARK_NONE, TrayIconMark::None),
+                ] {
+                    item(marks, checked(icon.mark == mark), id, language.text(mark_label(mark)));
+                }
+            });
+        }
+    } else if icon.mode == TrayIconMode::Rundown {
+        submenu(tray, language.text("Layout"), &|layout| {
+            item(layout, checked(icon.style != TrayIconStyle::Bar), CMD_TRAY_STYLE_RING, language.text("Columns"));
+            item(layout, checked(icon.style == TrayIconStyle::Bar), CMD_TRAY_STYLE_BAR, language.text("Rows"));
+        });
+    }
+    separator(tray);
+    if icon.mode != TrayIconMode::Logo {
+        item(tray, checked(icon.alert_colour), CMD_TRAY_ALERT_COLOUR, language.text("Colour at the warning line"));
+    }
+    submenu(tray, language.text("Tone"), &|tones| {
+        for (id, tone) in [
+            (CMD_TRAY_TONE_AUTO, TrayIconTone::Auto),
+            (CMD_TRAY_TONE_LIGHT, TrayIconTone::Light),
+            (CMD_TRAY_TONE_DARK, TrayIconTone::Dark),
+        ] {
+            item(tones, checked(icon.tone == tone), id, language.text(tone_label(tone)));
+        }
+    });
+    separator(tray);
+    item(tray, MF_STRING, CMD_SETTINGS, language.text("More icons and options…"));
+}
+
+/// The provider a menu command switches on or off, if it is one.
 pub fn provider_for_command(id: u16) -> Option<ProviderId> {
     ProviderId::from_native_menu_command_id(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tray_command_maps_to_one_change_and_back() {
+        let mut icon = TrayIconSettings::default();
+        assert!(TrayIconChange::for_command(CMD_TRAY_STYLE_COLUMN).unwrap().apply(&mut icon));
+        assert_eq!(icon.style, TrayIconStyle::Column);
+        assert!(!TrayIconChange::for_command(CMD_TRAY_STYLE_COLUMN).unwrap().apply(&mut icon), "same again is no change");
+        // Picking a provider also switches the icon to that provider.
+        let grok = ProviderId::ALL.iter().position(|p| *p == ProviderId::Grok).unwrap() as u16;
+        assert!(TrayIconChange::for_command(CMD_TRAY_PROVIDER_FIRST + grok).unwrap().apply(&mut icon));
+        assert_eq!((icon.mode, icon.provider.as_deref()), (TrayIconMode::Provider, Some("grok")));
+        assert!(TrayIconChange::for_command(CMD_TRAY_ALERT_COLOUR).unwrap().apply(&mut icon));
+        assert!(icon.alert_colour);
+        // No tray command collides with the fixed ones or the provider toggles.
+        assert!(TrayIconChange::for_command(CMD_OPEN).is_none());
+        assert!(TrayIconChange::for_command(CMD_FREQ_1HOUR).is_none());
+        for descriptor in PROVIDER_DESCRIPTORS {
+            assert!(TrayIconChange::for_command(descriptor.native_menu_command_id).is_none(), "{}", descriptor.key);
+            assert!(appearance_for_command(descriptor.native_menu_command_id).is_none());
+        }
+        assert!(TrayIconChange::for_command(CMD_TRAY_PROVIDER_FIRST + ProviderId::ALL.len() as u16).is_none());
+        assert_eq!(appearance_for_command(CMD_APPEARANCE_LIGHT), Some(Appearance::Light));
+    }
 }

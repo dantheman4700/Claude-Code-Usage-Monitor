@@ -222,101 +222,63 @@ impl PanelApp {
                 }
             });
 
-            section(ui, language.text("Tray icon"), |ui| {
-                use crate::app_settings::{TrayIconMetric, TrayIconMode, TrayIconStyle, TrayIconTone};
-                let icon = &mut self.settings.tray_icon;
-                setting_row(ui, language.text("Show"), language.text("What the icon in the tray draws"), |ui| {
-                    Dropdown::from_id_salt("tray_mode").width(220.0).selected_text(language.text(match icon.mode {
-                        TrayIconMode::Logo => "The logo",
-                        TrayIconMode::Tightest => "Tightest limit across providers",
-                        TrayIconMode::Provider => "One provider",
-                        TrayIconMode::Rundown => "Every provider, as bars",
-                    })).show_ui(ui, |ui| {
-                        for (mode, label) in [
-                            (TrayIconMode::Logo, "The logo"),
-                            (TrayIconMode::Tightest, "Tightest limit across providers"),
-                            (TrayIconMode::Provider, "One provider"),
-                            (TrayIconMode::Rundown, "Every provider, as bars"),
-                        ] {
-                            changed |= dropdown_selectable_value(ui, &mut icon.mode, mode, language.text(label)).changed();
-                        }
-                    });
-                });
-                if icon.mode == TrayIconMode::Provider {
-                    setting_separator(ui);
-                    setting_row(ui, language.text("Provider"), language.text("Whose value the icon shows"), |ui| {
-                        let current = icon.provider.as_deref().and_then(crate::providers::ProviderId::from_key).map(|p| p.descriptor().display_name).unwrap_or("Choose…");
-                        Dropdown::from_id_salt("tray_provider").width(220.0).selected_text(language.text(current)).show_ui(ui, |ui| {
-                            for descriptor in PROVIDER_DESCRIPTORS {
-                                changed |= dropdown_selectable_value(ui, &mut icon.provider, Some(descriptor.key.to_string()), language.text(descriptor.display_name)).changed();
-                            }
-                        });
-                    });
-                    setting_separator(ui);
-                    setting_row(ui, language.text("Value"), language.text("Which of the provider's windows"), |ui| {
-                        Dropdown::from_id_salt("tray_metric").width(220.0).selected_text(language.text(match icon.metric {
-                            TrayIconMetric::Tightest => "Tightest window",
-                            TrayIconMetric::Session => "Session",
-                            TrayIconMetric::Weekly => "Weekly",
-                        })).show_ui(ui, |ui| {
-                            for (metric, label) in [(TrayIconMetric::Tightest, "Tightest window"), (TrayIconMetric::Session, "Session"), (TrayIconMetric::Weekly, "Weekly")] {
-                                changed |= dropdown_selectable_value(ui, &mut icon.metric, metric, language.text(label)).changed();
-                            }
-                        });
-                    });
-                }
-                if matches!(icon.mode, TrayIconMode::Tightest | TrayIconMode::Provider) {
-                    setting_separator(ui);
-                    setting_row(ui, language.text("Style"), language.text("How the value is drawn"), |ui| {
-                        Dropdown::from_id_salt("tray_style").width(220.0).selected_text(language.text(match icon.style {
-                            TrayIconStyle::Number => "A number",
-                            TrayIconStyle::Bar => "A bar that fills",
-                            TrayIconStyle::Ring => "A ring that fills",
-                        })).show_ui(ui, |ui| {
-                            for (style, label) in [(TrayIconStyle::Ring, "A ring that fills"), (TrayIconStyle::Bar, "A bar that fills"), (TrayIconStyle::Number, "A number")] {
-                                changed |= dropdown_selectable_value(ui, &mut icon.style, style, language.text(label)).changed();
-                            }
-                        });
-                    });
-                }
-                setting_separator(ui);
-                setting_row(ui, language.text("Tone"), language.text("Auto follows the Windows taskbar theme"), |ui| {
-                    Dropdown::from_id_salt("tray_tone").width(220.0).selected_text(language.text(match icon.tone {
-                        TrayIconTone::Auto => "Auto",
-                        TrayIconTone::Light => "Light (for a dark taskbar)",
-                        TrayIconTone::Dark => "Dark (for a light taskbar)",
-                    })).show_ui(ui, |ui| {
-                        for (tone, label) in [(TrayIconTone::Auto, "Auto"), (TrayIconTone::Light, "Light (for a dark taskbar)"), (TrayIconTone::Dark, "Dark (for a light taskbar)")] {
-                            changed |= dropdown_selectable_value(ui, &mut icon.tone, tone, language.text(label)).changed();
-                        }
-                    });
-                });
-                setting_separator(ui);
-                // Preview, from the real readings when there are any, on both
-                // taskbar colours.
-                let icon = self.settings.tray_icon.clone();
+            section(ui, language.text("Tray icons"), |ui| {
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "The first icon carries the whole fleet in its hover text and holds the menu. Add more to keep several values in view at once; each has its own settings.",
+                    ))
+                    .color(crate::ui::theme::muted())
+                    .size(11.0),
+                );
+                ui.add_space(6.0);
+                let usage = self.usage.clone();
                 let enabled = self.settings.enabled_providers();
-                let content = crate::tray_paint::content(&icon, self.usage.as_ref(), enabled);
-                let key = format!("{icon:?}|{content:?}");
-                if self.tray_preview.as_ref().is_none_or(|(painted_for, _, _)| *painted_for != key) {
-                    let texture = |ctx: &egui::Context, light: bool, name: &str| {
-                        let render = crate::tray_paint::render(&content, 32, light);
-                        let image = egui::ColorImage::from_rgba_unmultiplied([render.size, render.size], &render.rgba);
-                        ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
-                    };
-                    let dark = texture(ui.ctx(), true, "tray-preview-dark");
-                    let light = texture(ui.ctx(), false, "tray-preview-light");
-                    self.tray_preview = Some((key, dark, light));
-                }
-                if let Some((_, dark, light)) = &self.tray_preview {
+                let thresholds = crate::insights::Thresholds {
+                    warn: f64::from(self.settings.warn_percent),
+                    critical: f64::from(self.settings.critical_percent),
+                };
+                let scene = IconScene { usage: usage.as_ref(), enabled, thresholds, language };
+                changed |= tray_icon_editor(ui, 0, &mut self.settings.tray_icon, &scene, &mut self.tray_previews);
+                let mut remove = None;
+                for index in 0..self.settings.extra_tray_icons.len() {
+                    setting_separator(ui);
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(language.text("Preview")).color(crate::ui::theme::muted()).size(11.5));
-                        for (texture, background) in [(dark, egui::Color32::from_rgb(32, 32, 32)), (light, egui::Color32::from_rgb(243, 243, 243))] {
-                            egui::Frame::new().fill(background).corner_radius(6).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                                ui.add(egui::Image::new((texture.id(), egui::vec2(48.0, 48.0))));
-                            });
-                        }
+                        ui.label(egui::RichText::new(format!("{} {}", language.text("Icon"), index + 2)).strong().size(13.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(language.text("Remove")).clicked() {
+                                remove = Some(index);
+                            }
+                        });
                     });
+                    changed |= tray_icon_editor(ui, index + 1, &mut self.settings.extra_tray_icons[index], &scene, &mut self.tray_previews);
+                }
+                if let Some(index) = remove {
+                    self.settings.extra_tray_icons.remove(index);
+                    self.tray_previews.clear();
+                    changed = true;
+                }
+                if self.settings.tray_icons().len() < crate::app_settings::MAX_TRAY_ICONS {
+                    setting_separator(ui);
+                    ui.add_space(8.0);
+                    if ui.button(language.text("Add an icon")).clicked() {
+                        // One provider not yet on an icon, marked with its
+                        // initials so the new icon can be told from the rest.
+                        let taken: Vec<String> = self.settings.tray_icons().iter().filter_map(|icon| icon.provider.clone()).collect();
+                        let next = enabled
+                            .iter()
+                            .map(|provider| provider.descriptor().key.to_string())
+                            .find(|key| !taken.contains(key))
+                            .or_else(|| enabled.iter().next().map(|provider| provider.descriptor().key.to_string()));
+                        self.settings.extra_tray_icons.push(crate::app_settings::TrayIconSettings {
+                            mode: crate::app_settings::TrayIconMode::Provider,
+                            provider: next,
+                            mark: crate::app_settings::TrayIconMark::Initials,
+                            ..Default::default()
+                        });
+                        changed = true;
+                    }
+                    ui.add_space(4.0);
                 }
             });
 
@@ -429,4 +391,150 @@ fn interval_name(language: LanguageId, value: u32) -> &'static str {
         POLL_1_HOUR => language.text("Every hour"),
         _ => language.text("Custom"),
     }
+}
+
+/// What every icon editor needs to show its preview and its choices.
+struct IconScene<'a> {
+    usage: Option<&'a crate::models::AppUsageData>,
+    enabled: crate::providers::ProviderSet,
+    thresholds: crate::insights::Thresholds,
+    language: LanguageId,
+}
+
+type TrayPreviews = std::collections::HashMap<usize, (String, egui::TextureHandle, egui::TextureHandle)>;
+
+/// The rows for one tray icon, in the order the tray menu lists them and
+/// with the same names, plus a preview on both taskbar colours. Rows that
+/// do not apply to the chosen mode are left out. Returns whether anything
+/// changed.
+fn tray_icon_editor(
+    ui: &mut egui::Ui,
+    index: usize,
+    icon: &mut crate::app_settings::TrayIconSettings,
+    scene: &IconScene<'_>,
+    previews: &mut TrayPreviews,
+) -> bool {
+    use crate::app_settings::{TrayIconMark, TrayIconMeasure, TrayIconMetric, TrayIconMode, TrayIconStyle, TrayIconTone};
+    use crate::menu::{mark_label, measure_label, metric_label, mode_label, style_label, tone_label};
+    let language = scene.language;
+    let mut changed = false;
+    let salt = |name: &str| format!("tray_{index}_{name}");
+
+    setting_row(ui, language.text("Show"), language.text("What the icon draws"), |ui| {
+        Dropdown::from_id_salt(salt("mode")).width(260.0).selected_text(language.text(mode_label(icon.mode))).show_ui(ui, |ui| {
+            for mode in [TrayIconMode::Logo, TrayIconMode::Tightest, TrayIconMode::Provider, TrayIconMode::Rundown] {
+                changed |= dropdown_selectable_value(ui, &mut icon.mode, mode, language.text(mode_label(mode))).changed();
+            }
+        });
+    });
+    if icon.mode == TrayIconMode::Provider {
+        setting_separator(ui);
+        setting_row(ui, language.text("Provider"), language.text("Whose value the icon shows"), |ui| {
+            let current = icon.provider.as_deref().and_then(crate::providers::ProviderId::from_key).map(|p| p.descriptor().display_name).unwrap_or("Choose…");
+            Dropdown::from_id_salt(salt("provider")).width(260.0).selected_text(language.text(current)).show_ui(ui, |ui| {
+                for descriptor in PROVIDER_DESCRIPTORS {
+                    changed |= dropdown_selectable_value(ui, &mut icon.provider, Some(descriptor.key.to_string()), language.text(descriptor.display_name)).changed();
+                }
+            });
+        });
+    }
+    if icon.mode != TrayIconMode::Logo {
+        setting_separator(ui);
+        setting_row(ui, language.text("Window"), language.text("Which of the provider's limits it reads"), |ui| {
+            Dropdown::from_id_salt(salt("metric")).width(260.0).selected_text(language.text(metric_label(icon.metric))).show_ui(ui, |ui| {
+                for metric in [TrayIconMetric::Tightest, TrayIconMetric::Session, TrayIconMetric::Weekly, TrayIconMetric::Monthly] {
+                    changed |= dropdown_selectable_value(ui, &mut icon.metric, metric, language.text(metric_label(metric))).changed();
+                }
+            });
+        });
+        setting_separator(ui);
+        setting_row(ui, language.text("Shows"), language.text("What is used, or the headroom left"), |ui| {
+            Dropdown::from_id_salt(salt("measure")).width(260.0).selected_text(language.text(measure_label(icon.measure))).show_ui(ui, |ui| {
+                for measure in [TrayIconMeasure::Used, TrayIconMeasure::Remaining] {
+                    changed |= dropdown_selectable_value(ui, &mut icon.measure, measure, language.text(measure_label(measure))).changed();
+                }
+            });
+        });
+    }
+    if matches!(icon.mode, TrayIconMode::Tightest | TrayIconMode::Provider) {
+        setting_separator(ui);
+        setting_row(ui, language.text("Style"), language.text("How the value is drawn"), |ui| {
+            Dropdown::from_id_salt(salt("style")).width(260.0).selected_text(language.text(style_label(icon.style))).show_ui(ui, |ui| {
+                for style in [TrayIconStyle::Ring, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
+                    changed |= dropdown_selectable_value(ui, &mut icon.style, style, language.text(style_label(style))).changed();
+                }
+            });
+        });
+        if icon.style == TrayIconStyle::Ring {
+            setting_separator(ui);
+            setting_row(ui, language.text("Inside the ring"), language.text("Shown once the icon is large enough to read"), |ui| {
+                Dropdown::from_id_salt(salt("mark")).width(260.0).selected_text(language.text(mark_label(icon.mark))).show_ui(ui, |ui| {
+                    for mark in [TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None] {
+                        changed |= dropdown_selectable_value(ui, &mut icon.mark, mark, language.text(mark_label(mark))).changed();
+                    }
+                });
+            });
+        }
+    } else if icon.mode == TrayIconMode::Rundown {
+        setting_separator(ui);
+        setting_row(ui, language.text("Layout"), language.text("One bar per provider"), |ui| {
+            let mut rows = icon.style == TrayIconStyle::Bar;
+            let current = if rows { "Rows" } else { "Columns" };
+            Dropdown::from_id_salt(salt("layout")).width(260.0).selected_text(language.text(current)).show_ui(ui, |ui| {
+                let picked = dropdown_selectable_value(ui, &mut rows, false, language.text("Columns")).changed()
+                    | dropdown_selectable_value(ui, &mut rows, true, language.text("Rows")).changed();
+                if picked {
+                    icon.style = if rows { TrayIconStyle::Bar } else { TrayIconStyle::Ring };
+                    changed = true;
+                }
+            });
+        });
+    }
+    if icon.mode != TrayIconMode::Logo {
+        setting_separator(ui);
+        setting_row(ui, language.text("Colour at the warning line"), language.text("Amber at the warning line, red at the critical one; otherwise monotone"), |ui| {
+            changed |= Toggle::new(&mut icon.alert_colour).labels(language.text("Tinted"), language.text("Monotone")).show(ui).changed();
+        });
+    }
+    setting_separator(ui);
+    setting_row(ui, language.text("Tone"), language.text("Auto follows the Windows taskbar theme"), |ui| {
+        Dropdown::from_id_salt(salt("tone")).width(260.0).selected_text(language.text(tone_label(icon.tone))).show_ui(ui, |ui| {
+            for tone in [TrayIconTone::Auto, TrayIconTone::Light, TrayIconTone::Dark] {
+                changed |= dropdown_selectable_value(ui, &mut icon.tone, tone, language.text(tone_label(tone))).changed();
+            }
+        });
+    });
+    setting_separator(ui);
+    // Preview, from the real readings when there are any, on both taskbar
+    // colours, with the alert tint the tray would use.
+    let content = crate::tray_paint::content(icon, scene.usage, scene.enabled);
+    let key = format!("{icon:?}|{content:?}|{:?}", scene.thresholds);
+    if previews.get(&index).is_none_or(|(painted_for, _, _)| *painted_for != key) {
+        // A forced tone is forced on both taskbars, as the tray would draw it.
+        let light_on = |dark_taskbar: bool| match icon.tone {
+            TrayIconTone::Auto => dark_taskbar,
+            TrayIconTone::Light => true,
+            TrayIconTone::Dark => false,
+        };
+        let texture = |ctx: &egui::Context, light: bool, name: String| {
+            let rgb = crate::tray::tray_colour(icon, scene.usage, scene.enabled, scene.thresholds, light);
+            let render = crate::tray_paint::render_tinted(&content, 32, rgb);
+            let image = egui::ColorImage::from_rgba_unmultiplied([render.size, render.size], &render.rgba);
+            ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
+        };
+        let dark = texture(ui.ctx(), light_on(true), format!("tray-preview-{index}-dark"));
+        let light = texture(ui.ctx(), light_on(false), format!("tray-preview-{index}-light"));
+        previews.insert(index, (key, dark, light));
+    }
+    if let Some((_, dark, light)) = previews.get(&index) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(language.text("Preview")).color(crate::ui::theme::muted()).size(11.5));
+            for (texture, background) in [(dark, egui::Color32::from_rgb(32, 32, 32)), (light, egui::Color32::from_rgb(243, 243, 243))] {
+                egui::Frame::new().fill(background).corner_radius(6).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                    ui.add(egui::Image::new((texture.id(), egui::vec2(48.0, 48.0))));
+                });
+            }
+        });
+    }
+    changed
 }

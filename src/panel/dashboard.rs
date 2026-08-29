@@ -15,7 +15,7 @@ use crate::activity_log::{ActivityEvent, EventKind};
 use crate::insights::{self, Constraint, Headroom, Insights, Projection, Severity, Thresholds};
 use crate::models::{AppUsageData, UsageData};
 use crate::providers::{ProviderId, ProviderSet};
-use crate::ui::theme::{accent, danger, muted, section_border, section_surface, success, sweep, warning};
+use crate::ui::theme::{accent, danger, muted, section_border, section_surface, sweep, warning};
 use crate::usage_history::Reading;
 
 const METER_WIDTH: f32 = 190.0;
@@ -431,7 +431,7 @@ fn headline(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: L
                     binding.percentage
                 ))
                 .size(15.0)
-                .color(success()),
+                .color(accent()),
             );
         }
         None => {
@@ -723,7 +723,7 @@ fn status_chip(
         Some(_) => match rows.iter().map(|c| c.severity()).max().unwrap_or(Severity::Normal) {
             Severity::Critical => (language.text("critical"), danger()),
             Severity::Warning => (language.text("warning"), warning()),
-            Severity::Normal => (language.text("ok"), success()),
+            Severity::Normal => (language.text("ok"), muted()),
         },
     };
     egui::Frame::new()
@@ -755,13 +755,13 @@ fn projection_label(ui: &mut egui::Ui, projection: &Projection, now: SystemTime,
             .size(11.5),
         );
     } else {
-        ui.label(egui::RichText::new(language.text("renews first")).color(success()).size(11.0));
+        ui.label(egui::RichText::new(language.text("renews first")).color(muted()).size(11.0));
     }
 }
 
 fn activity_row(ui: &mut egui::Ui, event: &ActivityEvent, now: SystemTime, language: LanguageId) {
     let colour = match event.kind {
-        EventKind::Online | EventKind::Refresh => success(),
+        EventKind::Online | EventKind::Refresh => accent(),
         EventKind::Offline | EventKind::NoCredentials => muted(),
         EventKind::AuthRequired => danger(),
         EventKind::Migration | EventKind::Info => accent(),
@@ -815,7 +815,8 @@ fn severity_colour(severity: Severity) -> egui::Color32 {
     match severity {
         Severity::Critical => danger(),
         Severity::Warning => warning(),
-        Severity::Normal => success(),
+        // Fine is the ordinary colour; only trouble is coloured.
+        Severity::Normal => accent(),
     }
 }
 
@@ -825,7 +826,7 @@ fn headroom_colour(headroom: &Headroom) -> egui::Color32 {
     } else if headroom.percent_free <= 25.0 {
         warning()
     } else {
-        success()
+        accent()
     }
 }
 

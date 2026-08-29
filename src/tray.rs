@@ -33,7 +33,7 @@ use crate::native_interop::{
 };
 use crate::poll::request_poll;
 use crate::poller;
-use crate::providers::ProviderId;
+use crate::providers::{ProviderId, ProviderSet};
 use crate::state::{
     lock_state, manual_retry_cooldown_secs, now_unix_secs, AppState, SendHwnd, UpdateStatus,
     FETCH_ALL_COOLDOWN_SECS, TIMER_DUE, TIMER_POLL, TIMER_UPDATE_CHECK,
@@ -148,7 +148,9 @@ pub fn run(open_dashboard_on_start: bool) {
             provider_backoff: Default::default(),
             manual_retry_unix: Default::default(),
             last_fetch_all_unix: 0,
-            tray_icon: settings.tray_icon.clone(),
+            tray_icons: settings.tray_icons(),
+            thresholds: thresholds_of(&settings),
+            appearance: settings.appearance,
         });
     }
 
@@ -251,7 +253,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         m if m == WM_APP_TRAY => {
-            match tray_icon::handle_message(lparam) {
+            // Every icon answers alike: the panel on a click, the menu on
+            // a right-click.
+            match tray_icon::handle_message(wparam, lparam).1 {
                 tray_icon::TrayAction::OpenDashboard => dashboard::show(hwnd),
                 tray_icon::TrayAction::ShowContextMenu => {
                     if let Some(id) = menu::show(hwnd) {
@@ -275,6 +279,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 fn handle_command(hwnd: HWND, id: u16) {
     match id {
         menu::CMD_OPEN => dashboard::show(hwnd),
+        menu::CMD_SETTINGS => dashboard::show_settings(hwnd),
         menu::CMD_REFRESH => manual_retry(hwnd, None),
         menu::CMD_STARTUP => set_startup_enabled(!is_startup_enabled()),
         menu::CMD_UPDATES => {
@@ -328,28 +333,44 @@ fn handle_command(hwnd: HWND, id: u16) {
                 } else {
                     sync_tray(hwnd);
                 }
+            } else if let Some(change) = menu::TrayIconChange::for_command(id) {
+                let changed = lock_state()
+                    .as_mut()
+                    .and_then(|s| s.tray_icons.first_mut().map(|icon| change.apply(icon)))
+                    .unwrap_or(false);
+                if changed {
+                    save_state_settings();
+                    sync_tray(hwnd);
+                }
+            } else if let Some(appearance) = menu::appearance_for_command(id) {
+                let changed = lock_state()
+                    .as_mut()
+                    .map(|s| std::mem::replace(&mut s.appearance, appearance) != appearance)
+                    .unwrap_or(false);
+                if changed {
+                    // The panel, if open, watches the file and follows.
+                    save_state_settings();
+                }
             }
         }
     }
 }
 
+fn thresholds_of(settings: &app_settings::SettingsFile) -> crate::insights::Thresholds {
+    crate::insights::Thresholds {
+        warn: f64::from(settings.warn_percent),
+        critical: f64::from(settings.critical_percent),
+    }
+}
+
 /// The icon and its hover text, from the latest reading.
 fn sync_tray(hwnd: HWND) {
-    let (tooltip, content, tone) = {
+    let (icons, data, enabled, thresholds) = {
         let state = lock_state();
         match state.as_ref() {
-            Some(s) => (
-                fleet_tray_tooltip(s.data.as_ref()),
-                crate::tray_paint::content(&s.tray_icon, s.data.as_ref(), s.providers),
-                s.tray_icon.tone,
-            ),
-            None => ("Headroom".to_string(), crate::tray_paint::Content::Logo, app_settings::TrayIconTone::Auto),
+            Some(s) => (s.tray_icons.clone(), s.data.clone(), s.providers, s.thresholds),
+            None => (vec![app_settings::TrayIconSettings::default()], None, ProviderSet::empty(), Default::default()),
         }
-    };
-    let light = match tone {
-        app_settings::TrayIconTone::Light => true,
-        app_settings::TrayIconTone::Dark => false,
-        app_settings::TrayIconTone::Auto => !taskbar_uses_light_theme(),
     };
     // The size the shell wants at this DPI, painted exactly, not scaled.
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256) as usize;
@@ -357,17 +378,104 @@ fn sync_tray(hwnd: HWND) {
     if LAST_SIZE.swap(size, std::sync::atomic::Ordering::Relaxed) != size {
         diagnose::log(format!("tray icon painted at {size} px"));
     }
-    let render = crate::tray_paint::render(&content, size, light);
-    let icon = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
-    if icon.is_invalid() {
-        diagnose::log("tray icon could not be painted; showing the app icon instead");
+    let taskbar_light = taskbar_uses_light_theme();
+    let fleet_tooltip = fleet_tray_tooltip(data.as_ref());
+    for (index, icon) in icons.iter().enumerate() {
+        let id = tray_icon::FIRST_ICON_ID + index as u32;
+        let content = crate::tray_paint::content(icon, data.as_ref(), enabled);
+        let light = match icon.tone {
+            app_settings::TrayIconTone::Light => true,
+            app_settings::TrayIconTone::Dark => false,
+            app_settings::TrayIconTone::Auto => !taskbar_light,
+        };
+        let rgb = tray_colour(icon, data.as_ref(), enabled, thresholds, light);
+        let render = crate::tray_paint::render_tinted(&content, size, rgb);
+        // The first icon, and any fleet view, carries the whole fleet; an
+        // icon for one value says what that value is.
+        let tooltip = if index == 0 || matches!(content, crate::tray_paint::Content::Rundown { .. } | crate::tray_paint::Content::Logo) {
+            fleet_tooltip.clone()
+        } else {
+            value_tray_tooltip(icon, data.as_ref(), enabled)
+        };
+        let painted = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
+        if painted.is_invalid() {
+            diagnose::log(format!("tray icon {id} could not be painted; showing the app icon instead"));
+        }
+        // sync() owns the icon it is handed and destroys it once the shell
+        // has taken its copy; nothing here touches the handle afterwards.
+        if !tray_icon::sync(hwnd, id, &tooltip, painted) {
+            diagnose::log(format!("the shell refused tray icon {id}"));
+        }
     }
-    // sync() owns the icon it is handed and destroys it once the shell has
-    // taken its copy; nothing here touches the handle afterwards.
-    let registered = tray_icon::sync(hwnd, &tooltip, icon);
-    if !registered {
-        diagnose::log("the shell refused the tray icon registration");
+    tray_icon::trim(hwnd, icons.len() as u32);
+    static LAST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if LAST_COUNT.swap(icons.len(), std::sync::atomic::Ordering::Relaxed) != icons.len() {
+        diagnose::log(format!("{} tray icon(s) registered", icons.len()));
     }
+}
+
+/// The icon's colour: its tone, or the alert tint when it asks for one and
+/// what it shows has crossed a line.
+pub(crate) fn tray_colour(
+    icon: &app_settings::TrayIconSettings,
+    data: Option<&crate::models::AppUsageData>,
+    enabled: ProviderSet,
+    thresholds: crate::insights::Thresholds,
+    light: bool,
+) -> [u8; 3] {
+    let tone: u8 = if light { 255 } else { 16 };
+    if !icon.alert_colour {
+        return [tone; 3];
+    }
+    let Some(used) = crate::tray_paint::shown_used_percent(icon, data, enabled) else {
+        return [tone; 3];
+    };
+    let on = usize::from(!light);
+    match crate::insights::Severity::of(used, thresholds) {
+        crate::insights::Severity::Critical => crate::tray_paint::ALERT_CRITICAL[on],
+        crate::insights::Severity::Warning => crate::tray_paint::ALERT_WARNING[on],
+        crate::insights::Severity::Normal => [tone; 3],
+    }
+}
+
+/// The hover text for an icon that shows one value: whose, which window,
+/// used and left, and when it renews.
+pub fn value_tray_tooltip(
+    icon: &app_settings::TrayIconSettings,
+    data: Option<&crate::models::AppUsageData>,
+    enabled: ProviderSet,
+) -> String {
+    let Some((provider, used)) = crate::tray_paint::shown_provider(icon, data, enabled) else {
+        return "Headroom · nothing reporting".to_string();
+    };
+    let usage = data.and_then(|data| data.get(provider));
+    let window = match icon.metric {
+        app_settings::TrayIconMetric::Session => "session",
+        app_settings::TrayIconMetric::Weekly => "weekly",
+        app_settings::TrayIconMetric::Monthly if usage.is_some_and(|usage| usage.monthly.is_some()) => "monthly",
+        app_settings::TrayIconMetric::Monthly => "weekly",
+        app_settings::TrayIconMetric::Tightest => "tightest",
+    };
+    let renews = usage
+        .and_then(|usage| match icon.metric {
+            app_settings::TrayIconMetric::Session => usage.session.resets_at,
+            app_settings::TrayIconMetric::Weekly => usage.weekly.resets_at,
+            app_settings::TrayIconMetric::Monthly => usage.monthly.as_ref().and_then(|monthly| monthly.resets_at).or(usage.weekly.resets_at),
+            app_settings::TrayIconMetric::Tightest => [usage.session.resets_at, usage.weekly.resets_at, usage.monthly.as_ref().and_then(|monthly| monthly.resets_at)]
+                .into_iter()
+                .flatten()
+                .min(),
+        })
+        .and_then(|at| at.duration_since(std::time::SystemTime::now()).ok())
+        .map(|remaining| format!("  ↻{}", short_duration(remaining)))
+        .unwrap_or_default();
+    let stale = if usage.is_some_and(|usage| usage.stale) { " (stale)" } else { "" };
+    format!(
+        "{} {window}: {:.0}% used · {:.0}% left{renews}{stale}",
+        provider.descriptor().display_name,
+        used,
+        (100.0 - used).max(0.0)
+    )
 }
 
 /// Windows' own switch for the taskbar and start menu: "SystemUsesLightTheme"
@@ -505,7 +613,9 @@ fn reload_settings(hwnd: HWND) {
         s.providers = settings.enabled_providers();
         s.language_override = language_override;
         s.language = localization::resolve_language(language_override);
-        s.tray_icon = settings.tray_icon.clone();
+        s.tray_icons = settings.tray_icons();
+        s.thresholds = thresholds_of(&settings);
+        s.appearance = settings.appearance;
         changed
     };
     unsafe {
@@ -516,8 +626,10 @@ fn reload_settings(hwnd: HWND) {
     sync_tray(hwnd);
 }
 
-/// Persist what the tray owns: interval, providers, language, update check.
-/// Everything else in the file belongs to the panel and is left as loaded.
+/// Persist what the tray owns or can change from its menu: interval,
+/// providers, language, update check, the tray icons, the appearance.
+/// Everything else in the file belongs to the panel and is left as loaded;
+/// the panel watches the file, so a change made here shows there.
 /// The values are copied out first; the lock is never held across the disk.
 fn save_state_settings() {
     let owned = {
@@ -530,6 +642,8 @@ fn save_state_settings() {
             s.providers,
             s.language_override.map(|language| language.code().to_string()),
             s.last_update_check_unix,
+            s.tray_icons.clone(),
+            s.appearance,
         )
     };
     let Some(mut persisted) = app_settings::load_settings_if_readable() else {
@@ -540,6 +654,10 @@ fn save_state_settings() {
     persisted.set_enabled_providers(owned.1);
     persisted.language = owned.2;
     persisted.last_update_check_unix = owned.3;
+    let mut icons = owned.4.into_iter();
+    persisted.tray_icon = icons.next().unwrap_or_default();
+    persisted.extra_tray_icons = icons.collect();
+    persisted.appearance = owned.5;
     if let Err(error) = save_settings(&persisted) {
         diagnose::log(format!("unable to save settings: {error}"));
     }
@@ -960,6 +1078,25 @@ mod tray_tooltip_tests {
     fn nothing_reporting_says_so() {
         assert_eq!(fleet_tray_tooltip(None), "Headroom");
         assert_eq!(fleet_tray_tooltip(Some(&AppUsageData::default())), "Headroom · nothing reporting");
+    }
+
+    #[test]
+    fn a_value_icon_says_whose_value_and_what_is_left() {
+        let mut data = AppUsageData::default();
+        let mut codex = usage(Some(12.0), 64.0, None);
+        codex.weekly.resets_at = Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 3600 + 5 * 60));
+        data.insert(ProviderId::Codex, codex);
+        let enabled = ProviderSet::from_enabled([ProviderId::Codex, ProviderId::Grok]);
+        let icon = crate::app_settings::TrayIconSettings {
+            mode: crate::app_settings::TrayIconMode::Provider,
+            provider: Some("codex".into()),
+            metric: crate::app_settings::TrayIconMetric::Weekly,
+            ..Default::default()
+        };
+        let tip = value_tray_tooltip(&icon, Some(&data), enabled);
+        assert!(tip.starts_with("Codex weekly: 64% used · 36% left  ↻3h"), "{tip}");
+        let missing = crate::app_settings::TrayIconSettings { provider: Some("grok".into()), ..icon };
+        assert_eq!(value_tray_tooltip(&missing, Some(&data), enabled), "Headroom · nothing reporting");
     }
 
     #[test]

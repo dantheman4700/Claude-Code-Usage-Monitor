@@ -7,7 +7,15 @@ icon and one panel.
 Headroom sits in the Windows system tray. Click the icon for the dashboard:
 every limit each provider reports, which one bites first, how fast each window
 is filling, and where there is still room to send the next job. Right-click
-for the menu.
+for the menu, which mirrors Settings: update frequency, providers, the tray
+icon, appearance, start with Windows.
+
+The tray icon is yours to shape: the logo, the tightest limit across the
+fleet, one provider's session, weekly or monthly window, or every provider as
+bars — drawn as a number, a bar, a column or a ring (with the percent or the
+provider's initials inside), showing what is used or what is left, monotone or
+tinted amber and red at your warning lines. Add more icons to keep several
+values in the tray at once; each has its own settings and hover text.
 
 It reads the credentials the provider CLIs already keep on this PC (and inside
 WSL), asks each provider's own API how much of your plan is used, and keeps

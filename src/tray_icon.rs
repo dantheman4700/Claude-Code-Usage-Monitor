@@ -1,7 +1,9 @@
-//! The one tray icon: the app's own, straight from the executable's resource.
+//! The tray icons: painted by `tray_paint`, or the app's own straight from
+//! the executable's resource. There can be several, each with its own id;
+//! the first carries the balloon.
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::UI::Shell::{
     ExtractIconExW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING,
@@ -13,7 +15,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::native_interop::WM_APP_TRAY;
 
-const APP_TRAY_ICON_ID: u32 = 1;
+/// The first icon's id; further icons count up from it.
+pub const FIRST_ICON_ID: u32 = 1;
+
+/// How many icons are registered right now, so a shrink can remove the
+/// ones past the end.
+static REGISTERED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// What a click on the icon asks for.
 pub enum TrayAction {
@@ -64,11 +71,11 @@ fn load_app_icon() -> HICON {
     }
 }
 
-fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
+fn notify_data(hwnd: HWND, id: u32) -> NOTIFYICONDATAW {
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
-    nid.uID = APP_TRAY_ICON_ID;
+    nid.uID = id;
     nid
 }
 
@@ -125,19 +132,19 @@ pub fn icon_from_pixels(size: usize, pixels: &[u32]) -> HICON {
     }
 }
 
-/// Register the icon, or refresh its tooltip if it is already there.
-/// `custom` is a painted icon to show; without one the exe's own icon is
-/// used. Either way this function owns the handle and destroys it after the
-/// shell has copied it -- the caller must not. Returns false when the shell
-/// refused both, which is worth a log line: an app whose icon never appears
-/// has no other way to be found.
-pub fn sync(hwnd: HWND, tooltip: &str, custom: HICON) -> bool {
+/// Register icon `id`, or refresh its image and tooltip if it is already
+/// there. `custom` is a painted icon to show; without one the exe's own
+/// icon is used. Either way this function owns the handle and destroys it
+/// after the shell has copied it -- the caller must not. Returns false when
+/// the shell refused both, which is worth a log line: an app whose icon
+/// never appears has no other way to be found.
+pub fn sync(hwnd: HWND, id: u32, tooltip: &str, custom: HICON) -> bool {
     let hicon = if custom.is_invalid() { load_app_icon() } else { custom };
     if hicon.is_invalid() {
         return false;
     }
     unsafe {
-        let mut nid = notify_data(hwnd);
+        let mut nid = notify_data(hwnd, id);
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = hicon;
@@ -147,14 +154,32 @@ pub fn sync(hwnd: HWND, tooltip: &str, custom: HICON) -> bool {
         let registered = Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
             || Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool();
         let _ = DestroyIcon(hicon);
+        if registered {
+            REGISTERED.fetch_max(id, std::sync::atomic::Ordering::Relaxed);
+        }
         registered
     }
 }
 
-/// A balloon from the tray icon.
+/// Remove every icon past `keep` -- the settings dropped some.
+pub fn trim(hwnd: HWND, keep: u32) {
+    let registered = REGISTERED.load(std::sync::atomic::Ordering::Relaxed);
+    let mut all_removed = true;
+    for id in (FIRST_ICON_ID + keep)..=registered {
+        let removed = unsafe { Shell_NotifyIconW(NIM_DELETE, &notify_data(hwnd, id)).as_bool() };
+        all_removed &= removed;
+    }
+    // The count only comes down once every removal went through; a refusal
+    // leaves the id to be tried again on the next sync.
+    if all_removed && registered >= FIRST_ICON_ID + keep {
+        REGISTERED.store((FIRST_ICON_ID + keep).saturating_sub(1), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A balloon from the first tray icon.
 pub fn notify_balloon(hwnd: HWND, title: &str, message: &str) {
     unsafe {
-        let mut nid = notify_data(hwnd);
+        let mut nid = notify_data(hwnd, FIRST_ICON_ID);
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = NIIF_WARNING;
         copy_wide(title, &mut nid.szInfoTitle);
@@ -164,18 +189,19 @@ pub fn notify_balloon(hwnd: HWND, title: &str, message: &str) {
 }
 
 pub fn remove_all(hwnd: HWND) {
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_DELETE, &notify_data(hwnd));
-    }
+    trim(hwnd, 0);
 }
 
-/// Which action a tray callback asks for.
-pub fn handle_message(lparam: LPARAM) -> TrayAction {
-    match lparam.0 as u32 {
+/// Which action a tray callback asks for. With the classic callback the
+/// icon's id arrives in `wparam` and the mouse message in `lparam`; every
+/// icon answers the same way, so the id is only reported.
+pub fn handle_message(wparam: WPARAM, lparam: LPARAM) -> (u32, TrayAction) {
+    let action = match lparam.0 as u32 {
         WM_LBUTTONUP | WM_LBUTTONDBLCLK => TrayAction::OpenDashboard,
         WM_RBUTTONUP | WM_CONTEXTMENU => TrayAction::ShowContextMenu,
         _ => TrayAction::None,
-    }
+    };
+    (wparam.0 as u32, action)
 }
 
 /// Copy into a fixed Win32 buffer, NUL-terminated, never splitting a
@@ -196,10 +222,11 @@ mod tests {
 
     #[test]
     fn tray_buttons_have_distinct_actions() {
-        assert!(matches!(handle_message(LPARAM(WM_LBUTTONUP as isize)), TrayAction::OpenDashboard));
-        assert!(matches!(handle_message(LPARAM(WM_LBUTTONDBLCLK as isize)), TrayAction::OpenDashboard));
-        assert!(matches!(handle_message(LPARAM(WM_RBUTTONUP as isize)), TrayAction::ShowContextMenu));
-        assert!(matches!(handle_message(LPARAM(WM_CONTEXTMENU as isize)), TrayAction::ShowContextMenu));
+        let on = |id: u32, message: u32| handle_message(WPARAM(id as usize), LPARAM(message as isize));
+        assert!(matches!(on(1, WM_LBUTTONUP), (1, TrayAction::OpenDashboard)));
+        assert!(matches!(on(3, WM_LBUTTONDBLCLK), (3, TrayAction::OpenDashboard)));
+        assert!(matches!(on(2, WM_RBUTTONUP), (2, TrayAction::ShowContextMenu)));
+        assert!(matches!(on(1, WM_CONTEXTMENU), (1, TrayAction::ShowContextMenu)));
     }
 
     #[test]

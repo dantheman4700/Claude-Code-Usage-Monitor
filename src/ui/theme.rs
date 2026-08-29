@@ -285,10 +285,6 @@ pub(crate) fn selected_menu_fill() -> egui::Color32 {
     pick([47, 47, 47], [227, 227, 227])
 }
 
-pub(crate) fn success() -> egui::Color32 {
-    pick([16, 163, 127], [15, 157, 122])
-}
-
 pub(crate) fn danger() -> egui::Color32 {
     pick([239, 68, 68], [217, 45, 32])
 }

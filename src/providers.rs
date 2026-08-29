@@ -32,6 +32,9 @@ pub struct ProviderDescriptor {
     pub settings_description: &'static str,
     /// Stable Win32 command id used by native provider menu items.
     pub native_menu_command_id: u16,
+    /// Two letters the tray icon can carry so icons for different providers
+    /// can be told apart at a glance.
+    pub tray_mark: &'static str,
     /// Every provider is on by default: a provider that is not installed
     /// says so on its own card, and switching one off is the user's call.
     pub default_enabled: bool,
@@ -45,6 +48,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Claude Code",
         settings_description: "Collect usage from Anthropic",
         native_menu_command_id: 60,
+        tray_mark: "CL",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -54,6 +58,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Codex",
         settings_description: "Collect usage from OpenAI",
         native_menu_command_id: 61,
+        tray_mark: "CX",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -63,6 +68,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Antigravity",
         settings_description: "Collect usage from Google",
         native_menu_command_id: 62,
+        tray_mark: "AG",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -72,6 +78,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "OpenCode",
         settings_description: "Collect usage from OpenCode Go",
         native_menu_command_id: 63,
+        tray_mark: "OC",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -81,6 +88,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Cursor",
         settings_description: "Collect usage from Cursor",
         native_menu_command_id: 64,
+        tray_mark: "CU",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -90,6 +98,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Grok",
         settings_description: "Collect usage from xAI",
         native_menu_command_id: 65,
+        tray_mark: "GK",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -99,6 +108,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Fireworks",
         settings_description: "Collect usage from Fireworks",
         native_menu_command_id: 66,
+        tray_mark: "FW",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -108,6 +118,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Devin",
         settings_description: "Collect usage from Devin",
         native_menu_command_id: 67,
+        tray_mark: "DV",
         default_enabled: true,
     },
 ];

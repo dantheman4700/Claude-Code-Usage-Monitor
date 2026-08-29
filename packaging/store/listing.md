@@ -36,7 +36,10 @@ usage requests, sent to the providers themselves. There is no account, no
 telemetry, and no third party.
 
 Features
-- One tray icon; tooltip with every reporting provider and the soonest reset
+- Tray icons you shape: the logo, the tightest limit, one provider's window or
+  the whole fleet — as a number, bar, column or ring, used or left, monotone or
+  tinted at your warning line; add more icons for more values at once
+- Tooltip with every reporting provider and the soonest reset
 - Dashboard: tightest limit first, every window per provider, reset countdowns
 - Burn rate and projected time-to-cap from your own local history
 - Routing view: which provider has the most headroom for the next task

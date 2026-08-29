@@ -56,6 +56,7 @@ pub enum TrayIconMode {
     Rundown,
 }
 
+/// Which of a provider's windows an icon reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrayIconMetric {
@@ -63,15 +64,42 @@ pub enum TrayIconMetric {
     Tightest,
     Session,
     Weekly,
+    /// The monthly window where a provider has one; otherwise its weekly.
+    Monthly,
 }
 
+/// How a value is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrayIconStyle {
     Number,
+    /// A horizontal bar that fills from the left.
     Bar,
     #[default]
     Ring,
+    /// A vertical bar that fills from the bottom.
+    Column,
+}
+
+/// Whether the icon shows what is used or what is left.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconMeasure {
+    #[default]
+    Used,
+    /// The headroom: 100 minus used.
+    Remaining,
+}
+
+/// What sits inside a ring when there is room for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconMark {
+    #[default]
+    Digits,
+    /// The provider's two-letter mark, so several icons can be told apart.
+    Initials,
+    None,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +125,18 @@ pub struct TrayIconSettings {
     pub style: TrayIconStyle,
     #[serde(default)]
     pub tone: TrayIconTone,
+    #[serde(default)]
+    pub measure: TrayIconMeasure,
+    #[serde(default)]
+    pub mark: TrayIconMark,
+    /// Tint the icon amber at the warning line and red at the critical one;
+    /// otherwise it stays monotone.
+    #[serde(default)]
+    pub alert_colour: bool,
 }
+
+/// The most icons the tray will carry: one primary and one more per provider.
+pub const MAX_TRAY_ICONS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
@@ -157,6 +196,11 @@ pub struct SettingsFile {
     /// What the tray icon shows.
     #[serde(default)]
     pub tray_icon: TrayIconSettings,
+    /// Further tray icons, each with its own content, shown beside the
+    /// first. The first icon carries the fleet tooltip and the menu; these
+    /// carry their own value's tooltip and the same menu.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_tray_icons: Vec<TrayIconSettings>,
     /// Extra login files per provider key: native paths or
     /// `wsl:<distro>:<path>`. For installs in places the defaults do not
     /// cover.
@@ -208,6 +252,7 @@ impl Default for SettingsFile {
             dashboard_height: None,
             appearance: Appearance::Auto,
             tray_icon: TrayIconSettings::default(),
+            extra_tray_icons: Vec::new(),
             credential_paths: BTreeMap::new(),
             wsl_distros: None,
             wsl_users: BTreeMap::new(),
@@ -234,6 +279,15 @@ impl SettingsFile {
         }
         self.dashboard_width = valid_dashboard_dimension(self.dashboard_width);
         self.dashboard_height = valid_dashboard_dimension(self.dashboard_height);
+        self.extra_tray_icons.truncate(MAX_TRAY_ICONS - 1);
+    }
+
+    /// Every tray icon in tray order: the primary first, then the extras.
+    pub fn tray_icons(&self) -> Vec<TrayIconSettings> {
+        std::iter::once(self.tray_icon.clone())
+            .chain(self.extra_tray_icons.iter().cloned())
+            .take(MAX_TRAY_ICONS)
+            .collect()
     }
 
     pub fn enabled_providers(&self) -> ProviderSet {
@@ -424,6 +478,34 @@ fn load_settings_from(path: &Path) -> Option<SettingsFile> {
     Some(settings)
 }
 
+/// Fold what this side changed onto a file another process may have
+/// written since this side read it: a key this side changed (against the
+/// copy it read) wins; every other key comes from the disk. The panel saves
+/// its whole struct, and the tray writes the file from its menu, so without
+/// this a tray change made while the panel held a stale copy was lost.
+/// Keys are top-level, so two processes editing the same map at the same
+/// moment still leave one of them the winner.
+pub fn merge_settings(baseline: &SettingsFile, mine: &SettingsFile, disk: &SettingsFile) -> SettingsFile {
+    let base = settings_json(baseline);
+    let mine_json = settings_json(mine);
+    let mut out = settings_json(disk);
+    if let (Some(base), Some(mine_json), Some(out)) = (base.as_object(), mine_json.as_object(), out.as_object_mut()) {
+        for (key, value) in mine_json {
+            if base.get(key) != Some(value) {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+        // A key this side cleared (an optional gone back to its default) is
+        // absent from its JSON; that is a change too.
+        for key in base.keys() {
+            if !mine_json.contains_key(key) {
+                out.remove(key);
+            }
+        }
+    }
+    serde_json::from_value(out).unwrap_or_else(|_| mine.clone())
+}
+
 pub fn save_settings(settings: &SettingsFile) -> Result<(), String> {
     let mut normalized = settings.clone();
     normalized.normalize();
@@ -590,8 +672,13 @@ pub fn save_usage_cache(
 
 /// Settings: 2 added the `providers` map; 3 switched every provider on by
 /// default and dropped the switches older files had frozen from the old
-/// defaults (1 was the first versioned file).
-pub const SETTINGS_SCHEMA: u32 = 3;
+/// defaults (1 was the first versioned file); 4 added tray icon options. A
+/// 3 build leaves a 4 file alone once it holds a variant it cannot decode
+/// (a column style, a monthly window, initials); until then it reads the
+/// file, and a save from it drops the nested icon fields it does not know
+/// (`measure`, `mark`, `alert_colour`) while keeping `extra_tray_icons`
+/// through the unknown-key map. A downgrade costs those three, no more.
+pub const SETTINGS_SCHEMA: u32 = 4;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -860,10 +947,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":4,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":5,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(4));
+        assert_eq!(written["schema_version"], serde_json::json!(5));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -872,8 +959,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":4,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(4))));
-        assert!(matches!(decode_settings(r#"{"schema_version":3,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":5,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(5))));
+        assert!(matches!(decode_settings(r#"{"schema_version":4,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -975,6 +1062,64 @@ mod tests {
         assert_eq!(settings.enabled_providers(), ProviderSet::from_enabled([ProviderId::Claude]));
         assert!(!settings.toggle_provider(ProviderId::Claude));
         assert_eq!(settings.enabled_providers(), ProviderSet::from_enabled([ProviderId::Claude]));
+    }
+
+    #[test]
+    fn tray_icons_round_trip_and_older_files_get_the_defaults() {
+        let mut settings = SettingsFile::default();
+        settings.tray_icon.mode = TrayIconMode::Provider;
+        settings.tray_icon.provider = Some("codex".into());
+        settings.tray_icon.measure = TrayIconMeasure::Remaining;
+        settings.tray_icon.mark = TrayIconMark::Initials;
+        settings.tray_icon.alert_colour = true;
+        settings.extra_tray_icons = vec![
+            TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, ..Default::default() },
+            TrayIconSettings { metric: TrayIconMetric::Monthly, style: TrayIconStyle::Column, ..Default::default() },
+        ];
+        let written = settings_json(&settings).to_string();
+        let loaded = decode_settings(&written).ok().unwrap();
+        assert_eq!(loaded.tray_icon, settings.tray_icon);
+        assert_eq!(loaded.extra_tray_icons, settings.extra_tray_icons);
+        assert_eq!(loaded.tray_icons().len(), 3);
+        assert_eq!(loaded.schema_version, 4);
+
+        // A file from 3 has only the old fields: the new ones take defaults.
+        let older = decode_settings(r#"{"schema_version":3,"tray_icon":{"mode":"tightest","style":"bar"}}"#).ok().unwrap();
+        assert_eq!(older.tray_icon.style, TrayIconStyle::Bar);
+        assert_eq!(older.tray_icon.measure, TrayIconMeasure::Used);
+        assert!(!older.tray_icon.alert_colour);
+        assert!(older.extra_tray_icons.is_empty());
+        assert_eq!(older.schema_version, 4);
+
+        // Too many icons are cut back to the cap.
+        let mut crowded = SettingsFile::default();
+        crowded.extra_tray_icons = vec![TrayIconSettings::default(); 12];
+        crowded.normalize();
+        assert_eq!(crowded.tray_icons().len(), MAX_TRAY_ICONS);
+    }
+
+    #[test]
+    fn a_save_folds_onto_what_another_process_wrote() {
+        let mut baseline = SettingsFile::default();
+        baseline.language = Some("de".into());
+        // This side: changed the warning line and cleared the language.
+        let mut mine = baseline.clone();
+        mine.warn_percent = 60;
+        mine.language = None;
+        // The other side meanwhile: a new tray icon and a provider off.
+        let mut disk = baseline.clone();
+        disk.tray_icon.style = TrayIconStyle::Column;
+        disk.extra_tray_icons.push(TrayIconSettings::default());
+        disk.set_provider_enabled(ProviderId::Grok, false);
+        let merged = merge_settings(&baseline, &mine, &disk);
+        assert_eq!(merged.warn_percent, 60);
+        assert_eq!(merged.language, None, "a cleared optional is a change too");
+        assert_eq!(merged.tray_icon.style, TrayIconStyle::Column);
+        assert_eq!(merged.extra_tray_icons.len(), 1);
+        assert!(!merged.provider_enabled(ProviderId::Grok));
+        // Nothing changed here: the disk is taken as it is.
+        let same = merge_settings(&baseline, &baseline, &disk);
+        assert_eq!(settings_json(&same), settings_json(&disk));
     }
 
     #[test]

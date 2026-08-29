@@ -50,7 +50,19 @@ pub(crate) struct PanelApp {
     pub wsl_user_text: std::collections::BTreeMap<String, String>,
     /// The settings-page preview of the tray icon: key it was painted for,
     /// and the two textures (dark taskbar, light taskbar).
-    pub tray_preview: Option<(String, egui::TextureHandle, egui::TextureHandle)>,
+    /// One preview pair (dark taskbar, light taskbar) per tray icon, keyed
+    /// by its index, painted for the settings and readings it shows.
+    pub tray_previews: std::collections::HashMap<usize, (String, egui::TextureHandle, egui::TextureHandle)>,
+    /// When the settings file was last read or written by this panel, so a
+    /// change the tray makes from its menu is picked up rather than
+    /// overwritten by the next save from here.
+    settings_modified: Option<std::time::SystemTime>,
+    /// Whether a text box had the keyboard last frame.
+    text_edit_active: bool,
+    /// The settings as last read from or written to the file, so a save can
+    /// tell which keys this panel changed and fold them onto whatever the
+    /// tray wrote in between.
+    settings_baseline: app_settings::SettingsFile,
     /// The panel's own window, for recolouring the title bar.
     hwnd: isize,
     /// The palette in effect, to notice when the setting or Windows changes it.
@@ -154,6 +166,7 @@ impl PanelApp {
         let cache = app_settings::load_usage_cache();
         let usage_poll_ok = cache.as_ref().is_some_and(|cache| cache.poll_ok);
         let usage_has_error = cache.as_ref().is_some_and(|cache| !cache.poll_ok);
+        let settings_baseline = settings.clone();
         Self {
             owner,
             page,
@@ -165,7 +178,10 @@ impl PanelApp {
             wsl_distros_pending: None,
             credential_path_text,
             wsl_user_text,
-            tray_preview: None,
+            tray_previews: Default::default(),
+            settings_modified: settings_file_modified(),
+            text_edit_active: false,
+            settings_baseline,
             hwnd,
             dark,
             failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
@@ -195,9 +211,26 @@ impl PanelApp {
             );
             return;
         }
+        // The tray may have written the file since this panel read it (a
+        // menu change); keep its keys and land only what changed here.
+        if settings_file_modified() != self.settings_modified {
+            if let Some(disk) = app_settings::load_settings_if_readable() {
+                let merged = app_settings::merge_settings(&self.settings_baseline, &self.settings, &disk);
+                if merged.credential_paths != self.settings.credential_paths {
+                    self.credential_path_text = merged.credential_paths.iter().map(|(key, paths)| (key.clone(), paths.join("\n"))).collect();
+                }
+                if merged.wsl_users != self.settings.wsl_users {
+                    self.wsl_user_text = merged.wsl_users.clone();
+                }
+                self.settings = merged;
+                self.tray_previews.clear();
+            }
+        }
         match app_settings::save_settings(&self.settings) {
             Ok(()) => {
                 self.settings_error = None;
+                self.settings_modified = settings_file_modified();
+                self.settings_baseline = self.settings.clone();
                 self.post_owner(WM_APP_SETTINGS_UPDATED);
             }
             Err(error) => {
@@ -280,7 +313,7 @@ impl PanelApp {
             crate::ui::theme::set_dark(dark);
             configure_style(ctx, self.language());
             style_native_titlebar(self.hwnd, dark);
-            self.tray_preview = None;
+            self.tray_previews.clear();
         }
     }
 
@@ -291,6 +324,7 @@ impl PanelApp {
         }
         self.last_cache_read = Instant::now();
         self.refresh_appearance_from_windows_tick();
+        self.reload_settings_if_changed();
         // A stat per second is nothing; a parse per second of a file that
         // has not changed was most of the panel's idle work.
         let modified = std::fs::metadata(app_settings::usage_cache_path())
@@ -303,6 +337,38 @@ impl PanelApp {
         if let Some(cache) = app_settings::load_usage_cache() {
             self.update_usage_cache(cache);
         }
+    }
+
+    /// The tray writes the settings file from its menu (providers, the
+    /// icon, appearance…). Follow it, so the page shows the truth and the
+    /// next save from here does not put the old values back. A box being
+    /// typed in is left alone until it is done.
+    fn reload_settings_if_changed(&mut self) {
+        let modified = settings_file_modified();
+        if modified == self.settings_modified {
+            return;
+        }
+        if self.text_edit_active {
+            return;
+        }
+        let Some(loaded) = app_settings::load_settings_if_readable() else {
+            return;
+        };
+        self.settings_modified = modified;
+        let (width, height) = (self.settings.dashboard_width, self.settings.dashboard_height);
+        self.settings = loaded;
+        self.settings.dashboard_width = width;
+        self.settings.dashboard_height = height;
+        self.settings_baseline = self.settings.clone();
+        self.settings_writable = true;
+        self.wsl_user_text = self.settings.wsl_users.clone();
+        self.credential_path_text = self
+            .settings
+            .credential_paths
+            .iter()
+            .map(|(key, paths)| (key.clone(), paths.join("\n")))
+            .collect();
+        self.tray_previews.clear();
     }
 
     fn update_usage_cache(&mut self, cache: UsageCache) {
@@ -391,6 +457,7 @@ impl eframe::App for PanelApp {
             self.settings.dashboard_width = Some(size.x);
             self.settings.dashboard_height = Some(size.y);
         }
+        self.text_edit_active = ui.ctx().memory(|memory| memory.focused().is_some());
         self.refresh_usage_cache();
         self.refresh_appearance(ui.ctx());
         egui::Frame::new()
@@ -432,6 +499,10 @@ impl PanelApp {
             }
         }
     }
+}
+
+fn settings_file_modified() -> Option<std::time::SystemTime> {
+    std::fs::metadata(app_settings::settings_path()).and_then(|meta| meta.modified()).ok()
 }
 
 fn resolve_dark(appearance: crate::app_settings::Appearance) -> bool {

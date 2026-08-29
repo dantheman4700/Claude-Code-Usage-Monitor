@@ -7,12 +7,15 @@
 //! the review dump (as PNGs), and the layouts can be tested by counting
 //! pixels.
 //!
-//! What the icon shows is a setting: the static logo; the tightest limit
-//! across the fleet; one provider's chosen value; or the whole fleet as a
-//! row of bars. The value styles are a number, a bar that fills, and a
-//! ring that fills.
+//! What an icon shows is a setting: the static logo; the tightest limit
+//! across the fleet; one provider's chosen window; or the whole fleet as a
+//! row of bars. A value is used or left, and drawn as a number, a bar, a
+//! column or a ring; a ring can carry digits or the provider's mark inside.
+//! There can be several icons, each with its own settings.
 
-use crate::app_settings::{TrayIconMetric, TrayIconMode, TrayIconSettings, TrayIconStyle};
+use crate::app_settings::{
+    TrayIconMark, TrayIconMeasure, TrayIconMetric, TrayIconMode, TrayIconSettings, TrayIconStyle,
+};
 use crate::models::{AppUsageData, UsageData};
 use crate::providers::{ProviderId, ProviderSet};
 
@@ -21,10 +24,28 @@ use crate::providers::{ProviderId, ProviderSet};
 pub enum Content {
     Logo,
     /// One percentage, 0 to 100 (more is clamped when drawn, shown as digits).
-    Value { percent: f64, style: TrayIconStyle },
+    Value { percent: f64, style: TrayIconStyle, mark: Mark },
     /// One entry per enabled provider, in provider order; `None` for one
-    /// with nothing current.
-    Rundown(Vec<Option<f64>>),
+    /// with nothing current. `rows` lays them out as horizontal rows
+    /// instead of columns.
+    Rundown { bars: Vec<Option<f64>>, rows: bool },
+}
+
+/// What a ring carries inside, when it has the room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// The whole percent.
+    Digits,
+    /// One or two letters: a provider's mark.
+    Text(String),
+    None,
+}
+
+impl Content {
+    /// A value with the default digits mark, for tests and previews.
+    pub fn value(percent: f64, style: TrayIconStyle) -> Self {
+        Content::Value { percent, style, mark: Mark::Digits }
+    }
 }
 
 /// The pixels: straight (non-premultiplied) RGBA, row-major, `size` square.
@@ -50,11 +71,14 @@ impl Render {
 }
 
 /// The percentage a provider contributes under a metric: its tightest
-/// window, or specifically the session or weekly one.
+/// window, or specifically the session, weekly or monthly one. Monthly
+/// falls back to weekly for a provider without a monthly window, so the
+/// icon keeps saying something rather than going blank.
 pub fn provider_percent(usage: &UsageData, metric: TrayIconMetric) -> f64 {
     match metric {
         TrayIconMetric::Session => usage.session.percentage,
         TrayIconMetric::Weekly => usage.weekly.percentage,
+        TrayIconMetric::Monthly => usage.monthly.as_ref().map_or(usage.weekly.percentage, |monthly| monthly.percentage),
         TrayIconMetric::Tightest => [usage.session.percentage, usage.weekly.percentage]
             .into_iter()
             .chain(usage.monthly.as_ref().map(|monthly| monthly.percentage))
@@ -63,51 +87,86 @@ pub fn provider_percent(usage: &UsageData, metric: TrayIconMetric) -> f64 {
     }
 }
 
+/// The provider an icon reads, and its used percentage under the icon's
+/// window: for `Tightest` the provider with the highest reading, for
+/// `Provider` the chosen one (or the first enabled when none is chosen).
+/// `None` when nothing it needs is reporting, or for the other modes.
+pub fn shown_provider(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled: ProviderSet) -> Option<(ProviderId, f64)> {
+    let data = data?;
+    match settings.mode {
+        TrayIconMode::Tightest => enabled
+            .iter()
+            .filter_map(|provider| Some((provider, provider_percent(data.get(provider)?, settings.metric))))
+            .fold(None, |best: Option<(ProviderId, f64)>, candidate| match best {
+                Some(best) if best.1 >= candidate.1 => Some(best),
+                _ => Some(candidate),
+            }),
+        TrayIconMode::Provider => {
+            let chosen = settings
+                .provider
+                .as_deref()
+                .and_then(ProviderId::from_key)
+                .or_else(|| enabled.iter().next())?;
+            Some((chosen, provider_percent(data.get(chosen)?, settings.metric)))
+        }
+        TrayIconMode::Logo | TrayIconMode::Rundown => None,
+    }
+}
+
+/// The highest used percentage among what the icon shows, for the alert
+/// tint: the value itself, or the worst bar of a rundown. `None` for the
+/// logo or when nothing is reporting.
+pub fn shown_used_percent(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled: ProviderSet) -> Option<f64> {
+    match settings.mode {
+        TrayIconMode::Logo => None,
+        TrayIconMode::Tightest | TrayIconMode::Provider => shown_provider(settings, data, enabled).map(|(_, used)| used),
+        TrayIconMode::Rundown => rundown_bars(settings, data, enabled).into_iter().flatten().fold(None, |worst: Option<f64>, value| {
+            Some(worst.map_or(value, |worst| worst.max(value)))
+        }),
+    }
+}
+
+fn rundown_bars(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled: ProviderSet) -> Vec<Option<f64>> {
+    enabled
+        .iter()
+        .map(|provider| {
+            data.and_then(|data| data.get(provider))
+                .map(|usage| provider_percent(usage, settings.metric))
+        })
+        .collect()
+}
+
 /// Decide what the icon shows from the settings and the latest readings.
 /// Anything that needs a reading and has none falls back to the logo, so the
 /// icon is never a blank shape.
 pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled: ProviderSet) -> Content {
     match settings.mode {
         TrayIconMode::Logo => Content::Logo,
-        TrayIconMode::Tightest => {
-            let tightest = data.and_then(|data| {
-                enabled
-                    .iter()
-                    .filter_map(|provider| data.get(provider))
-                    .map(|usage| provider_percent(usage, TrayIconMetric::Tightest))
-                    .fold(None, |best: Option<f64>, value| Some(best.map_or(value, |best| best.max(value))))
-            });
-            match tightest {
-                Some(percent) => Content::Value { percent, style: settings.style },
-                None => Content::Logo,
+        TrayIconMode::Tightest | TrayIconMode::Provider => match shown_provider(settings, data, enabled) {
+            Some((provider, used)) => {
+                let percent = match settings.measure {
+                    TrayIconMeasure::Used => used,
+                    TrayIconMeasure::Remaining => (100.0 - used).max(0.0),
+                };
+                let mark = match settings.mark {
+                    TrayIconMark::Digits => Mark::Digits,
+                    TrayIconMark::Initials => Mark::Text(provider.descriptor().tray_mark.to_string()),
+                    TrayIconMark::None => Mark::None,
+                };
+                Content::Value { percent, style: settings.style, mark }
             }
-        }
-        TrayIconMode::Provider => {
-            let chosen = settings
-                .provider
-                .as_deref()
-                .and_then(ProviderId::from_key)
-                .or_else(|| enabled.iter().next());
-            let percent = chosen
-                .and_then(|provider| data.and_then(|data| data.get(provider)))
-                .map(|usage| provider_percent(usage, settings.metric));
-            match percent {
-                Some(percent) => Content::Value { percent, style: settings.style },
-                None => Content::Logo,
-            }
-        }
+            None => Content::Logo,
+        },
         TrayIconMode::Rundown => {
-            let bars: Vec<Option<f64>> = enabled
-                .iter()
-                .map(|provider| {
-                    data.and_then(|data| data.get(provider))
-                        .map(|usage| provider_percent(usage, TrayIconMetric::Tightest))
-                })
-                .collect();
+            let bars = rundown_bars(settings, data, enabled);
             if bars.iter().all(Option::is_none) {
                 Content::Logo
             } else {
-                Content::Rundown(bars)
+                let bars = match settings.measure {
+                    TrayIconMeasure::Used => bars,
+                    TrayIconMeasure::Remaining => bars.into_iter().map(|bar| bar.map(|used| (100.0 - used).max(0.0))).collect(),
+                };
+                Content::Rundown { bars, rows: settings.style == TrayIconStyle::Bar }
             }
         }
     }
@@ -116,21 +175,28 @@ pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled
 /// Paint `content` at `size` pixels. `light` draws in white (for a dark
 /// taskbar); otherwise in near-black.
 pub fn render(content: &Content, size: usize, light: bool) -> Render {
+    let tone: u8 = if light { 255 } else { 16 };
+    render_tinted(content, size, [tone, tone, tone])
+}
+
+/// Paint `content` at `size` pixels in one colour: the alert tint, or the
+/// tone `render` picks.
+pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3]) -> Render {
     let mut canvas = Canvas::new(size.max(8));
     match content {
         Content::Logo => paint_logo(&mut canvas),
-        Content::Value { percent, style } => match style {
+        Content::Value { percent, style, mark } => match style {
             TrayIconStyle::Number => paint_number(&mut canvas, *percent),
             TrayIconStyle::Bar => paint_bar(&mut canvas, *percent),
-            TrayIconStyle::Ring => paint_ring(&mut canvas, *percent, true),
+            TrayIconStyle::Column => paint_column(&mut canvas, *percent),
+            TrayIconStyle::Ring => paint_ring(&mut canvas, *percent, mark),
         },
-        Content::Rundown(bars) => paint_rundown(&mut canvas, bars),
+        Content::Rundown { bars, rows } => paint_rundown(&mut canvas, bars, *rows),
     }
-    let tone: u8 = if light { 255 } else { 16 };
     let rgba = canvas
         .coverage
         .iter()
-        .flat_map(|&cov| [tone, tone, tone, (cov.clamp(0.0, 1.0) * 255.0).round() as u8])
+        .flat_map(|&cov| [rgb[0], rgb[1], rgb[2], (cov.clamp(0.0, 1.0) * 255.0).round() as u8])
         .collect();
     Render { size: canvas.size, rgba }
 }
@@ -150,7 +216,7 @@ fn paint_logo(canvas: &mut Canvas) {
     canvas.disc(cx, cy, n * 0.09, 1.0);
 }
 
-fn paint_ring(canvas: &mut Canvas, percent: f64, digits_when_room: bool) {
+fn paint_ring(canvas: &mut Canvas, percent: f64, mark: &Mark) {
     let n = canvas.size as f32;
     let (cx, cy) = (n / 2.0, n / 2.0);
     let (r_out, r_in) = (n * 0.47, n * 0.33);
@@ -159,14 +225,25 @@ fn paint_ring(canvas: &mut Canvas, percent: f64, digits_when_room: bool) {
     if fraction > 0.0 {
         canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0 * fraction, 1.0);
     }
-    // Digits inside once there is room for them to be read.
-    if digits_when_room && canvas.size >= 32 {
-        let text = digits_for(percent);
+    // Inside, once there is room for it to be read: a cell of the font has
+    // to be more than a pixel, which two characters reach at 24 px and
+    // three at 32.
+    let text = match mark {
+        Mark::Digits => digits_for(percent),
+        Mark::Text(text) => text.to_uppercase(),
+        Mark::None => String::new(),
+    };
+    if !text.is_empty() {
         let inner = 2.0 * r_in * 0.72;
-        let scale = fit_scale(inner, inner, text.len());
-        canvas.text(&text, cx, cy, scale, 1.0);
+        let scale = fit_scale(inner, inner, text.chars().count());
+        if scale >= MARK_MIN_SCALE {
+            canvas.text(&text, cx, cy, scale, 1.0);
+        }
     }
 }
+
+/// Pixels per font cell below which a mark inside a ring is left out.
+const MARK_MIN_SCALE: f32 = 1.3;
 
 fn paint_bar(canvas: &mut Canvas, percent: f64) {
     let n = canvas.size as f32;
@@ -185,6 +262,23 @@ fn paint_bar(canvas: &mut Canvas, percent: f64) {
     }
 }
 
+/// The bar stood on end: fills from the bottom.
+fn paint_column(canvas: &mut Canvas, percent: f64) {
+    let n = canvas.size as f32;
+    let (x0, x1) = (n * 0.32, n * 0.68);
+    let (y0, y1) = (n * 0.06, n * 0.94);
+    let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
+    canvas.rect(x0, y0, x1, y1, 0.28);
+    let edge = (n * 0.06).max(1.0);
+    canvas.rect(x0, y0, x1, y0 + edge, 0.9);
+    canvas.rect(x0, y1 - edge, x1, y1, 0.9);
+    canvas.rect(x0, y0, x0 + edge, y1, 0.9);
+    canvas.rect(x1 - edge, y0, x1, y1, 0.9);
+    if fraction > 0.0 {
+        canvas.rect(x0, y1 - (y1 - y0) * fraction, x1, y1, 1.0);
+    }
+}
+
 fn paint_number(canvas: &mut Canvas, percent: f64) {
     let n = canvas.size as f32;
     let text = digits_for(percent);
@@ -192,33 +286,45 @@ fn paint_number(canvas: &mut Canvas, percent: f64) {
     canvas.text(&text, n / 2.0, n / 2.0, scale, 1.0);
 }
 
-/// One thin bar per provider, filling from the bottom; a provider with
-/// nothing current is an outline.
-fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>]) {
+/// One thin bar per provider -- columns filling from the bottom, or rows
+/// filling from the left; a provider with nothing current is an outline.
+fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool) {
     if bars.is_empty() {
         paint_logo(canvas);
         return;
     }
     let n = canvas.size as f32;
     let count = bars.len() as f32;
-    let (top, bottom) = (n * 0.10, n * 0.92);
+    let (near, far) = if rows { (n * 0.08, n * 0.92) } else { (n * 0.10, n * 0.92) };
     let span = n * 0.90;
-    let left = (n - span) / 2.0;
+    let first = (n - span) / 2.0;
     let slot = span / count;
     let width = (slot * 0.62).max(1.0);
     for (index, bar) in bars.iter().enumerate() {
-        let x0 = left + slot * index as f32 + (slot - width) / 2.0;
-        let x1 = x0 + width;
+        let a0 = first + slot * index as f32 + (slot - width) / 2.0;
+        let a1 = a0 + width;
+        // (a0, a1) is the bar's extent across; (near, far) along.
+        let fill = |canvas: &mut Canvas, from: f32, to: f32, alpha: f32| {
+            if rows {
+                canvas.rect(from, a0, to, a1, alpha);
+            } else {
+                canvas.rect(a0, from, a1, to, alpha);
+            }
+        };
         match bar {
             Some(percent) => {
-                canvas.rect(x0, top, x1, bottom, 0.28);
+                fill(canvas, near, far, 0.28);
                 let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-                let fill_top = bottom - (bottom - top) * fraction;
                 if fraction > 0.0 {
-                    canvas.rect(x0, fill_top.max(top), x1, bottom, 1.0);
+                    let length = (far - near) * fraction;
+                    if rows {
+                        fill(canvas, near, (near + length).min(far), 1.0);
+                    } else {
+                        fill(canvas, (far - length).max(near), far, 1.0);
+                    }
                 }
             }
-            None => canvas.rect(x0, top, x1, bottom, 0.16),
+            None => fill(canvas, near, far, 0.16),
         }
     }
 }
@@ -332,7 +438,8 @@ impl Canvas {
     }
 }
 
-/// A three-by-five digit font: each row is three bits, top row first.
+/// A three-by-five font, digits and capitals: each row is three bits, top
+/// row first.
 fn glyph(c: char) -> Option<&'static [u8; 5]> {
     const DIGITS: [[u8; 5]; 10] = [
         [0b111, 0b101, 0b101, 0b101, 0b111],
@@ -346,7 +453,38 @@ fn glyph(c: char) -> Option<&'static [u8; 5]> {
         [0b111, 0b101, 0b111, 0b101, 0b111],
         [0b111, 0b101, 0b111, 0b001, 0b111],
     ];
-    c.to_digit(10).map(|d| &DIGITS[d as usize])
+    const LETTERS: [[u8; 5]; 26] = [
+        [0b010, 0b101, 0b111, 0b101, 0b101], // A
+        [0b110, 0b101, 0b110, 0b101, 0b110], // B
+        [0b011, 0b100, 0b100, 0b100, 0b011], // C
+        [0b110, 0b101, 0b101, 0b101, 0b110], // D
+        [0b111, 0b100, 0b110, 0b100, 0b111], // E
+        [0b111, 0b100, 0b110, 0b100, 0b100], // F
+        [0b011, 0b100, 0b101, 0b101, 0b011], // G
+        [0b101, 0b101, 0b111, 0b101, 0b101], // H
+        [0b111, 0b010, 0b010, 0b010, 0b111], // I
+        [0b001, 0b001, 0b001, 0b101, 0b010], // J
+        [0b101, 0b101, 0b110, 0b101, 0b101], // K
+        [0b100, 0b100, 0b100, 0b100, 0b111], // L
+        [0b101, 0b111, 0b111, 0b101, 0b101], // M
+        [0b110, 0b101, 0b101, 0b101, 0b101], // N
+        [0b010, 0b101, 0b101, 0b101, 0b010], // O
+        [0b110, 0b101, 0b110, 0b100, 0b100], // P
+        [0b010, 0b101, 0b101, 0b110, 0b011], // Q
+        [0b110, 0b101, 0b110, 0b101, 0b101], // R
+        [0b011, 0b100, 0b010, 0b001, 0b110], // S
+        [0b111, 0b010, 0b010, 0b010, 0b010], // T
+        [0b101, 0b101, 0b101, 0b101, 0b011], // U
+        [0b101, 0b101, 0b101, 0b101, 0b010], // V
+        [0b101, 0b101, 0b111, 0b111, 0b101], // W
+        [0b101, 0b101, 0b010, 0b101, 0b101], // X
+        [0b101, 0b101, 0b010, 0b010, 0b010], // Y
+        [0b111, 0b001, 0b010, 0b100, 0b111], // Z
+    ];
+    if let Some(d) = c.to_digit(10) {
+        return Some(&DIGITS[d as usize]);
+    }
+    c.is_ascii_uppercase().then(|| &LETTERS[(c as u8 - b'A') as usize])
 }
 
 /// The application icon: the gauge in white on a black rounded plate, so
@@ -485,39 +623,63 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
     let mut written = 0;
     let contents: Vec<(&str, Content)> = vec![
         ("logo", Content::Logo),
-        ("number-7", Content::Value { percent: 7.0, style: TrayIconStyle::Number }),
-        ("number-42", Content::Value { percent: 42.0, style: TrayIconStyle::Number }),
-        ("number-100", Content::Value { percent: 100.0, style: TrayIconStyle::Number }),
-        ("bar-25", Content::Value { percent: 25.0, style: TrayIconStyle::Bar }),
-        ("bar-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar }),
-        ("ring-33", Content::Value { percent: 33.0, style: TrayIconStyle::Ring }),
-        ("ring-91", Content::Value { percent: 91.0, style: TrayIconStyle::Ring }),
-        ("rundown-5", Content::Rundown(vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)])),
-        ("rundown-8", Content::Rundown(vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0), Some(50.0), None, Some(97.0)])),
+        ("number-7", Content::value(7.0, TrayIconStyle::Number)),
+        ("number-42", Content::value(42.0, TrayIconStyle::Number)),
+        ("number-100", Content::value(100.0, TrayIconStyle::Number)),
+        ("bar-25", Content::value(25.0, TrayIconStyle::Bar)),
+        ("bar-80", Content::value(80.0, TrayIconStyle::Bar)),
+        ("column-25", Content::value(25.0, TrayIconStyle::Column)),
+        ("column-80", Content::value(80.0, TrayIconStyle::Column)),
+        ("ring-33", Content::value(33.0, TrayIconStyle::Ring)),
+        ("ring-91", Content::value(91.0, TrayIconStyle::Ring)),
+        ("ring-cl-64", Content::Value { percent: 64.0, style: TrayIconStyle::Ring, mark: Mark::Text("CL".into()) }),
+        ("ring-cx-12", Content::Value { percent: 12.0, style: TrayIconStyle::Ring, mark: Mark::Text("CX".into()) }),
+        ("ring-plain-50", Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::None }),
+        ("rundown-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: false }),
+        ("rundown-8", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0), Some(50.0), None, Some(97.0)], rows: false }),
+        ("rundown-rows-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: true }),
     ];
     for (name, content) in &contents {
         for size in [16usize, 20, 24, 32, 64] {
             for (tone, light) in [("dark-taskbar", true), ("light-taskbar", false)] {
                 let render = render(content, size, light);
-                // Composite onto the taskbar colour so the PNG shows what a
-                // person sees, not alpha on a checkerboard.
-                let bg: [u8; 3] = if light { [32, 32, 32] } else { [243, 243, 243] };
-                let mut rgb = Vec::with_capacity(size * size * 3);
-                for px in render.rgba.chunks_exact(4) {
-                    let a = f32::from(px[3]) / 255.0;
-                    for channel in 0..3 {
-                        rgb.push((f32::from(px[channel]) * a + f32::from(bg[channel]) * (1.0 - a)).round() as u8);
-                    }
-                }
-                let image = image::RgbImage::from_raw(size as u32, size as u32, rgb).ok_or("bad buffer")?;
-                image
-                    .save(dir.join(format!("{name}-{size}-{tone}.png")))
-                    .map_err(|e| e.to_string())?;
+                write_composited(dir, &format!("{name}-{size}-{tone}.png"), &render, light)?;
+                written += 1;
+            }
+        }
+    }
+    // The alert tints, on both taskbars.
+    for (name, rgb) in [("warning", ALERT_WARNING), ("critical", ALERT_CRITICAL)] {
+        for size in [16usize, 24, 32] {
+            for (tone, light) in [("dark-taskbar", true), ("light-taskbar", false)] {
+                let render = render_tinted(&Content::value(88.0, TrayIconStyle::Ring), size, rgb[usize::from(!light)]);
+                write_composited(dir, &format!("ring-{name}-{size}-{tone}.png"), &render, light)?;
                 written += 1;
             }
         }
     }
     Ok(written)
+}
+
+/// The tint for a value at the warning line, on a dark taskbar then a light one.
+pub const ALERT_WARNING: [[u8; 3]; 2] = [[245, 165, 36], [183, 121, 31]];
+/// The tint for a value at the critical line, on a dark taskbar then a light one.
+pub const ALERT_CRITICAL: [[u8; 3]; 2] = [[239, 68, 68], [217, 45, 32]];
+
+/// Composite onto the taskbar colour so the PNG shows what a person sees,
+/// not alpha on a checkerboard.
+fn write_composited(dir: &std::path::Path, name: &str, render: &Render, light: bool) -> Result<(), String> {
+    let size = render.size;
+    let bg: [u8; 3] = if light { [32, 32, 32] } else { [243, 243, 243] };
+    let mut rgb = Vec::with_capacity(size * size * 3);
+    for px in render.rgba.chunks_exact(4) {
+        let a = f32::from(px[3]) / 255.0;
+        for channel in 0..3 {
+            rgb.push((f32::from(px[channel]) * a + f32::from(bg[channel]) * (1.0 - a)).round() as u8);
+        }
+    }
+    let image = image::RgbImage::from_raw(size as u32, size as u32, rgb).ok_or("bad buffer")?;
+    image.save(dir.join(name)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -571,14 +733,42 @@ mod tests {
         data.insert(ProviderId::Grok, usage(0.0, 80.0));
         let enabled = ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Grok, ProviderId::Codex]);
         let settings = TrayIconSettings { mode: TrayIconMode::Tightest, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 80.0, style: TrayIconStyle::Ring });
+        assert_eq!(content(&settings, Some(&data), enabled), Content::value(80.0, TrayIconStyle::Ring));
         let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("claude".into()), metric: TrayIconMetric::Session, style: TrayIconStyle::Number, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 30.0, style: TrayIconStyle::Number });
+        assert_eq!(content(&settings, Some(&data), enabled), Content::value(30.0, TrayIconStyle::Number));
         let settings = TrayIconSettings { mode: TrayIconMode::Rundown, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown(vec![Some(55.0), None, Some(80.0)]));
+        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), None, Some(80.0)], rows: false });
         assert_eq!(content(&settings, None, enabled), Content::Logo);
         let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("devin".into()), ..Default::default() };
         assert_eq!(content(&settings, Some(&data), enabled), Content::Logo);
+    }
+
+    #[test]
+    fn the_options_shape_the_value() {
+        let mut data = AppUsageData::default();
+        data.insert(ProviderId::Claude, usage(30.0, 55.0));
+        data.insert(ProviderId::Grok, usage(0.0, 80.0));
+        let enabled = ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Grok]);
+        // What is left, not what is used; the alert still judges what is used.
+        let settings = TrayIconSettings { mode: TrayIconMode::Tightest, measure: TrayIconMeasure::Remaining, ..Default::default() };
+        assert_eq!(content(&settings, Some(&data), enabled), Content::value(20.0, TrayIconStyle::Ring));
+        assert_eq!(shown_used_percent(&settings, Some(&data), enabled), Some(80.0));
+        // The tightest provider's mark rides inside the ring.
+        let settings = TrayIconSettings { mode: TrayIconMode::Tightest, mark: TrayIconMark::Initials, ..Default::default() };
+        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 80.0, style: TrayIconStyle::Ring, mark: Mark::Text("GK".into()) });
+        // The window applies to the fleet too: by session Claude is tightest.
+        let settings = TrayIconSettings { mode: TrayIconMode::Tightest, metric: TrayIconMetric::Session, mark: TrayIconMark::Initials, ..Default::default() };
+        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 30.0, style: TrayIconStyle::Ring, mark: Mark::Text("CL".into()) });
+        // Monthly falls back to weekly where there is no monthly window.
+        assert_eq!(provider_percent(&usage(30.0, 55.0), TrayIconMetric::Monthly), 55.0);
+        let mut monthly = usage(30.0, 55.0);
+        monthly.monthly = Some(UsageSection { percentage: 9.0, resets_at: None });
+        assert_eq!(provider_percent(&monthly, TrayIconMetric::Monthly), 9.0);
+        // A rundown in the bar style is rows; its alert is its worst bar.
+        let settings = TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, ..Default::default() };
+        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), Some(80.0)], rows: true });
+        assert_eq!(shown_used_percent(&settings, Some(&data), enabled), Some(80.0));
+        assert_eq!(shown_used_percent(&TrayIconSettings { mode: TrayIconMode::Logo, ..Default::default() }, Some(&data), enabled), None);
     }
 
     #[test]
@@ -586,10 +776,13 @@ mod tests {
         for size in [16usize, 20, 24, 32, 64] {
             for content in [
                 Content::Logo,
-                Content::Value { percent: 100.0, style: TrayIconStyle::Number },
-                Content::Value { percent: 50.0, style: TrayIconStyle::Bar },
-                Content::Value { percent: 50.0, style: TrayIconStyle::Ring },
-                Content::Rundown(vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)]),
+                Content::value(100.0, TrayIconStyle::Number),
+                Content::value(50.0, TrayIconStyle::Bar),
+                Content::value(50.0, TrayIconStyle::Column),
+                Content::value(50.0, TrayIconStyle::Ring),
+                Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::Text("CL".into()) },
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: false },
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: true },
             ] {
                 let render = super::render(&content, size, true);
                 assert_eq!(render.rgba.len(), size * size * 4);
@@ -601,20 +794,45 @@ mod tests {
     }
 
     #[test]
-    fn bars_and_rings_fill_with_the_percentage() {
-        for style in [TrayIconStyle::Bar, TrayIconStyle::Ring] {
-            let low = solid(&super::render(&Content::Value { percent: 20.0, style }, 32, true));
-            let high = solid(&super::render(&Content::Value { percent: 90.0, style }, 32, true));
+    fn bars_columns_and_rings_fill_with_the_percentage() {
+        for style in [TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Ring] {
+            let low = solid(&super::render(&Content::value(20.0, style), 32, true));
+            let high = solid(&super::render(&Content::value(90.0, style), 32, true));
             assert!(high > low, "{style:?}: {high} vs {low}");
         }
-        let empty = super::render(&Content::Rundown(vec![Some(0.0), Some(0.0)]), 32, true);
-        let full = super::render(&Content::Rundown(vec![Some(100.0), Some(100.0)]), 32, true);
-        assert!(solid(&full) > solid(&empty));
+        for rows in [false, true] {
+            let empty = super::render(&Content::Rundown { bars: vec![Some(0.0), Some(0.0)], rows }, 32, true);
+            let full = super::render(&Content::Rundown { bars: vec![Some(100.0), Some(100.0)], rows }, 32, true);
+            assert!(solid(&full) > solid(&empty));
+        }
+        // A column fills upward: the bottom half is solid before the top.
+        let half = super::render(&Content::value(50.0, TrayIconStyle::Column), 32, true);
+        let solid_rows: Vec<usize> = (0..32).filter(|y| (0..32).any(|x| half.rgba[(y * 32 + x) * 4 + 3] > 200)).collect();
+        assert!(solid_rows.iter().filter(|y| **y >= 16).count() > solid_rows.iter().filter(|y| **y < 8).count());
+    }
+
+    #[test]
+    fn a_ring_carries_its_mark_only_where_it_can_be_read() {
+        let plain = |size| solid(&super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::None }, size, true));
+        let digits = |size| solid(&super::render(&Content::value(50.0, TrayIconStyle::Ring), size, true));
+        let initials = |size| solid(&super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::Text("CL".into()) }, size, true));
+        assert_eq!(plain(16), digits(16), "nothing fits inside a 16 px ring");
+        assert_eq!(plain(16), initials(16));
+        assert!(digits(32) > plain(32), "digits show at 32 px");
+        assert!(initials(24) > plain(24), "two letters show at 24 px");
+        // Every provider's mark is made of letters the font has.
+        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+            assert!(descriptor.tray_mark.chars().all(|c| glyph(c).is_some()), "{}", descriptor.tray_mark);
+            assert!((1..=2).contains(&descriptor.tray_mark.len()));
+        }
+        let tinted = render_tinted(&Content::Logo, 16, [200, 10, 10]);
+        let px = tinted.rgba.chunks_exact(4).find(|px| px[3] > 200).unwrap();
+        assert_eq!(&px[..3], &[200, 10, 10]);
     }
 
     #[test]
     fn three_digits_fit_at_sixteen_pixels() {
-        let render = super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Number }, 16, true);
+        let render = super::render(&Content::value(100.0, TrayIconStyle::Number), 16, true);
         let (min, max) = lit_columns(&render);
         assert!(max - min >= 10, "three digits should span most of the width: {min}..{max}");
     }

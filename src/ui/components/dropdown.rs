@@ -322,7 +322,7 @@ pub(crate) fn dropdown_selectable_label(
         text_rect.min,
         galley,
         if selected {
-            egui::Color32::WHITE
+            crate::ui::theme::text()
         } else {
             visuals.text_color()
         },
