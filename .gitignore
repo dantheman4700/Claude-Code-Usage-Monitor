@@ -40,3 +40,4 @@ dist/staged/
 .claude/state/
 tmp/conductor/council/debt-diff.patch
 tmp/conductor/council/wave-abc-diff.patch
+tmp/conductor/council/tray-icon-diff.patch

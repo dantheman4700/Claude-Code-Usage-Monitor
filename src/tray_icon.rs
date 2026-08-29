@@ -127,8 +127,10 @@ pub fn icon_from_pixels(size: usize, pixels: &[u32]) -> HICON {
 
 /// Register the icon, or refresh its tooltip if it is already there.
 /// `custom` is a painted icon to show; without one the exe's own icon is
-/// used. Returns false when the shell refused both, which is worth a log
-/// line: an app whose icon never appears has no other way to be found.
+/// used. Either way this function owns the handle and destroys it after the
+/// shell has copied it -- the caller must not. Returns false when the shell
+/// refused both, which is worth a log line: an app whose icon never appears
+/// has no other way to be found.
 pub fn sync(hwnd: HWND, tooltip: &str, custom: HICON) -> bool {
     let hicon = if custom.is_invalid() { load_app_icon() } else { custom };
     if hicon.is_invalid() {

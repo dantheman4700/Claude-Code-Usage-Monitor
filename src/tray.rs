@@ -12,7 +12,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
     TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDYES, MB_ICONERROR, MB_ICONINFORMATION,
     GetSystemMetrics, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, SM_CXSMICON, WM_CLOSE, WM_COMMAND, WM_DESTROY,
@@ -353,17 +353,18 @@ fn sync_tray(hwnd: HWND) {
     };
     // The size the shell wants at this DPI, painted exactly, not scaled.
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256) as usize;
+    static LAST_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if LAST_SIZE.swap(size, std::sync::atomic::Ordering::Relaxed) != size {
+        diagnose::log(format!("tray icon painted at {size} px"));
+    }
     let render = crate::tray_paint::render(&content, size, light);
     let icon = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
     if icon.is_invalid() {
         diagnose::log("tray icon could not be painted; showing the app icon instead");
     }
+    // sync() owns the icon it is handed and destroys it once the shell has
+    // taken its copy; nothing here touches the handle afterwards.
     let registered = tray_icon::sync(hwnd, &tooltip, icon);
-    if !icon.is_invalid() {
-        unsafe {
-            let _ = DestroyIcon(icon);
-        }
-    }
     if !registered {
         diagnose::log("the shell refused the tray icon registration");
     }
