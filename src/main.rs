@@ -16,6 +16,7 @@ mod providers;
 mod state;
 mod tray;
 mod tray_icon;
+mod tray_paint;
 mod ui;
 mod updater;
 mod usage_history;
@@ -36,6 +37,14 @@ fn main() {
         }
     }
 
+    if let Some(index) = args.iter().position(|arg| arg == "--render-tray-previews") {
+        let dir = std::path::PathBuf::from(args.get(index + 1).map(String::as_str).unwrap_or("tray-previews"));
+        match tray_paint::write_previews(&dir) {
+            Ok(count) => diagnose::log(format!("wrote {count} tray previews to {}", dir.display())),
+            Err(error) => diagnose::log(format!("tray previews failed: {error}")),
+        }
+        return;
+    }
     if panel::handle_cli_mode(&args) {
         return;
     }

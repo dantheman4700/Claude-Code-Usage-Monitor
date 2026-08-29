@@ -124,6 +124,8 @@ pub struct AppState {
     /// When each provider was last retried by hand, for the cooldown.
     pub manual_retry_unix: HashMap<ProviderId, u64>,
     pub last_fetch_all_unix: u64,
+    /// What the tray icon shows.
+    pub tray_icon: crate::app_settings::TrayIconSettings,
 }
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);

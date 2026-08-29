@@ -12,10 +12,11 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
     TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDYES, MB_ICONERROR, MB_ICONINFORMATION,
-    MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETTINGCHANGE,
+    GetSystemMetrics, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, SM_CXSMICON, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_SETTINGCHANGE, WM_THEMECHANGED,
     WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
@@ -147,6 +148,7 @@ pub fn run(open_dashboard_on_start: bool) {
             provider_backoff: Default::default(),
             manual_retry_unix: Default::default(),
             last_fetch_all_unix: 0,
+            tray_icon: settings.tray_icon.clone(),
         });
     }
 
@@ -237,10 +239,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
         }
-        WM_SETTINGCHANGE => {
-            if update_language_change() {
-                sync_tray(hwnd);
-            }
+        // Language or the light/dark theme may have changed; either way the
+        // icon is cheap to repaint.
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_DPICHANGED => {
+            let _ = update_language_change();
+            sync_tray(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -332,12 +335,62 @@ fn handle_command(hwnd: HWND, id: u16) {
 
 /// The icon and its hover text, from the latest reading.
 fn sync_tray(hwnd: HWND) {
-    let tooltip = lock_state()
-        .as_ref()
-        .map(|s| fleet_tray_tooltip(s.data.as_ref()))
-        .unwrap_or_else(|| "Headroom".to_string());
-    if !tray_icon::sync(hwnd, &tooltip) {
+    let (tooltip, content, tone) = {
+        let state = lock_state();
+        match state.as_ref() {
+            Some(s) => (
+                fleet_tray_tooltip(s.data.as_ref()),
+                crate::tray_paint::content(&s.tray_icon, s.data.as_ref(), s.providers),
+                s.tray_icon.tone,
+            ),
+            None => ("Headroom".to_string(), crate::tray_paint::Content::Logo, app_settings::TrayIconTone::Auto),
+        }
+    };
+    let light = match tone {
+        app_settings::TrayIconTone::Light => true,
+        app_settings::TrayIconTone::Dark => false,
+        app_settings::TrayIconTone::Auto => !taskbar_uses_light_theme(),
+    };
+    // The size the shell wants at this DPI, painted exactly, not scaled.
+    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256) as usize;
+    let render = crate::tray_paint::render(&content, size, light);
+    let icon = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
+    if icon.is_invalid() {
+        diagnose::log("tray icon could not be painted; showing the app icon instead");
+    }
+    let registered = tray_icon::sync(hwnd, &tooltip, icon);
+    if !icon.is_invalid() {
+        unsafe {
+            let _ = DestroyIcon(icon);
+        }
+    }
+    if !registered {
         diagnose::log("the shell refused the tray icon registration");
+    }
+}
+
+/// Windows' own switch for the taskbar and start menu: "SystemUsesLightTheme"
+/// under Personalize. Absent (older builds) means dark.
+fn taskbar_uses_light_theme() -> bool {
+    unsafe {
+        let path = wide_str(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let name = wide_str("SystemUsesLightTheme");
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR::from_raw(path.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
+            return false;
+        }
+        let mut value: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let read = RegQueryValueExW(
+            hkey,
+            PCWSTR::from_raw(name.as_ptr()),
+            None,
+            None,
+            Some(std::ptr::from_mut(&mut value).cast()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        read.is_ok() && value == 1
     }
 }
 
@@ -451,6 +504,7 @@ fn reload_settings(hwnd: HWND) {
         s.providers = settings.enabled_providers();
         s.language_override = language_override;
         s.language = localization::resolve_language(language_override);
+        s.tray_icon = settings.tray_icon.clone();
         changed
     };
     unsafe {

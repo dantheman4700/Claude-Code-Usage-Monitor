@@ -48,6 +48,9 @@ pub(crate) struct PanelApp {
     /// typing survives across frames; committed to settings as it changes.
     pub credential_path_text: std::collections::BTreeMap<String, String>,
     pub wsl_user_text: std::collections::BTreeMap<String, String>,
+    /// The settings-page preview of the tray icon: key it was painted for,
+    /// and the two textures (dark taskbar, light taskbar).
+    pub tray_preview: Option<(String, egui::TextureHandle, egui::TextureHandle)>,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
     /// Why each enabled provider without a reading has none.
@@ -154,6 +157,7 @@ impl PanelApp {
             wsl_distros_pending: None,
             credential_path_text,
             wsl_user_text,
+            tray_preview: None,
             failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),

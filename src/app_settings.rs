@@ -30,6 +30,64 @@ pub const POLL_5_MIN: u32 = POLL_5_MIN_SECONDS * 1_000;
 pub const POLL_15_MIN: u32 = POLL_15_MIN_SECONDS * 1_000;
 pub const POLL_1_HOUR: u32 = POLL_1_HOUR_SECONDS * 1_000;
 
+/// What the tray icon shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconMode {
+    /// The static logo.
+    Logo,
+    /// The tightest limit across every enabled provider.
+    #[default]
+    Tightest,
+    /// One provider's chosen value.
+    Provider,
+    /// Every enabled provider as a row of bars.
+    Rundown,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconMetric {
+    #[default]
+    Tightest,
+    Session,
+    Weekly,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconStyle {
+    Number,
+    Bar,
+    #[default]
+    Ring,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayIconTone {
+    /// White on a dark taskbar, black on a light one, following Windows.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayIconSettings {
+    #[serde(default)]
+    pub mode: TrayIconMode,
+    /// The provider key for `Provider` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub metric: TrayIconMetric,
+    #[serde(default)]
+    pub style: TrayIconStyle,
+    #[serde(default)]
+    pub tone: TrayIconTone,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
     /// Format version of this file. Loaded as the greater of the file's and
@@ -82,6 +140,9 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// What the tray icon shows.
+    #[serde(default)]
+    pub tray_icon: TrayIconSettings,
     /// Extra login files per provider key: native paths or
     /// `wsl:<distro>:<path>`. For installs in places the defaults do not
     /// cover.
@@ -131,6 +192,7 @@ impl Default for SettingsFile {
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
+            tray_icon: TrayIconSettings::default(),
             credential_paths: BTreeMap::new(),
             wsl_distros: None,
             wsl_users: BTreeMap::new(),

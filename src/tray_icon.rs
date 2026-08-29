@@ -72,11 +72,65 @@ fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
     nid
 }
 
+/// A 32-bit icon from premultiplied BGRA pixels, `size` square. The caller
+/// destroys it.
+pub fn icon_from_pixels(size: usize, pixels: &[u32]) -> HICON {
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
+        ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+    if size == 0 || size > 512 || pixels.len() != size * size {
+        return HICON::default();
+    }
+    unsafe {
+        let screen_dc = GetDC(HWND::default());
+        let memory_dc = CreateCompatibleDC(screen_dc);
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size as i32,
+                // Negative height: rows top-down, the order the renderer uses.
+                biHeight: -(size as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let colour = CreateDIBSection(memory_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+        if colour.is_invalid() || bits.is_null() {
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(HWND::default(), screen_dc);
+            return HICON::default();
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u32>(), pixels.len());
+        // An all-zero monochrome mask lets the colour bitmap's alpha decide.
+        let mask = CreateBitmap(size as i32, size as i32, 1, 1, None);
+        let icon_info = ICONINFO {
+            fIcon: true.into(),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: colour,
+        };
+        let icon = CreateIconIndirect(&icon_info).unwrap_or_default();
+        let _ = DeleteObject(mask);
+        let _ = DeleteObject(colour);
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(HWND::default(), screen_dc);
+        icon
+    }
+}
+
 /// Register the icon, or refresh its tooltip if it is already there.
-/// Returns false when the shell refused both, which is worth a log line: an
-/// app whose icon never appears has no other way to be found.
-pub fn sync(hwnd: HWND, tooltip: &str) -> bool {
-    let hicon = load_app_icon();
+/// `custom` is a painted icon to show; without one the exe's own icon is
+/// used. Returns false when the shell refused both, which is worth a log
+/// line: an app whose icon never appears has no other way to be found.
+pub fn sync(hwnd: HWND, tooltip: &str, custom: HICON) -> bool {
+    let hicon = if custom.is_invalid() { load_app_icon() } else { custom };
     if hicon.is_invalid() {
         return false;
     }
