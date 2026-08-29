@@ -17,7 +17,7 @@ use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-use crate::models::{AppUsageData, CodexCreditsState};
+use crate::models::{AppUsageData, CodexCreditsState, ProviderFailure};
 use crate::usage_history::UsageHistory;
 use crate::providers::{ProviderId, ProviderSet};
 
@@ -177,20 +177,6 @@ impl SettingsFile {
         }
     }
 
-    /// The `show_*` field name a provider's mirror is stored under.
-    fn mirror_field(provider: ProviderId) -> &'static str {
-        match provider {
-            ProviderId::Claude => "show_claude_code",
-            ProviderId::Codex => "show_codex",
-            ProviderId::Antigravity => "show_antigravity",
-            ProviderId::OpenCode => "show_opencode",
-            ProviderId::Cursor => "show_cursor",
-            ProviderId::Grok => "show_grok",
-            ProviderId::Fireworks => "show_fireworks",
-            ProviderId::Devin => "show_devin",
-        }
-    }
-
     /// Bring the mirrors in line with the map before a write.
     fn refresh_mirrors(&mut self) {
         for provider in ProviderId::ALL {
@@ -224,6 +210,10 @@ pub struct UsageCache {
     pub updated_unix: u64,
     pub poll_ok: bool,
     pub data: AppUsageData,
+    /// Why each enabled provider without a current reading has none, keyed
+    /// by the provider's cache key.
+    #[serde(default)]
+    pub failures: BTreeMap<String, ProviderFailure>,
 }
 
 pub fn app_data_directory() -> PathBuf {
@@ -366,18 +356,12 @@ fn decode_settings(content: &str) -> Result<SettingsFile, SettingsDecodeError> {
         Err(_) if on_disk > SETTINGS_SCHEMA => return Err(SettingsDecodeError::Newer(on_disk)),
         Err(error) => return Err(SettingsDecodeError::Corrupt(error.to_string())),
     };
-    if on_disk < SETTINGS_SCHEMA {
-        // An older writer: only the mirrors it actually wrote say anything;
-        // a provider it never heard of keeps following its default.
+    if on_disk < 3 {
+        // Before 3 most providers were off by default and the file recorded
+        // that default as if it were a choice. Nobody chose it; start from
+        // "everything on" and let the user switch things off from here.
         settings.providers.clear();
-        for provider in ProviderId::ALL {
-            if let Some(enabled) = value
-                .get(SettingsFile::mirror_field(provider))
-                .and_then(serde_json::Value::as_bool)
-            {
-                settings.providers.insert(provider.descriptor().key.to_string(), enabled);
-            }
-        }
+        crate::diagnose::log("settings: provider switches reset -- every provider is on by default now");
     }
     settings.schema_version = on_disk.max(SETTINGS_SCHEMA);
     Ok(settings)
@@ -492,7 +476,11 @@ fn on_disk_schema(content: &str) -> u32 {
         .unwrap_or(0) as u32
 }
 
-pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String> {
+pub fn save_usage_cache(
+    data: &AppUsageData,
+    poll_ok: bool,
+    failures: &BTreeMap<ProviderId, ProviderFailure>,
+) -> Result<(), String> {
     write_json_atomic(
         &usage_cache_path(),
         &UsageCache {
@@ -500,12 +488,18 @@ pub fn save_usage_cache(data: &AppUsageData, poll_ok: bool) -> Result<(), String
             updated_unix: now_unix(),
             poll_ok,
             data: data.clone(),
+            failures: failures
+                .iter()
+                .map(|(provider, failure)| (provider.descriptor().cache_key.to_string(), failure.clone()))
+                .collect(),
         },
     )
 }
 
-/// Settings: 2 added the `providers` map (1 was the first versioned file).
-pub const SETTINGS_SCHEMA: u32 = 2;
+/// Settings: 2 added the `providers` map; 3 switched every provider on by
+/// default and dropped the switches older files had frozen from the old
+/// defaults (1 was the first versioned file).
+pub const SETTINGS_SCHEMA: u32 = 3;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -709,12 +703,15 @@ mod tests {
     fn a_v1_file_survives_the_new_build_and_back() {
         let v1 = r#"{"schema_version":1,"poll_interval_ms":300000,"language":"de","last_update_check_unix":5,"warn_percent":70,"critical_percent":95,"history_retention_days":60,"show_unreachable_providers":false,"first_run_seen":true,"show_grok":false,"show_codex":true,"dashboard_width":1280.0,"dashboard_height":760.0}"#;
         let loaded = decode_settings(v1).ok().unwrap();
-        assert!(!loaded.provider_enabled(ProviderId::Grok));
+        // Provider switches from before 3 were frozen defaults, not choices:
+        // everything is on after the migration.
+        assert!(loaded.provider_enabled(ProviderId::Grok));
         assert!(loaded.provider_enabled(ProviderId::Codex));
+        assert!(loaded.provider_enabled(ProviderId::Devin));
         assert_eq!(loaded.schema_version, SETTINGS_SCHEMA);
         let written = settings_json(&loaded).to_string();
         let old_reader: LegacySettingsV1 = serde_json::from_str(&written).unwrap();
-        assert!(!old_reader.show_grok);
+        assert!(old_reader.show_grok);
         assert!(old_reader.show_codex);
         assert_eq!(old_reader.poll_interval_ms, 300000);
         assert_eq!(old_reader.dashboard_width, Some(1280.0));
@@ -725,34 +722,39 @@ mod tests {
         assert!(old_reader.first_run_seen);
     }
 
-    /// v2 file → the old writer re-encodes it (map dropped, version 1) →
-    /// this build reads the same enabled set from the mirrors.
+    /// A file the old writer re-encodes (map dropped, version 1) comes back
+    /// with every provider on -- the one thing a downgrade costs -- and
+    /// everything else intact.
     #[test]
-    fn the_old_writer_round_trip_keeps_the_enabled_set() {
+    fn the_old_writer_round_trip_resets_switches_and_keeps_the_rest() {
         let mut settings = SettingsFile::default();
         settings.set_provider_enabled(ProviderId::Grok, false);
-        settings.set_provider_enabled(ProviderId::Fireworks, true);
-        let v2 = settings_json(&settings).to_string();
-        let old_reader: LegacySettingsV1 = serde_json::from_str(&v2).unwrap();
+        settings.poll_interval_ms = POLL_15_MIN;
+        settings.history_retention_days = 60;
+        let current = settings_json(&settings).to_string();
+        let old_reader: LegacySettingsV1 = serde_json::from_str(&current).unwrap();
+        assert!(!old_reader.show_grok, "the mirror carried the choice to the old build");
         let rewritten_by_old = serde_json::to_string(&LegacySettingsV1 { schema_version: 1, ..old_reader }).unwrap();
         let reloaded = decode_settings(&rewritten_by_old).ok().unwrap();
-        assert_eq!(enabled_set(&reloaded), enabled_set(&settings));
+        assert_eq!(enabled_set(&reloaded).len(), ProviderId::ALL.len());
+        assert_eq!(reloaded.poll_interval_ms, POLL_15_MIN);
+        assert_eq!(reloaded.history_retention_days, 60);
     }
 
     /// Under an old version the mirrors win; under this one the map wins.
     #[test]
     fn the_authoritative_field_depends_on_the_version() {
-        let old = decode_settings(r#"{"schema_version":1,"show_codex":false,"providers":{"codex":true}}"#).ok().unwrap();
-        assert!(!old.provider_enabled(ProviderId::Codex));
-        let current = decode_settings(r#"{"schema_version":2,"providers":{"codex":true},"show_codex":false}"#).ok().unwrap();
-        assert!(current.provider_enabled(ProviderId::Codex));
+        let old = decode_settings(r#"{"schema_version":2,"show_codex":false,"providers":{"codex":false}}"#).ok().unwrap();
+        assert!(old.provider_enabled(ProviderId::Codex), "pre-3 switches are dropped");
+        let current = decode_settings(r#"{"schema_version":3,"providers":{"codex":false},"show_codex":true}"#).ok().unwrap();
+        assert!(!current.provider_enabled(ProviderId::Codex), "at 3 the map is the truth");
     }
 
     /// A provider this build does not know stays in the map through a toggle
     /// and a save; a provider missing from the map follows its default.
     #[test]
     fn unknown_providers_and_missing_keys_behave() {
-        let mut settings = decode_settings(r#"{"schema_version":2,"providers":{"newprov":true}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":3,"providers":{"newprov":true}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
         assert_eq!(written["providers"]["newprov"], serde_json::Value::Bool(true));
@@ -766,10 +768,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":3,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":4,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(3));
+        assert_eq!(written["schema_version"], serde_json::json!(4));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -778,8 +780,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":3,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(3))));
-        assert!(matches!(decode_settings(r#"{"schema_version":2,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":4,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(4))));
+        assert!(matches!(decode_settings(r#"{"schema_version":3,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -873,19 +875,14 @@ mod tests {
     #[test]
     fn provider_toggle_keeps_the_last_provider_enabled() {
         let mut settings = SettingsFile::default();
-        // More than one provider ships enabled, so switching one off is allowed
-        // and it is only the final one that must be refused.
-        assert!(settings.toggle_provider(ProviderId::Grok));
-        assert_eq!(
-            settings.enabled_providers(),
-            ProviderSet::from_enabled([ProviderId::Claude])
-        );
+        // Everything ships on; switching providers off is allowed right down
+        // to the last one, which is refused.
+        for provider in ProviderId::ALL.into_iter().filter(|provider| *provider != ProviderId::Claude) {
+            assert!(settings.toggle_provider(provider));
+        }
+        assert_eq!(settings.enabled_providers(), ProviderSet::from_enabled([ProviderId::Claude]));
         assert!(!settings.toggle_provider(ProviderId::Claude));
-        assert!(!settings.enabled_providers().is_empty());
-        assert_eq!(
-            settings.enabled_providers(),
-            ProviderSet::from_enabled([ProviderId::Claude])
-        );
+        assert_eq!(settings.enabled_providers(), ProviderSet::from_enabled([ProviderId::Claude]));
     }
 
     #[test]

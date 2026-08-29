@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::diagnose;
-use crate::models::{AppUsageData, UsageData};
+use crate::models::{AppUsageData, FailureKind, ProviderFailure, UsageData};
 use crate::providers::{ProviderId, ProviderSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,8 +27,74 @@ pub struct PollFailure {
 /// whether anything answered. Deciding how soon to ask a provider again needs
 /// to know which ones failed and how -- a missing key and a dropped connection
 /// deserve very different retry schedules.
-pub fn poll_detailed(enabled_providers: ProviderSet) -> (AppUsageData, Vec<PollFailure>) {
-    poll_with_detailed(enabled_providers, poll_provider)
+pub fn poll_detailed(enabled_providers: ProviderSet) -> PollRound {
+    let mut reports = HashMap::new();
+    let (data, failures) = poll_with_detailed(enabled_providers, |provider| {
+        let result = poll_provider(provider);
+        if let Err(error) = result {
+            reports.insert(provider, take_last_failure().unwrap_or_else(|| generic_failure(provider, error)));
+        }
+        result
+    });
+    PollRound { data, failures, reports }
+}
+
+/// One round's answers: readings, the failures the scheduler acts on, and
+/// the report behind each failure for the panel.
+pub struct PollRound {
+    pub data: AppUsageData,
+    pub failures: Vec<PollFailure>,
+    pub reports: HashMap<ProviderId, ProviderFailure>,
+}
+
+/// A report for a failure that produced none of its own.
+fn generic_failure(provider: ProviderId, error: PollError) -> ProviderFailure {
+    let name = provider.descriptor().display_name;
+    let (kind, summary) = match error {
+        PollError::NoCredentials => (FailureKind::NotInstalled, format!("No {name} login found.")),
+        PollError::AuthRequired => (FailureKind::Rejected, format!("{name} rejected the saved login.")),
+        PollError::TokenExpired => (FailureKind::Expired, format!("{name}'s login has expired.")),
+        PollError::RequestFailed => (FailureKind::Offline, format!("{name} did not answer.")),
+    };
+    ProviderFailure { kind, summary, looked: Vec::new(), hint: String::new(), at_unix: now_unix() }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+/// Turn a failed request into words, from the transport note the client
+/// left. `None` means the request itself went through, so the reply was
+/// the problem.
+pub(crate) fn request_failure(provider: ProviderId, transport: Option<Transport>, retry_hint: &str) -> (FailureKind, String, String) {
+    let name = provider.descriptor().display_name;
+    match transport {
+        Some(Transport::RateLimited) => (
+            FailureKind::RateLimited,
+            format!("{name} is rate-limiting requests right now."),
+            format!("Nothing to do: Headroom backs off and retries ({retry_hint})."),
+        ),
+        Some(Transport::Server(code)) => (
+            FailureKind::ServerError,
+            format!("{name}'s service returned an error (HTTP {code})."),
+            format!("Likely on their side; Headroom retries ({retry_hint})."),
+        ),
+        Some(Transport::Status(code)) => (
+            FailureKind::Malformed,
+            format!("{name} answered HTTP {code} to a usage request."),
+            "The API may have changed; update Headroom, or report it.".to_string(),
+        ),
+        Some(Transport::Offline(detail)) => (
+            FailureKind::Offline,
+            format!("{name} could not be reached ({detail})."),
+            format!("Check the connection; Headroom retries ({retry_hint})."),
+        ),
+        None => (
+            FailureKind::Malformed,
+            format!("{name} answered, but the reply could not be read."),
+            "The API may have changed; update Headroom, or report it.".to_string(),
+        ),
+    }
 }
 
 /// Keep the previous reading for any enabled provider that failed this cycle.
@@ -179,6 +246,8 @@ fn provider_poller(provider: ProviderId) -> Option<&'static ProviderPoller> {
 
 fn poll_provider(provider: ProviderId) -> Result<UsageData, PollError> {
     wsl::reset_timed_out();
+    let _ = take_transport();
+    let _ = take_last_failure();
     let result = provider_poller(provider)
         .ok_or(PollError::RequestFailed)
         .and_then(|poller| (poller.poll)());
@@ -259,12 +328,90 @@ pub(crate) fn spend_allowed(key: &'static str) -> bool {
     true
 }
 
-fn build_agent() -> Result<ureq::Agent, PollError> {
+fn build_agent() -> Result<Http, PollError> {
     let tls = native_tls::TlsConnector::new().map_err(|_| PollError::RequestFailed)?;
-    Ok(ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .tls_connector(std::sync::Arc::new(tls))
-        .build())
+    Ok(Http(
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .tls_connector(std::sync::Arc::new(tls))
+            .build(),
+    ))
+}
+
+/// The one HTTP client every provider uses, so every failure passes one
+/// place that remembers what kind it was. Providers keep returning plain
+/// `PollError`s; the note beside them says whether the provider was rate
+/// limiting, down, unreachable, or answering nonsense.
+pub(crate) struct Http(ureq::Agent);
+
+pub(crate) struct Request(ureq::Request);
+
+impl Http {
+    pub fn get(&self, url: &str) -> Request {
+        Request(self.0.get(url))
+    }
+    pub fn post(&self, url: &str) -> Request {
+        Request(self.0.post(url))
+    }
+}
+
+impl Request {
+    pub fn set(self, header: &str, value: &str) -> Request {
+        Request(self.0.set(header, value))
+    }
+    // ureq's own error type; providers match on it, so it stays unboxed.
+    #[allow(clippy::result_large_err)]
+    pub fn call(self) -> Result<ureq::Response, ureq::Error> {
+        self.0.call().inspect_err(note_transport)
+    }
+    #[allow(clippy::result_large_err)]
+    pub fn send_json(self, body: impl serde::Serialize) -> Result<ureq::Response, ureq::Error> {
+        self.0.send_json(body).inspect_err(note_transport)
+    }
+}
+
+/// What the last failed request looked like, for the report. Thread-local:
+/// polls run one provider at a time on the worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+    RateLimited,
+    Server(u16),
+    Status(u16),
+    Offline(String),
+}
+
+thread_local! {
+    static TRANSPORT: std::cell::RefCell<Option<Transport>> = const { std::cell::RefCell::new(None) };
+    static LAST_FAILURE: std::cell::RefCell<Option<ProviderFailure>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_transport(error: &ureq::Error) {
+    let note = match error {
+        ureq::Error::Status(429, _) => Transport::RateLimited,
+        ureq::Error::Status(code, _) if *code >= 500 => Transport::Server(*code),
+        ureq::Error::Status(code, _) => Transport::Status(*code),
+        ureq::Error::Transport(transport) => Transport::Offline(
+            transport
+                .message()
+                .unwrap_or(&transport.kind().to_string())
+                .chars()
+                .take(120)
+                .collect(),
+        ),
+    };
+    TRANSPORT.with(|cell| *cell.borrow_mut() = Some(note));
+}
+
+pub(crate) fn take_transport() -> Option<Transport> {
+    TRANSPORT.with(|cell| cell.borrow_mut().take())
+}
+
+pub(crate) fn set_last_failure(report: ProviderFailure) {
+    LAST_FAILURE.with(|cell| *cell.borrow_mut() = Some(report));
+}
+
+fn take_last_failure() -> Option<ProviderFailure> {
+    LAST_FAILURE.with(|cell| cell.borrow_mut().take())
 }
 
 fn get_header_f64(response: &ureq::Response, name: &str) -> f64 {

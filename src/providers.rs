@@ -32,6 +32,8 @@ pub struct ProviderDescriptor {
     pub settings_description: &'static str,
     /// Stable Win32 command id used by native provider menu items.
     pub native_menu_command_id: u16,
+    /// Every provider is on by default: a provider that is not installed
+    /// says so on its own card, and switching one off is the user's call.
     pub default_enabled: bool,
 }
 
@@ -52,7 +54,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Codex",
         settings_description: "Collect usage from OpenAI",
         native_menu_command_id: 61,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::Antigravity,
@@ -61,7 +63,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Antigravity",
         settings_description: "Collect usage from Google",
         native_menu_command_id: 62,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::OpenCode,
@@ -70,7 +72,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "OpenCode",
         settings_description: "Collect usage from OpenCode Go",
         native_menu_command_id: 63,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::Cursor,
@@ -79,7 +81,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Cursor",
         settings_description: "Collect usage from Cursor",
         native_menu_command_id: 64,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::Grok,
@@ -97,7 +99,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Fireworks",
         settings_description: "Collect usage from Fireworks",
         native_menu_command_id: 66,
-        default_enabled: false,
+        default_enabled: true,
     },
     ProviderDescriptor {
         id: ProviderId::Devin,
@@ -106,7 +108,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         display_name: "Devin",
         settings_description: "Collect usage from Devin",
         native_menu_command_id: 67,
-        default_enabled: false,
+        default_enabled: true,
     },
 ];
 
@@ -236,10 +238,10 @@ mod tests {
 
     #[test]
     fn default_provider_set_comes_from_descriptors() {
-        assert_eq!(
-            ProviderSet::default(),
-            ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Grok])
-        );
+        // Every provider ships on; one that is not installed says so on its
+        // own card rather than being hidden behind a switch.
+        assert_eq!(ProviderSet::default(), ProviderSet::from_enabled(ProviderId::ALL));
+        assert!(PROVIDER_DESCRIPTORS.iter().all(|descriptor| descriptor.default_enabled));
     }
 
     #[test]

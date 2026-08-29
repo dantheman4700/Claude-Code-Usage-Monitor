@@ -114,6 +114,40 @@ pub struct CodexCreditsState {
     pub baseline: f64,
 }
 
+/// Why a provider has no reading, precisely enough to act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum FailureKind {
+    /// Nothing that could hold a login exists anywhere Headroom looked.
+    NotInstalled,
+    /// A credential store exists but holds no usable login.
+    NotSignedIn,
+    /// The saved login has passed its own expiry.
+    Expired,
+    /// The provider answered 401 to the saved login.
+    Rejected,
+    /// The provider answered 429.
+    RateLimited,
+    /// The provider answered 5xx.
+    ServerError,
+    /// No answer at all: DNS, TLS, timeout, connection refused.
+    Offline,
+    /// The provider answered, but not in a shape Headroom understands.
+    Malformed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderFailure {
+    pub kind: FailureKind,
+    /// One sentence for the card.
+    pub summary: String,
+    /// Every place Headroom looked, with what it found there. Never a secret.
+    #[serde(default)]
+    pub looked: Vec<String>,
+    /// The exact thing to do about it.
+    pub hint: String,
+    pub at_unix: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AppUsageData {
     providers: BTreeMap<ProviderId, UsageData>,

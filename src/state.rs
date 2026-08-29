@@ -62,6 +62,8 @@ pub struct ProviderBackoff {
     /// soon as they change, so a sign-in is picked up within one tick
     /// instead of at the end of the backoff.
     pub watch: Option<CredentialWatchSnapshot>,
+    /// What the panel says about it, from the last failed round.
+    pub report: Option<crate::models::ProviderFailure>,
 }
 
 impl PollError {
@@ -154,7 +156,7 @@ mod tests {
 
     #[test]
     fn credential_failures_get_the_long_manual_cooldown() {
-        let auth = ProviderBackoff { misses: 1, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None };
+        let auth = ProviderBackoff { misses: 1, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None, report: None };
         let transient = ProviderBackoff { error: PollError::RequestFailed, ..auth.clone() };
         assert_eq!(manual_retry_cooldown_secs(Some(&auth)), 30);
         assert_eq!(manual_retry_cooldown_secs(Some(&transient)), 2);

@@ -136,7 +136,7 @@ pub(super) fn credential_watch_snapshot() -> Vec<String> {
     credentials::watch_snapshot(&SPEC)
 }
 
-fn resolve_account(agent: &ureq::Agent, key: &str) -> Result<Account, PollError> {
+fn resolve_account(agent: &super::Http, key: &str) -> Result<Account, PollError> {
     if let Some(id) = credentials::non_empty_environment(FIREWORKS_ACCOUNT_ENV)
         .or_else(|| env_file_value(FIREWORKS_ACCOUNT_ENV))
     {
@@ -150,7 +150,7 @@ fn resolve_account(agent: &ureq::Agent, key: &str) -> Result<Account, PollError>
     })
 }
 
-fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, key: &str, url: &str) -> Result<T, PollError> {
+fn get_json<T: serde::de::DeserializeOwned>(agent: &super::Http, key: &str, url: &str) -> Result<T, PollError> {
     let response = agent
         .get(url)
         .set("Authorization", &format!("Bearer {key}"))

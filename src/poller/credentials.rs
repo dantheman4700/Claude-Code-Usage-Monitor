@@ -35,6 +35,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use super::{file_signature, spend_allowed, wsl, PollError};
+use crate::models::{FailureKind, ProviderFailure};
 use crate::diagnose;
 use crate::models::UsageData;
 use crate::providers::ProviderId;
@@ -175,20 +176,73 @@ pub fn read(spec: &Spec, source: &Source) -> Option<String> {
 }
 
 /// Ask the provider through every source in order. See the module docs for
-/// the policy.
+/// the policy. A failure leaves a [`ProviderFailure`] behind (see
+/// [`super::poll_detailed`]) saying exactly what was found where.
 pub fn poll(spec: &Spec, attempt: Attempt) -> Result<UsageData, PollError> {
     let name = spec.provider.descriptor().display_name;
+    let mut trail = Trail::default();
     let result = poll_sources(
         sources(spec),
         |source| read(spec, source),
         attempt,
         |source| refresh(spec, source),
         name,
+        &mut trail,
     );
-    if result == Err(PollError::NoCredentials) {
-        diagnose::log(format!("{name} usage poll failed: no credentials found ({})", spec.sign_in_hint));
+    if let Err(error) = result {
+        let report = failure_report(spec, error, &trail);
+        diagnose::log(format!("{name}: {}", report.summary));
+        super::set_last_failure(report);
     }
     result
+}
+
+/// Where the loop looked and what it found, for the report.
+#[derive(Default)]
+pub(super) struct Trail {
+    pub looked: Vec<String>,
+    /// How many sources existed at all (a file, a store, a set variable).
+    pub stores_found: usize,
+}
+
+fn failure_report(spec: &Spec, error: PollError, trail: &Trail) -> ProviderFailure {
+    let name = spec.provider.descriptor().display_name;
+    let (kind, summary, hint) = match error {
+        PollError::NoCredentials if trail.stores_found == 0 => (
+            FailureKind::NotInstalled,
+            format!("No {name} login found on this PC or in WSL."),
+            format!("If {name} is installed: {}. Or point Headroom at its login file in Settings.", spec.sign_in_hint),
+        ),
+        PollError::NoCredentials => (
+            FailureKind::NotSignedIn,
+            format!("Found {name}'s files, but no login in them."),
+            spec.sign_in_hint.to_string(),
+        ),
+        PollError::TokenExpired => (
+            FailureKind::Expired,
+            format!("{name}'s saved login has expired."),
+            spec.sign_in_hint.to_string(),
+        ),
+        PollError::AuthRequired => (
+            FailureKind::Rejected,
+            format!("{name} rejected the saved login (HTTP 401)."),
+            spec.sign_in_hint.to_string(),
+        ),
+        PollError::RequestFailed => {
+            let (kind, summary, hint) = super::request_failure(spec.provider, super::take_transport(), "a couple of minutes, then longer");
+            (kind, summary, hint)
+        }
+    };
+    ProviderFailure {
+        kind,
+        summary,
+        looked: trail.looked.clone(),
+        hint,
+        at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }
 }
 
 /// The loop itself, over any sources, so it can be tested without a disk.
@@ -198,24 +252,38 @@ pub(super) fn poll_sources(
     attempt: impl Fn(&str, &Source) -> Result<UsageData, PollError>,
     mut refresh: impl FnMut(&Source) -> bool,
     name: &str,
+    trail: &mut Trail,
 ) -> Result<UsageData, PollError> {
     let mut credential_error: Option<PollError> = None;
     for source in sources {
         let Some(content) = read(&source) else {
+            trail.looked.push(format!("{source} — not found"));
             continue;
         };
+        trail.stores_found += 1;
         let error = match attempt(&content, &source) {
             Ok(usage) => return Ok(usage),
-            Err(PollError::NoCredentials) => continue,
+            Err(PollError::NoCredentials) => {
+                trail.looked.push(format!("{source} — found, but no login in it"));
+                continue;
+            }
             // The provider or the network is down: asking more sources
             // would only spend more spawns on the same outage. A rejection
             // already seen still outranks it -- that is a sign-in problem,
             // and the scheduler watches credential files for those.
             Err(PollError::RequestFailed) => {
-                return Err(credential_error.unwrap_or(PollError::RequestFailed))
+                trail.looked.push(format!("{source} — login found; the provider did not answer"));
+                return Err(credential_error.unwrap_or(PollError::RequestFailed));
             }
             Err(error) => error,
         };
+        trail.looked.push(format!(
+            "{source} — {}",
+            match error {
+                PollError::TokenExpired => "login found, expired",
+                _ => "login found, rejected by the provider",
+            }
+        ));
         // This token is bad. Refresh once, where it lives, and try the same
         // source again; then move on. The retry's answer counts: a rejection
         // after a refresh outranks the local expiry that started it, and a
@@ -379,6 +447,7 @@ mod tests {
             |content, _| if content == "fresh" { Ok(UsageData::default()) } else { Err(PollError::AuthRequired) },
             |_| false,
             "test",
+            &mut Trail::default(),
         );
         assert!(result.is_ok());
     }
@@ -396,6 +465,7 @@ mod tests {
             |_, _| Err(PollError::RequestFailed),
             |_| false,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(result, Err(PollError::RequestFailed));
         assert_eq!(visited.borrow().len(), 1);
@@ -418,6 +488,7 @@ mod tests {
                 true
             },
             "test",
+            &mut Trail::default(),
         );
         assert!(result.is_ok());
         assert_eq!(*refreshed.borrow(), 1);
@@ -426,9 +497,9 @@ mod tests {
 
     #[test]
     fn end_states_say_what_was_found() {
-        let none = poll_sources([file("a")].into_iter(), |_| None, |_, _| unreachable!(), |_| false, "test");
+        let none = poll_sources([file("a")].into_iter(), |_| None, |_, _| unreachable!(), |_| false, "test", &mut Trail::default());
         assert_eq!(none, Err(PollError::NoCredentials));
-        let unparseable = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::NoCredentials), |_| false, "test");
+        let unparseable = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::NoCredentials), |_| false, "test", &mut Trail::default());
         assert_eq!(unparseable, Err(PollError::NoCredentials));
         let expired_then_rejected = poll_sources(
             [file("a"), file("b")].into_iter(),
@@ -436,9 +507,10 @@ mod tests {
             |_, source| Err(if *source == file("a") { PollError::TokenExpired } else { PollError::AuthRequired }),
             |_| false,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(expired_then_rejected, Err(PollError::AuthRequired));
-        let only_expired = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::TokenExpired), |_| false, "test");
+        let only_expired = poll_sources([file("a")].into_iter(), |_| Some("x".into()), |_, _| Err(PollError::TokenExpired), |_| false, "test", &mut Trail::default());
         assert_eq!(only_expired, Err(PollError::TokenExpired));
     }
 
@@ -455,6 +527,7 @@ mod tests {
             },
             |_| true,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(result, Err(PollError::AuthRequired));
     }
@@ -478,6 +551,7 @@ mod tests {
             },
             |_| true,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(result, Err(PollError::TokenExpired));
         assert_eq!(*visited.borrow(), 2, "source a read twice, source b never");
@@ -491,6 +565,7 @@ mod tests {
             },
             |_| true,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(upgraded, Err(PollError::AuthRequired));
     }
@@ -505,6 +580,7 @@ mod tests {
             |_, source| Err(if *source == file("a") { PollError::AuthRequired } else { PollError::RequestFailed }),
             |_| false,
             "test",
+            &mut Trail::default(),
         );
         assert_eq!(result, Err(PollError::AuthRequired));
     }
@@ -529,6 +605,27 @@ mod tests {
         };
         let order: Vec<String> = native_sources(&spec).iter().map(ToString::to_string).collect();
         assert_eq!(order, vec!["env X", "app-store", "file auth.json", "app-cache"]);
+    }
+
+    /// The trail says where the loop looked and what it found, and tells a
+    /// missing install apart from a present-but-empty one.
+    #[test]
+    fn the_trail_distinguishes_missing_from_empty() {
+        let mut trail = Trail::default();
+        let _ = poll_sources([file("a"), file("b")].into_iter(), |_| None, |_, _| unreachable!(), |_| false, "test", &mut trail);
+        assert_eq!(trail.stores_found, 0);
+        assert_eq!(trail.looked, vec!["file a — not found", "file b — not found"]);
+        let mut trail = Trail::default();
+        let _ = poll_sources(
+            [file("a")].into_iter(),
+            |_| Some("{}".into()),
+            |_, _| Err(PollError::NoCredentials),
+            |_| false,
+            "test",
+            &mut trail,
+        );
+        assert_eq!(trail.stores_found, 1);
+        assert_eq!(trail.looked, vec!["file a — found, but no login in it"]);
     }
 
     #[test]

@@ -128,6 +128,7 @@ pub(crate) fn apply_failures(
                 next_attempt_unix: 0,
                 error: failure.error,
                 watch: None,
+                report: None,
             });
         // A different kind of failure, or credentials that just changed,
         // starts the ladder over: a fresh sign-in deserves the short step.
@@ -201,7 +202,7 @@ fn do_poll_once(send_hwnd: SendHwnd) {
         return;
     }
 
-    let (data, failures) = poller::poll_detailed(polled);
+    let poller::PollRound { data, failures, mut reports } = poller::poll_detailed(polled);
     let mut snapshots: HashMap<ProviderId, CredentialWatchSnapshot> = HashMap::new();
     for failure in failures.iter().filter(|failure| failure.error.is_credential_failure()) {
         let snapshot = pre_poll
@@ -215,7 +216,7 @@ fn do_poll_once(send_hwnd: SendHwnd) {
     // Bookkeeping under the lock; every write to disk happens after it.
     let mut events: Vec<(EventKind, Option<ProviderId>, String)> = Vec::new();
     let mut balloons: Vec<(String, String)> = Vec::new();
-    let (merged, poll_ok) = {
+    let (merged, poll_ok, failed) = {
         let mut state = lock_state();
         let Some(s) = state.as_mut() else {
             return;
@@ -233,6 +234,11 @@ fn do_poll_once(send_hwnd: SendHwnd) {
             }
         }
         let ladders = apply_failures(&mut s.provider_backoff, &failures, snapshots, credentials_changed, now);
+        for (provider, _, _) in &ladders {
+            if let (Some(entry), Some(report)) = (s.provider_backoff.get_mut(provider), reports.remove(provider)) {
+                entry.report = Some(report);
+            }
+        }
         for (provider, error, misses) in ladders {
             if misses != 1 {
                 continue;
@@ -266,13 +272,22 @@ fn do_poll_once(send_hwnd: SendHwnd) {
             .any(|provider| merged.get(provider).is_some_and(|usage| !usage.stale));
         s.data = Some(merged.clone());
         s.last_poll_ok = poll_ok;
-        (merged, poll_ok)
+        // What the panel says about every enabled provider without a
+        // current reading.
+        let failed: std::collections::BTreeMap<ProviderId, crate::models::ProviderFailure> = enabled
+            .iter()
+            .filter_map(|provider| {
+                let entry = s.provider_backoff.get(&provider)?;
+                Some((provider, entry.report.clone()?))
+            })
+            .collect();
+        (merged, poll_ok, failed)
     };
 
     for (kind, provider, message) in events {
         activity_log::record(kind, provider, message);
     }
-    let _ = app_settings::save_usage_cache(&merged, poll_ok);
+    let _ = app_settings::save_usage_cache(&merged, poll_ok, &failed);
     if any_fresh {
         app_settings::record_usage_history(&merged, now);
     }
@@ -329,6 +344,7 @@ mod tests {
             next_attempt_unix: until,
             error,
             watch: watch.map(|w| w.iter().map(|s| s.to_string()).collect()),
+            report: None,
         }
     }
 
@@ -366,7 +382,7 @@ mod tests {
     #[test]
     fn a_credential_change_restarts_the_ladder_but_a_plain_repeat_climbs_it() {
         let mut backoff = HashMap::new();
-        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 3, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None });
+        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 3, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None, report: None });
         let failures = [PollFailure { provider: ProviderId::Codex, error: PollError::AuthRequired }];
         let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), set(&[ProviderId::Codex]), 1_000);
         assert_eq!(ladders, vec![(ProviderId::Codex, PollError::AuthRequired, 1)]);
@@ -381,7 +397,7 @@ mod tests {
     #[test]
     fn a_manual_retry_keeps_the_miss_count() {
         let mut backoff = HashMap::new();
-        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 2, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None });
+        backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 2, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None, report: None });
         let failures = [PollFailure { provider: ProviderId::Codex, error: PollError::AuthRequired }];
         let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), empty_set(), 0);
         assert_eq!(ladders[0].2, 3);

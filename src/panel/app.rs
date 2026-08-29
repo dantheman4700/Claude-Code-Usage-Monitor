@@ -42,6 +42,8 @@ pub(crate) struct PanelApp {
     settings_writable: bool,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
+    /// Why each enabled provider without a reading has none.
+    pub failures: std::collections::BTreeMap<ProviderId, crate::models::ProviderFailure>,
     pub usage_history: UsageHistory,
     pub activity: ActivityLog,
     pub fleet_insights: Option<(ProviderSet, Thresholds, Insights)>,
@@ -134,6 +136,7 @@ impl PanelApp {
             settings,
             settings_error: None,
             settings_writable,
+            failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),
             activity: crate::activity_log::load(),
@@ -235,6 +238,7 @@ impl PanelApp {
         let poll_ok = cache.poll_ok;
         let changed = self.usage.as_ref() != Some(&cache.data) || self.usage_poll_ok != poll_ok;
         if changed {
+            self.failures = failures_by_provider(&cache);
             self.usage = Some(cache.data);
             self.usage_poll_ok = poll_ok;
             self.usage_has_error = !poll_ok;
@@ -334,6 +338,14 @@ impl eframe::App for PanelApp {
             crate::diagnose::log(format!("panel size save failed: {error}"));
         }
     }
+}
+
+fn failures_by_provider(cache: &UsageCache) -> std::collections::BTreeMap<ProviderId, crate::models::ProviderFailure> {
+    cache
+        .failures
+        .iter()
+        .filter_map(|(key, failure)| Some((ProviderId::from_cache_key(key)?, failure.clone())))
+        .collect()
 }
 
 /// The caption takes the panel's own indigo, so the title bar, the panel and

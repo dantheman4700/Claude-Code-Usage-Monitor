@@ -7,6 +7,7 @@
 //! go) and Activity (what changed) are their own pages.
 
 use super::*;
+use crate::models::{FailureKind, ProviderFailure};
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -161,11 +162,25 @@ impl PanelApp {
         let language = self.language();
         let show_unreachable = self.settings.show_unreachable_providers;
 
-        // Reporting providers first, tightest at the top; the rest below.
-        let mut order: Vec<(ProviderId, bool, Severity, f64)> = ProviderId::ALL
+        // Reporting providers first, tightest at the top; then the ones with
+        // a problem worth acting on; then the ones that are not installed,
+        // folded into one line.
+        let rank = |provider: ProviderId| -> u8 {
+            match (usage.get(provider), self.failures.get(&provider)) {
+                (Some(reading), _) if !reading.stale => 0,
+                (Some(_), _) => 1,
+                (None, Some(failure)) => match failure.kind {
+                    FailureKind::NotInstalled => 4,
+                    FailureKind::NotSignedIn => 3,
+                    _ => 2,
+                },
+                (None, None) => 4,
+            }
+        };
+        let mut order: Vec<(ProviderId, u8, Severity, f64)> = ProviderId::ALL
             .into_iter()
+            .filter(|provider| self.settings.provider_enabled(*provider))
             .map(|provider| {
-                let reporting = usage.get(provider).is_some();
                 let rows: Vec<&Constraint> = insights
                     .constraints
                     .iter()
@@ -173,11 +188,11 @@ impl PanelApp {
                     .collect();
                 let worst = rows.iter().map(|c| c.severity()).max().unwrap_or(Severity::Normal);
                 let peak = rows.iter().map(|c| c.percentage).fold(0.0_f64, f64::max);
-                (provider, reporting, worst, peak)
+                (provider, rank(provider), worst, peak)
             })
             .collect();
         order.sort_by(|a, b| {
-            b.1.cmp(&a.1)
+            a.1.cmp(&b.1)
                 .then(b.2.cmp(&a.2))
                 .then(b.3.total_cmp(&a.3))
                 .then(a.0.cmp(&b.0))
@@ -185,8 +200,13 @@ impl PanelApp {
 
         ui.add_space(4.0);
         let mut drew_any = false;
-        for (provider, reporting, _, _) in order {
-            if !reporting && !show_unreachable {
+        let mut not_installed: Vec<ProviderId> = Vec::new();
+        for (provider, rank, _, _) in order {
+            if rank == 4 {
+                not_installed.push(provider);
+                continue;
+            }
+            if rank >= 2 && !show_unreachable {
                 continue;
             }
             drew_any = true;
@@ -201,6 +221,7 @@ impl PanelApp {
                 ui,
                 provider,
                 reading,
+                self.failures.get(&provider),
                 &rows,
                 expanded,
                 &self.usage_history.series(provider),
@@ -208,10 +229,7 @@ impl PanelApp {
                 now,
                 thresholds,
                 language,
-                // No retry for a provider the user has switched off; the
-                // tray would refuse it and the button would only show a
-                // cooldown for nothing.
-                self.settings.provider_enabled(provider).then(|| self.retry_cooldown_left(Some(provider))),
+                Some(self.retry_cooldown_left(Some(provider))),
             );
             if retry {
                 self.request_retry(Some(provider));
@@ -224,6 +242,14 @@ impl PanelApp {
                 }
             }
             ui.add_space(8.0);
+        }
+        if show_unreachable && !not_installed.is_empty() {
+            drew_any = true;
+            let entries: Vec<(ProviderId, Option<&ProviderFailure>)> = not_installed
+                .iter()
+                .map(|provider| (*provider, self.failures.get(provider)))
+                .collect();
+            not_installed_card(ui, &entries, language);
         }
         if !drew_any {
             ui.label(egui::RichText::new(language.text("Nothing is reporting.")).color(muted()));
@@ -410,12 +436,54 @@ fn headline(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: L
     });
 }
 
+/// The providers with nothing on this PC, on one card: their names, and
+/// (opened) where Headroom looked for each and what to run.
+fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&ProviderFailure>)], language: LanguageId) {
+    egui::Frame::new()
+        .fill(section_surface())
+        .stroke(egui::Stroke::new(1.0, section_border()))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let names: Vec<&str> = entries.iter().map(|(provider, _)| language.text(provider_name(*provider))).collect();
+            egui::CollapsingHeader::new(
+                egui::RichText::new(format!("{}: {}", language.text("Not installed on this PC"), names.join(", ")))
+                    .size(13.0)
+                    .color(muted()),
+            )
+            .id_salt("not-installed")
+            .show(ui, |ui| {
+                for (provider, failure) in entries {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(language.text(provider_name(*provider))).strong().size(12.5));
+                    if let Some(failure) = failure {
+                        if !failure.hint.is_empty() {
+                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(11.5));
+                        }
+                        for place in &failure.looked {
+                            ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(11.0).monospace());
+                        }
+                    }
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(language.text("Switch a provider off in Settings to stop looking for it."))
+                        .color(muted())
+                        .size(11.0),
+                );
+            });
+        });
+    ui.add_space(8.0);
+}
+
 /// One provider. Returns whether the header was clicked to open or close it.
 #[allow(clippy::too_many_arguments)]
 fn provider_card(
     ui: &mut egui::Ui,
     provider: ProviderId,
     reading: Option<&UsageData>,
+    failure: Option<&ProviderFailure>,
     rows: &[&Constraint],
     expanded: bool,
     series: &[(u64, Reading)],
@@ -452,7 +520,7 @@ fn provider_card(
                     ui.label(egui::RichText::new(plan).color(muted()));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    status_chip(ui, reading, rows, language);
+                    status_chip(ui, reading, failure, rows, language);
                     // A provider with nothing current gets its own retry:
                     // the tray drops its backoff and asks again, subject to
                     // the cooldown the button shows.
@@ -479,11 +547,27 @@ fn provider_card(
             }
 
             let Some(reading) = reading else {
-                ui.label(
-                    egui::RichText::new(language.text("No reading. Sign in, then refresh."))
-                        .color(muted())
-                        .size(11.0),
-                );
+                // No reading: say exactly what is wrong and what to do, and
+                // (opened) every place Headroom looked.
+                ui.add_space(4.0);
+                match failure {
+                    Some(failure) => {
+                        ui.label(egui::RichText::new(&failure.summary).size(12.5));
+                        if !failure.hint.is_empty() {
+                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(11.5));
+                        }
+                        if expanded && !failure.looked.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(language.text("Where Headroom looked")).color(muted()).size(11.0).strong());
+                            for place in &failure.looked {
+                                ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(11.0).monospace());
+                            }
+                        }
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(language.text("Waiting for the first reading.")).color(muted()).size(11.5));
+                    }
+                }
                 return;
             };
 
@@ -603,9 +687,25 @@ fn limit_row(ui: &mut egui::Ui, row: &Constraint, now: SystemTime, thresholds: T
     });
 }
 
-fn status_chip(ui: &mut egui::Ui, reading: Option<&UsageData>, rows: &[&Constraint], language: LanguageId) {
+fn status_chip(
+    ui: &mut egui::Ui,
+    reading: Option<&UsageData>,
+    failure: Option<&ProviderFailure>,
+    rows: &[&Constraint],
+    language: LanguageId,
+) {
     let (text, colour) = match reading {
-        None => (language.text("unreachable"), muted()),
+        None => match failure.map(|failure| failure.kind) {
+            Some(FailureKind::NotInstalled) => (language.text("not installed"), muted()),
+            Some(FailureKind::NotSignedIn) => (language.text("not signed in"), warning()),
+            Some(FailureKind::Expired) => (language.text("login expired"), warning()),
+            Some(FailureKind::Rejected) => (language.text("login rejected"), danger()),
+            Some(FailureKind::RateLimited) => (language.text("rate limited"), warning()),
+            Some(FailureKind::ServerError) => (language.text("provider error"), danger()),
+            Some(FailureKind::Offline) => (language.text("offline"), muted()),
+            Some(FailureKind::Malformed) => (language.text("unreadable reply"), danger()),
+            None => (language.text("waiting"), muted()),
+        },
         Some(usage) if usage.stale => (language.text("stale"), muted()),
         Some(_) => match rows.iter().map(|c| c.severity()).max().unwrap_or(Severity::Normal) {
             Severity::Critical => (language.text("critical"), danger()),
