@@ -40,9 +40,11 @@ const WSL_AGENT_AUTH_PATH: &str = "~/.config/cursor/auth.json";
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Cursor,
+    sign_in_hint: "sign in to Cursor, run `cursor-agent login`, or set CURSOR_SESSION_TOKEN",
     env: &[&[CURSOR_SESSION_TOKEN_ENV]],
     native_files: || cursor_agent_auth_path().into_iter().collect(),
     native_extra: &[credentials::NativeExtra {
+        before_files: true,
         // The desktop app's own session token, in its SQLite state store.
         label: "cursor:state-db",
         read: read_cursor_access_token_from_state_db,

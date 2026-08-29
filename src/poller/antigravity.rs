@@ -21,9 +21,11 @@ const WSL_REFRESH: &str = "if command -v agy >/dev/null 2>&1; then agy models; \
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Antigravity,
+    sign_in_hint: "run `agy login` on Windows or in WSL",
     env: &[],
     native_files: Vec::new,
     native_extra: &[credentials::NativeExtra {
+        before_files: false,
         // Windows keeps the token in the credential manager; the Windows
         // CLI refreshes it on its own schedule.
         label: "antigravity:credential-manager",

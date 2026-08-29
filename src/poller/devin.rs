@@ -37,6 +37,7 @@ const WSL_ENV_PATH: &str = "~/.claude/.env.devin";
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Devin,
+    sign_in_hint: "set DEVIN_API_KEY or write ~/.claude/.env.devin",
     env: &[&[DEVIN_KEY_ENV]],
     native_files: || windows_env_file().into_iter().collect(),
     native_extra: &[],
@@ -71,8 +72,8 @@ fn attempt(content: &str, _source: &credentials::Source) -> Result<UsageData, Po
     let key = credentials::env_value(content, DEVIN_KEY_ENV).ok_or(PollError::NoCredentials)?;
     // The allowance is not in the API; it may sit beside the key, in the
     // environment, or in the native env file.
-    let allowance = credentials::env_value(content, DEVIN_ALLOWANCE_ENV)
-        .or_else(|| credentials::non_empty_environment(DEVIN_ALLOWANCE_ENV))
+    let allowance = credentials::non_empty_environment(DEVIN_ALLOWANCE_ENV)
+        .or_else(|| credentials::env_value(content, DEVIN_ALLOWANCE_ENV))
         .or_else(|| {
             windows_env_file()
                 .and_then(|path| std::fs::read_to_string(path).ok())

@@ -68,6 +68,10 @@ impl fmt::Display for Source {
 /// Windows Credential Manager, an app's encrypted token cache, a database.
 pub struct NativeExtra {
     pub label: &'static str,
+    /// Whether this store is tried before the provider's native files. The
+    /// desktop app's session usually outranks a CLI's file (Cursor); a CLI
+    /// login usually outranks an app cache (Claude).
+    pub before_files: bool,
     /// The raw content, in whatever text form the provider's `attempt` parses.
     pub read: fn() -> Option<String>,
     /// A cheap description that changes when the content does; never a secret.
@@ -78,6 +82,8 @@ pub struct NativeExtra {
 /// Everything the engine needs to know about one provider's credentials.
 pub struct Spec {
     pub provider: ProviderId,
+    /// What to tell the user when nothing is found anywhere.
+    pub sign_in_hint: &'static str,
     /// Environment groups, tried first. Each group's variables are all required.
     pub env: &'static [&'static [&'static str]],
     pub native_files: fn() -> Vec<PathBuf>,
@@ -99,11 +105,8 @@ pub type Attempt = fn(&str, &Source) -> Result<UsageData, PollError>;
 
 /// Every place `spec` says to look, in order. The WSL half is lazy.
 pub fn sources(spec: &Spec) -> impl Iterator<Item = Source> + '_ {
-    spec.env
-        .iter()
-        .map(|group| Source::Env(group))
-        .chain((spec.native_files)().into_iter().map(Source::File))
-        .chain(spec.native_extra.iter().map(|extra| Source::Extra(extra.label)))
+    native_sources(spec)
+        .into_iter()
         .chain(
             std::iter::once_with(wsl::list_distros)
                 .flatten()
@@ -114,6 +117,24 @@ pub fn sources(spec: &Spec) -> impl Iterator<Item = Source> + '_ {
                     })
                 }),
         )
+}
+
+/// The native half of the order: environment, then extras that sit before
+/// the files, the files, the remaining extras.
+fn native_sources(spec: &Spec) -> Vec<Source> {
+    let extras = |before: bool| {
+        spec.native_extra
+            .iter()
+            .filter(move |extra| extra.before_files == before)
+            .map(|extra| Source::Extra(extra.label))
+    };
+    spec.env
+        .iter()
+        .map(|group| Source::Env(group))
+        .chain(extras(true))
+        .chain((spec.native_files)().into_iter().map(Source::File))
+        .chain(extras(false))
+        .collect()
 }
 
 /// A source's raw content. Environment groups arrive as `NAME=value` lines,
@@ -165,7 +186,7 @@ pub fn poll(spec: &Spec, attempt: Attempt) -> Result<UsageData, PollError> {
         name,
     );
     if result == Err(PollError::NoCredentials) {
-        diagnose::log(format!("{name} usage poll failed: no credentials found anywhere"));
+        diagnose::log(format!("{name} usage poll failed: no credentials found ({})", spec.sign_in_hint));
     }
     result
 }
@@ -187,30 +208,45 @@ pub(super) fn poll_sources(
             Ok(usage) => return Ok(usage),
             Err(PollError::NoCredentials) => continue,
             // The provider or the network is down: asking more sources
-            // would only spend more spawns on the same outage.
-            Err(PollError::RequestFailed) => return Err(PollError::RequestFailed),
+            // would only spend more spawns on the same outage. A rejection
+            // already seen still outranks it -- that is a sign-in problem,
+            // and the scheduler watches credential files for those.
+            Err(PollError::RequestFailed) => {
+                return Err(credential_error.unwrap_or(PollError::RequestFailed))
+            }
             Err(error) => error,
         };
         // This token is bad. Refresh once, where it lives, and try the same
-        // source again; then move on. A transient failure on the retry does
-        // not hide the fact that the token was rejected.
+        // source again; then move on. The retry's answer counts: a rejection
+        // after a refresh outranks the local expiry that started it, and a
+        // transient failure on the retry stops the loop like any other --
+        // reported as the rejection, which is what it was.
+        let mut error = error;
         if refresh(&source) {
             if let Some(again) = read(&source) {
                 match attempt(&again, &source) {
                     Ok(usage) => return Ok(usage),
-                    Err(PollError::NoCredentials) | Err(PollError::RequestFailed) => {}
-                    Err(_) => {}
+                    Err(PollError::NoCredentials) => {}
+                    Err(PollError::RequestFailed) => {
+                        diagnose::log(format!("{name}: {source} rejected, then unreachable after refresh"));
+                        return Err(outrank(credential_error, error));
+                    }
+                    Err(after) => error = outrank(Some(error), after),
                 }
             }
         }
         diagnose::log(format!("{name}: credentials from {source} rejected ({error:?}); trying the next source"));
-        credential_error = Some(match (credential_error, error) {
-            // A server-side rejection outranks a locally observed expiry.
-            (Some(PollError::AuthRequired), _) => PollError::AuthRequired,
-            (_, error) => error,
-        });
+        credential_error = Some(outrank(credential_error, error));
     }
     Err(credential_error.unwrap_or(PollError::NoCredentials))
+}
+
+/// A server-side rejection outranks a locally observed expiry.
+fn outrank(seen: Option<PollError>, now: PollError) -> PollError {
+    match (seen, now) {
+        (Some(PollError::AuthRequired), _) | (_, PollError::AuthRequired) => PollError::AuthRequired,
+        (_, now) => now,
+    }
 }
 
 /// Refresh the token behind `source`, if the spec knows how and the ration
@@ -421,6 +457,78 @@ mod tests {
             "test",
         );
         assert_eq!(result, Err(PollError::AuthRequired));
+    }
+
+    /// After a refresh, the retry's answer counts: a transient failure stops
+    /// the loop (no further sources) and is reported as the rejection; a
+    /// rejection upgrades an initial expiry.
+    #[test]
+    fn the_retry_after_a_refresh_is_not_ignored() {
+        let visited = RefCell::new(0);
+        let calls = RefCell::new(0);
+        let result = poll_sources(
+            [file("a"), file("b")].into_iter(),
+            |_| {
+                *visited.borrow_mut() += 1;
+                Some("x".into())
+            },
+            |_, _| {
+                *calls.borrow_mut() += 1;
+                Err(if *calls.borrow() == 1 { PollError::TokenExpired } else { PollError::RequestFailed })
+            },
+            |_| true,
+            "test",
+        );
+        assert_eq!(result, Err(PollError::TokenExpired));
+        assert_eq!(*visited.borrow(), 2, "source a read twice, source b never");
+        let calls = RefCell::new(0);
+        let upgraded = poll_sources(
+            [file("a")].into_iter(),
+            |_| Some("x".into()),
+            |_, _| {
+                *calls.borrow_mut() += 1;
+                Err(if *calls.borrow() == 1 { PollError::TokenExpired } else { PollError::AuthRequired })
+            },
+            |_| true,
+            "test",
+        );
+        assert_eq!(upgraded, Err(PollError::AuthRequired));
+    }
+
+    /// A transport failure on a later source does not erase the rejection
+    /// an earlier one produced.
+    #[test]
+    fn a_later_transient_failure_keeps_an_earlier_rejection() {
+        let result = poll_sources(
+            [file("a"), file("b")].into_iter(),
+            |_| Some("x".into()),
+            |_, source| Err(if *source == file("a") { PollError::AuthRequired } else { PollError::RequestFailed }),
+            |_| false,
+            "test",
+        );
+        assert_eq!(result, Err(PollError::AuthRequired));
+    }
+
+    /// An extra marked before_files is tried ahead of the files; the others
+    /// after. Environment always leads.
+    #[test]
+    fn native_order_honours_before_files() {
+        static EXTRAS: [NativeExtra; 2] = [
+            NativeExtra { label: "app-store", before_files: true, read: || None, signature: String::new, refresh: None },
+            NativeExtra { label: "app-cache", before_files: false, read: || None, signature: String::new, refresh: None },
+        ];
+        let spec = Spec {
+            provider: ProviderId::Cursor,
+            sign_in_hint: "",
+            env: &[&["X"]],
+            native_files: || vec![PathBuf::from("auth.json")],
+            native_extra: &EXTRAS,
+            native_refresh: None,
+            wsl_paths: &[],
+            wsl_refresh: None,
+        };
+        let order: Vec<String> = native_sources(&spec).iter().map(ToString::to_string).collect();
+        assert_eq!(order, vec!["env X", "app-store", "file auth.json", "app-cache"]);
     }
 
     #[test]

@@ -25,6 +25,16 @@ Fireworks AI or Cognition.
 
 MIT — see LICENSE.
 
+## Building
+
+From Windows, `cargo build --release` needs a resource compiler (the Windows
+SDK's `rc.exe`); that is what the release workflow does.
+
+From WSL, `bash scripts/gate.sh` is the whole check: clippy with warnings
+denied, the tests (built with cargo-zigbuild for the Windows target and run
+through interop), and the release exe. It stages the build in `dist/staged/`
+when `dist/headroom.exe` is running, since Windows keeps a running exe locked.
+
 ## Install
 
 **Microsoft Store** — coming; the first submission is being prepared.

@@ -123,6 +123,7 @@ struct Credentials {
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Claude,
+    sign_in_hint: "run `claude login`, or sign in to the Claude desktop app",
     env: &[],
     native_files: || {
         dirs::home_dir()
@@ -131,6 +132,7 @@ const SPEC: credentials::Spec = credentials::Spec {
             .collect()
     },
     native_extra: &[credentials::NativeExtra {
+        before_files: false,
         // The desktop app's own token cache, for a machine where Claude Code
         // has only ever run inside the desktop app and no CLI login wrote
         // `~/.claude/.credentials.json`. The app refreshes it itself, so

@@ -36,6 +36,10 @@ pub(crate) struct PanelApp {
     pub page: Page,
     pub settings: SettingsFile,
     pub settings_error: Option<String>,
+    /// False when the settings file could not be read (busy, or written by
+    /// a newer build): what is in memory is a default, and saving it would
+    /// overwrite the real file.
+    settings_writable: bool,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
     pub usage_history: UsageHistory,
@@ -112,7 +116,9 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
 
 impl PanelApp {
     fn new(context: &eframe::CreationContext<'_>, owner: isize, page: Page) -> Self {
-        let settings = app_settings::load_settings();
+        let loaded = app_settings::load_settings_if_readable();
+        let settings_writable = loaded.is_some();
+        let settings = loaded.unwrap_or_default();
         let language = localization::resolve_language(
             settings.language.as_deref().and_then(LanguageId::from_code),
         );
@@ -127,6 +133,7 @@ impl PanelApp {
             startup_enabled: crate::tray::is_startup_enabled(),
             settings,
             settings_error: None,
+            settings_writable,
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),
             activity: crate::activity_log::load(),
@@ -145,6 +152,14 @@ impl PanelApp {
     }
 
     pub(crate) fn save_settings(&mut self) {
+        if !self.settings_writable {
+            self.settings_error = Some(
+                self.language()
+                    .text("Settings were not saved: the settings file could not be read (it may belong to a newer Headroom).")
+                    .to_string(),
+            );
+            return;
+        }
         match app_settings::save_settings(&self.settings) {
             Ok(()) => {
                 self.settings_error = None;

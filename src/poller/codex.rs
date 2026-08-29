@@ -160,6 +160,7 @@ const WEEKLY_WINDOW_THRESHOLD_SECONDS: i64 = 86_400;
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Codex,
+    sign_in_hint: "run `codex login` on Windows or in WSL",
     env: &[],
     native_files: || codex_auth_path().into_iter().collect(),
     native_extra: &[],

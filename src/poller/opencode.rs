@@ -53,6 +53,7 @@ const WSL_CONFIG_PATHS: &[&str] = &[
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::OpenCode,
+    sign_in_hint: "set OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE or write the opencode-go.json helper config",
     env: &[&[WORKSPACE_ID_ENV, AUTH_COOKIE_ENV]],
     native_files: dashboard_config_paths,
     native_extra: &[],

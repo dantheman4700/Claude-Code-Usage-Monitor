@@ -410,14 +410,31 @@ pub fn load_usage_history() -> UsageHistory {
 /// sample -- the store collapses readings that arrive too close together, and
 /// rewriting the file for a discarded sample is pure churn.
 pub fn record_usage_history(data: &AppUsageData, now_unix: u64) {
-    // Retention comes from settings; a settings file that cannot be read
-    // right now must not prune a long history down to the default.
-    let Some(settings) = load_settings_if_readable() else {
-        crate::diagnose::log("history not recorded: settings unreadable right now");
+    // Retention comes from settings that really loaded. A file that is
+    // busy, newer, or just got quarantined must not prune a long history
+    // down to the default; the next poll after the file settles records
+    // normally.
+    let Some(retention_days) = history_retention_days_from(&settings_path()) else {
+        crate::diagnose::log("history not recorded: settings not readable as written");
         return;
     };
-    let retention = u64::from(settings.history_retention_days) * 24 * 60 * 60;
+    let retention = u64::from(retention_days) * 24 * 60 * 60;
     record_history_at(&usage_history_path(), data, now_unix, retention);
+}
+
+/// The retention setting as written on disk: the default for a missing
+/// file (a fresh install has no history to lose), `None` for a file that
+/// is busy, corrupt, or from a newer build.
+fn history_retention_days_from(path: &Path) -> Option<u16> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => decode_settings(&content).ok().map(|settings| {
+            let mut settings = settings;
+            settings.normalize();
+            settings.history_retention_days
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(default_history_retention_days()),
+        Err(_) => None,
+    }
 }
 
 /// A history from a newer build is read-only for this session: rewriting it
@@ -522,7 +539,8 @@ fn quarantine(path: &Path, why: &str, failed_content: &str) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("state.json");
-    let aside = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+    let version = on_disk_schema(failed_content);
+    let aside = path.with_file_name(format!("{name}.corrupt-v{version}-{stamp}"));
     let moved = std::fs::rename(path, &aside).is_ok();
     crate::diagnose::log(format!(
         "{} did not parse ({why}); {}",
@@ -646,6 +664,20 @@ mod tests {
         schema_version: u32,
         #[serde(default = "default_poll_interval")]
         poll_interval_ms: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_update_check_unix: Option<u64>,
+        #[serde(default = "default_warn_percent")]
+        warn_percent: u8,
+        #[serde(default = "default_critical_percent")]
+        critical_percent: u8,
+        #[serde(default = "default_history_retention_days")]
+        history_retention_days: u16,
+        #[serde(default = "default_true")]
+        show_unreachable_providers: bool,
+        #[serde(default)]
+        first_run_seen: bool,
         #[serde(default = "default_show_claude_code")]
         show_claude_code: bool,
         #[serde(default = "default_show_codex")]
@@ -675,7 +707,7 @@ mod tests {
     /// v1 file → this build → save → the old writer reads the same choices.
     #[test]
     fn a_v1_file_survives_the_new_build_and_back() {
-        let v1 = r#"{"schema_version":1,"poll_interval_ms":300000,"show_grok":false,"show_codex":true,"dashboard_width":1280.0,"dashboard_height":760.0}"#;
+        let v1 = r#"{"schema_version":1,"poll_interval_ms":300000,"language":"de","last_update_check_unix":5,"warn_percent":70,"critical_percent":95,"history_retention_days":60,"show_unreachable_providers":false,"first_run_seen":true,"show_grok":false,"show_codex":true,"dashboard_width":1280.0,"dashboard_height":760.0}"#;
         let loaded = decode_settings(v1).ok().unwrap();
         assert!(!loaded.provider_enabled(ProviderId::Grok));
         assert!(loaded.provider_enabled(ProviderId::Codex));
@@ -686,6 +718,11 @@ mod tests {
         assert!(old_reader.show_codex);
         assert_eq!(old_reader.poll_interval_ms, 300000);
         assert_eq!(old_reader.dashboard_width, Some(1280.0));
+        assert_eq!(old_reader.language.as_deref(), Some("de"));
+        assert_eq!(old_reader.last_update_check_unix, Some(5));
+        assert_eq!((old_reader.warn_percent, old_reader.critical_percent, old_reader.history_retention_days), (70, 95, 60));
+        assert!(!old_reader.show_unreachable_providers);
+        assert!(old_reader.first_run_seen);
     }
 
     /// v2 file → the old writer re-encodes it (map dropped, version 1) →
@@ -744,6 +781,23 @@ mod tests {
         assert!(matches!(decode_settings(r#"{"schema_version":3,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(3))));
         assert!(matches!(decode_settings(r#"{"schema_version":2,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
+    }
+
+    /// Retention for pruning only ever comes from a settings file that
+    /// decoded as written; busy, corrupt or newer means no pruning.
+    #[test]
+    fn history_retention_needs_settings_that_really_loaded() {
+        let dir = std::env::temp_dir().join(format!("headroom-retention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        assert_eq!(history_retention_days_from(&settings), Some(default_history_retention_days()));
+        std::fs::write(&settings, r#"{"schema_version":2,"history_retention_days":90}"#).unwrap();
+        assert_eq!(history_retention_days_from(&settings), Some(90));
+        std::fs::write(&settings, "{ corrupt").unwrap();
+        assert_eq!(history_retention_days_from(&settings), None);
+        std::fs::write(&settings, r#"{"schema_version":9,"history_retention_days":"later"}"#).unwrap();
+        assert_eq!(history_retention_days_from(&settings), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

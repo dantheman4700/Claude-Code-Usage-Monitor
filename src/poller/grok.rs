@@ -27,6 +27,7 @@ const WSL_AUTH_PATH: &str = "~/.grok/auth.json";
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Grok,
+    sign_in_hint: "run `grok login` on Windows or in WSL",
     env: &[],
     native_files: || windows_auth_path().into_iter().collect(),
     native_extra: &[],

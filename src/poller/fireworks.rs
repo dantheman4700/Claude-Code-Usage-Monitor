@@ -37,6 +37,7 @@ const WSL_ENV_PATH: &str = "~/.claude/.env.fireworks";
 
 const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Fireworks,
+    sign_in_hint: "set FIREWORKS_API_KEY or write ~/.claude/.env.fireworks",
     env: &[&[FIREWORKS_KEY_ENV]],
     native_files: || windows_env_file().into_iter().collect(),
     native_extra: &[],
