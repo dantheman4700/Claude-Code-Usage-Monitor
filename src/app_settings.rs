@@ -82,6 +82,18 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// Extra login files per provider key: native paths or
+    /// `wsl:<distro>:<path>`. For installs in places the defaults do not
+    /// cover.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_paths: BTreeMap<String, Vec<String>>,
+    /// The WSL distros to read; absent means every distro found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl_distros: Option<Vec<String>>,
+    /// The user to read a distro as, when the login is not under its
+    /// default user.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wsl_users: BTreeMap<String, String>,
     /// Keys this build does not know, carried through a save untouched so a
     /// newer build's settings survive a round trip through this one.
     #[serde(flatten)]
@@ -119,6 +131,9 @@ impl Default for SettingsFile {
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
+            credential_paths: BTreeMap::new(),
+            wsl_distros: None,
+            wsl_users: BTreeMap::new(),
             unknown: BTreeMap::new(),
         }
     }

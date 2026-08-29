@@ -125,6 +125,80 @@ impl PanelApp {
                 }
             });
 
+            section(ui, language.text("Where to look"), |ui| {
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "Headroom reads each tool's own login files. These are the places it checks; add your own when a tool is installed somewhere else.",
+                    ))
+                    .color(crate::ui::theme::muted())
+                    .size(11.0),
+                );
+                ui.add_space(6.0);
+                // WSL: which distros, and as which user.
+                let detected = self
+                    .wsl_distros_detected
+                    .get_or_insert_with(crate::poller::detected_wsl_distros)
+                    .clone();
+                if detected.is_empty() {
+                    ui.label(egui::RichText::new(language.text("No WSL distros found on this PC.")).color(crate::ui::theme::muted()).size(11.5));
+                } else {
+                    ui.label(egui::RichText::new(language.text("WSL distros")).strong().size(12.5));
+                    for distro in &detected {
+                        let mut read = self.settings.wsl_distros.as_ref().is_none_or(|chosen| chosen.contains(distro));
+                        let mut user = self.settings.wsl_users.get(distro).cloned().unwrap_or_default();
+                        setting_row(ui, distro, language.text("Read this distro's login files"), |ui| {
+                            if Toggle::new(&mut read).labels(language.text("Read"), language.text("Skip")).show(ui).changed() {
+                                let mut chosen: Vec<String> = self
+                                    .settings
+                                    .wsl_distros
+                                    .clone()
+                                    .unwrap_or_else(|| detected.clone());
+                                chosen.retain(|name| name != distro);
+                                if read {
+                                    chosen.push(distro.clone());
+                                }
+                                self.settings.wsl_distros = if detected.iter().all(|name| chosen.contains(name)) { None } else { Some(chosen) };
+                                changed = true;
+                            }
+                            ui.label(egui::RichText::new(language.text("as user")).color(crate::ui::theme::muted()).size(11.0));
+                            if ui.add(egui::TextEdit::singleline(&mut user).desired_width(90.0).hint_text("default")).lost_focus() {
+                                let trimmed = user.trim().to_string();
+                                if trimmed.is_empty() {
+                                    self.settings.wsl_users.remove(distro);
+                                } else {
+                                    self.settings.wsl_users.insert(distro.clone(), trimmed);
+                                }
+                                changed = true;
+                            }
+                        });
+                    }
+                }
+                // Per provider: the defaults, and a box for more.
+                for descriptor in PROVIDER_DESCRIPTORS {
+                    setting_separator(ui);
+                    ui.label(egui::RichText::new(language.text(descriptor.display_name)).strong().size(12.5));
+                    for place in crate::poller::default_places(descriptor.id) {
+                        ui.label(egui::RichText::new(format!("· {place}")).color(crate::ui::theme::muted()).size(11.0).monospace());
+                    }
+                    let text = self.credential_path_text.entry(descriptor.key.to_string()).or_default();
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(text)
+                            .desired_rows(1)
+                            .desired_width(f32::INFINITY)
+                            .hint_text(language.text("Extra login files, one per line: C:\\path\\to\\file, ~/path, or wsl:<distro>:~/path")),
+                    );
+                    if edit.lost_focus() {
+                        let paths: Vec<String> = text.lines().map(str::trim).filter(|line| !line.is_empty()).map(String::from).collect();
+                        if paths.is_empty() {
+                            self.settings.credential_paths.remove(descriptor.key);
+                        } else {
+                            self.settings.credential_paths.insert(descriptor.key.to_string(), paths);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+
             section(ui, language.text("Fleet"), |ui| {
                 setting_row(
                     ui,

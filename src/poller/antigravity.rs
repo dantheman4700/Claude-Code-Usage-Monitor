@@ -19,7 +19,7 @@ const WSL_TOKEN_PATH: &str = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 const WSL_REFRESH: &str = "if command -v agy >/dev/null 2>&1; then agy models; \
      elif [ -x $HOME/.local/bin/agy ]; then $HOME/.local/bin/agy models; else exit 127; fi";
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Antigravity,
     sign_in_hint: "run `agy login` on Windows or in WSL",
     env: &[],

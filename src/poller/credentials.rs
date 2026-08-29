@@ -30,7 +30,9 @@
 //! these and fatal for anything with its own variables (see [`wsl::read_file`]).
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::RwLock;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
@@ -51,7 +53,101 @@ pub enum Source {
     /// [`NativeExtra`].
     Extra(&'static str),
     /// A file inside a WSL distro.
-    Wsl { distro: String, path: &'static str },
+    Wsl { distro: String, path: String },
+}
+
+/// What the user told Headroom about where things are, beyond the defaults
+/// every provider ships with. Set from the settings by the tray; read by
+/// the engine on every poll.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Config {
+    /// Extra login files per provider key: a native path (`~` and `%VAR%`
+    /// expand) or `wsl:<distro>:<path>` (`wsl:*:<path>` for every distro).
+    pub extra_paths: BTreeMap<String, Vec<String>>,
+    /// The distros to read; `None` means every distro on the machine.
+    pub wsl_distros: Option<Vec<String>>,
+    /// The user to read a distro as, when its default user is not the one
+    /// who signed in.
+    pub wsl_users: BTreeMap<String, String>,
+}
+
+static CONFIG: RwLock<Config> = RwLock::new(Config {
+    extra_paths: BTreeMap::new(),
+    wsl_distros: None,
+    wsl_users: BTreeMap::new(),
+});
+
+pub fn configure(config: Config) {
+    if let Ok(mut current) = CONFIG.write() {
+        *current = config;
+    }
+}
+
+fn config() -> Config {
+    CONFIG.read().map(|config| config.clone()).unwrap_or_default()
+}
+
+impl Config {
+    /// The distros to read, in the machine's order.
+    pub(super) fn distros(&self) -> Vec<String> {
+        let found = wsl::list_distros();
+        match &self.wsl_distros {
+            None => found,
+            Some(chosen) => found.into_iter().filter(|distro| chosen.contains(distro)).collect(),
+        }
+    }
+
+    pub(super) fn user_for(&self, distro: &str) -> Option<String> {
+        self.wsl_users.get(distro).map(|user| user.trim().to_string()).filter(|user| !user.is_empty())
+    }
+
+    /// The extra entries for a provider, split into native paths and
+    /// `(distro or *, path)` WSL entries.
+    fn extras_for(&self, key: &str) -> (Vec<PathBuf>, Vec<(String, String)>) {
+        let mut native = Vec::new();
+        let mut in_wsl = Vec::new();
+        for entry in self.extra_paths.get(key).into_iter().flatten() {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            match parse_wsl_entry(entry) {
+                Some((distro, path)) => in_wsl.push((distro, path)),
+                None => native.push(expand_native_path(entry)),
+            }
+        }
+        (native, in_wsl)
+    }
+}
+
+/// `wsl:<distro>:<path>` → (distro, path). A path with a drive letter or
+/// no prefix is native.
+pub fn parse_wsl_entry(entry: &str) -> Option<(String, String)> {
+    let rest = entry.strip_prefix("wsl:")?;
+    let (distro, path) = rest.split_once(':')?;
+    let distro = distro.trim();
+    let path = path.trim();
+    (!distro.is_empty() && !path.is_empty()).then(|| (distro.to_string(), path.to_string()))
+}
+
+/// `~`, `~/x`, `%APPDATA%\x` and `$HOME/x` in a native path.
+pub fn expand_native_path(entry: &str) -> PathBuf {
+    let mut expanded = entry.to_string();
+    if let Some(home) = dirs::home_dir() {
+        if expanded == "~" || expanded.starts_with("~/") || expanded.starts_with("~\\") {
+            expanded = format!("{}{}", home.display(), &expanded[1..]);
+        }
+        expanded = expanded.replace("$HOME", &home.display().to_string());
+    }
+    while let Some(start) = expanded.find('%') {
+        let Some(end) = expanded[start + 1..].find('%') else {
+            break;
+        };
+        let name = &expanded[start + 1..start + 1 + end];
+        let value = std::env::var(name).unwrap_or_default();
+        expanded = format!("{}{}{}", &expanded[..start], value, &expanded[start + 2 + end..]);
+    }
+    PathBuf::from(expanded)
 }
 
 impl fmt::Display for Source {
@@ -104,18 +200,28 @@ pub struct Spec {
 /// again); `RequestFailed` means "the provider or the network is down".
 pub type Attempt = fn(&str, &Source) -> Result<UsageData, PollError>;
 
-/// Every place `spec` says to look, in order. The WSL half is lazy.
+/// Every place `spec` says to look, in order, plus what the user added.
+/// The WSL half is lazy.
 pub fn sources(spec: &Spec) -> impl Iterator<Item = Source> + '_ {
+    let config = config();
+    let (_, extra_wsl) = config.extras_for(spec.provider.descriptor().key);
     native_sources(spec)
         .into_iter()
         .chain(
-            std::iter::once_with(wsl::list_distros)
+            std::iter::once_with(move || config.distros())
                 .flatten()
                 .flat_map(move |distro| {
-                    spec.wsl_paths.iter().map(move |path| Source::Wsl {
-                        distro: distro.clone(),
-                        path,
-                    })
+                    let extras: Vec<Source> = extra_wsl
+                        .iter()
+                        .filter(|(target, _)| target == "*" || *target == distro)
+                        .map(|(_, path)| Source::Wsl { distro: distro.clone(), path: path.clone() })
+                        .collect();
+                    spec.wsl_paths
+                        .iter()
+                        .map(move |path| Source::Wsl { distro: distro.clone(), path: path.to_string() })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .chain(extras)
                 }),
         )
 }
@@ -129,11 +235,13 @@ fn native_sources(spec: &Spec) -> Vec<Source> {
             .filter(move |extra| extra.before_files == before)
             .map(|extra| Source::Extra(extra.label))
     };
+    let (extra_native, _) = config().extras_for(spec.provider.descriptor().key);
     spec.env
         .iter()
         .map(|group| Source::Env(group))
         .chain(extras(true))
         .chain((spec.native_files)().into_iter().map(Source::File))
+        .chain(extra_native.into_iter().map(Source::File))
         .chain(extras(false))
         .collect()
 }
@@ -169,6 +277,7 @@ pub fn read(spec: &Spec, source: &Source) -> Option<String> {
             .and_then(|extra| (extra.read)()),
         Source::Wsl { distro, path } => wsl::read_file(
             distro,
+            config().user_for(distro).as_deref(),
             &format!("cat {path}"),
             spec.provider.descriptor().display_name,
         ),
@@ -346,6 +455,7 @@ fn refresh(spec: &Spec, source: &Source) -> bool {
             Some(script) if spend_allowed(key) => {
                 wsl::run_detached(
                     distro,
+                    config().user_for(distro).as_deref(),
                     script,
                     &format!("{} token refresh", spec.provider.descriptor().display_name),
                 );
@@ -380,10 +490,21 @@ pub fn watch_snapshot(spec: &Spec) -> Vec<String> {
     for extra in spec.native_extra {
         out.push((extra.signature)());
     }
-    for distro in wsl::list_distros() {
-        for (index, path) in spec.wsl_paths.iter().enumerate() {
+    let config = config();
+    let (extra_native, extra_wsl) = config.extras_for(key);
+    for path in extra_native {
+        out.push(file_signature(&format!("{key}:extra:{}", path.display()), &path));
+    }
+    for distro in config.distros() {
+        let user = config.user_for(&distro);
+        let paths = spec
+            .wsl_paths
+            .iter()
+            .map(|path| path.to_string())
+            .chain(extra_wsl.iter().filter(|(target, _)| target == "*" || *target == distro).map(|(_, path)| path.clone()));
+        for (index, path) in paths.enumerate() {
             let label = format!("{key}:wsl{index}");
-            if let Some(signature) = wsl::path_watch_signature(&distro, &label, &watch_script(path)) {
+            if let Some(signature) = wsl::path_watch_signature(&distro, user.as_deref(), &label, &watch_script(&path)) {
                 out.push(signature);
             }
         }
@@ -434,7 +555,40 @@ mod tests {
     }
 
     fn wsl(path: &'static str) -> Source {
-        Source::Wsl { distro: "Ubuntu".into(), path }
+        Source::Wsl { distro: "Ubuntu".into(), path: path.into() }
+    }
+
+    #[test]
+    fn extra_entries_are_native_or_wsl() {
+        assert_eq!(parse_wsl_entry("wsl:Ubuntu:~/.codex/auth.json"), Some(("Ubuntu".into(), "~/.codex/auth.json".into())));
+        assert_eq!(parse_wsl_entry("wsl:*:/opt/tokens/auth.json"), Some(("*".into(), "/opt/tokens/auth.json".into())));
+        assert_eq!(parse_wsl_entry("C:\\tokens\\auth.json"), None);
+        assert_eq!(parse_wsl_entry("wsl:"), None);
+        let mut config = Config::default();
+        config.extra_paths.insert("codex".into(), vec!["  ".into(), "D:\\keys\\auth.json".into(), "wsl:Debian:~/.codex/auth.json".into()]);
+        let (native, in_wsl) = config.extras_for("codex");
+        assert_eq!(native, vec![PathBuf::from("D:\\keys\\auth.json")]);
+        assert_eq!(in_wsl, vec![("Debian".to_string(), "~/.codex/auth.json".to_string())]);
+        assert!(config.extras_for("grok").0.is_empty());
+    }
+
+    #[test]
+    fn native_paths_expand_home_and_windows_variables() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_native_path("~/.codex/auth.json"), home.join(".codex/auth.json"));
+        std::env::set_var("HEADROOM_TEST_DIR", "C:\\probe");
+        assert_eq!(expand_native_path("%HEADROOM_TEST_DIR%\\auth.json"), PathBuf::from("C:\\probe\\auth.json"));
+        assert_eq!(expand_native_path("C:\\plain\\auth.json"), PathBuf::from("C:\\plain\\auth.json"));
+    }
+
+    #[test]
+    fn a_distro_user_is_only_used_when_named() {
+        let mut config = Config::default();
+        assert_eq!(config.user_for("Ubuntu"), None);
+        config.wsl_users.insert("Ubuntu".into(), "  danny ".into());
+        assert_eq!(config.user_for("Ubuntu").as_deref(), Some("danny"));
+        config.wsl_users.insert("Debian".into(), "   ".into());
+        assert_eq!(config.user_for("Debian"), None);
     }
 
     /// A rejected native token must not hide a good WSL one.

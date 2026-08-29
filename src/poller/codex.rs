@@ -158,7 +158,7 @@ pub(super) struct CodexRateLimitWindow {
 /// five-hour window, so anything from a day up is unambiguously weekly.
 const WEEKLY_WINDOW_THRESHOLD_SECONDS: i64 = 86_400;
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Codex,
     sign_in_hint: "run `codex login` on Windows or in WSL",
     env: &[],

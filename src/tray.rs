@@ -87,6 +87,7 @@ pub fn run(open_dashboard_on_start: bool) {
     poller::startup_cleanup();
 
     let settings = load_settings();
+    poller::configure_credentials(&settings);
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
     let language = localization::resolve_language(language_override);
 
@@ -430,6 +431,15 @@ fn short_duration(duration: std::time::Duration) -> String {
 /// The panel saved settings; pick up what changed.
 fn reload_settings(hwnd: HWND) {
     let settings = load_settings();
+    // "Where to look" may have changed: apply it, forget the cached distro
+    // list, and give every backed-off provider another go.
+    poller::configure_credentials(&settings);
+    poller::invalidate_wsl_caches();
+    if let Some(s) = lock_state().as_mut() {
+        for entry in s.provider_backoff.values_mut() {
+            entry.next_attempt_unix = 0;
+        }
+    }
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
     let providers_changed = {
         let mut state = lock_state();
@@ -446,9 +456,8 @@ fn reload_settings(hwnd: HWND) {
     unsafe {
         SetTimer(hwnd, TIMER_POLL, settings.poll_interval_ms, None);
     }
-    if providers_changed {
-        request_poll(hwnd);
-    }
+    let _ = providers_changed;
+    request_poll(hwnd);
     sync_tray(hwnd);
 }
 

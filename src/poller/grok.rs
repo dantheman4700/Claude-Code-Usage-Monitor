@@ -25,7 +25,7 @@ const GROK_CLIENT_MODE: &str = "cli";
 /// Quote-free path expression -- see [`credentials`].
 const WSL_AUTH_PATH: &str = "~/.grok/auth.json";
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Grok,
     sign_in_hint: "run `grok login` on Windows or in WSL",
     env: &[],

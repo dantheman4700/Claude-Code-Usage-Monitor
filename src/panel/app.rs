@@ -40,6 +40,10 @@ pub(crate) struct PanelApp {
     /// a newer build): what is in memory is a default, and saving it would
     /// overwrite the real file.
     settings_writable: bool,
+    /// Distros found on the machine, fetched once the settings page needs them.
+    pub wsl_distros_detected: Option<Vec<String>>,
+    /// Edit buffers for the extra-paths boxes, keyed by provider key.
+    pub credential_path_text: std::collections::BTreeMap<String, String>,
     pub startup_enabled: bool,
     pub usage: Option<AppUsageData>,
     /// Why each enabled provider without a reading has none.
@@ -121,6 +125,11 @@ impl PanelApp {
         let loaded = app_settings::load_settings_if_readable();
         let settings_writable = loaded.is_some();
         let settings = loaded.unwrap_or_default();
+        let credential_path_text: std::collections::BTreeMap<String, String> = settings
+            .credential_paths
+            .iter()
+            .map(|(key, paths)| (key.clone(), paths.join("\n")))
+            .collect();
         let language = localization::resolve_language(
             settings.language.as_deref().and_then(LanguageId::from_code),
         );
@@ -136,6 +145,8 @@ impl PanelApp {
             settings,
             settings_error: None,
             settings_writable,
+            wsl_distros_detected: None,
+            credential_path_text,
             failures: cache.as_ref().map(failures_by_provider).unwrap_or_default(),
             usage: cache.map(|cache| cache.data),
             usage_history: app_settings::load_usage_history(),

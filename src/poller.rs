@@ -183,6 +183,7 @@ struct ProviderPoller {
     id: ProviderId,
     poll: fn() -> Result<UsageData, PollError>,
     credential_watch: fn() -> CredentialWatchSnapshot,
+    spec: &'static credentials::Spec,
 }
 
 const PROVIDER_POLLERS: [ProviderPoller; 8] = [
@@ -190,41 +191,49 @@ const PROVIDER_POLLERS: [ProviderPoller; 8] = [
         id: ProviderId::Claude,
         poll: claude::poll_claude_code,
         credential_watch: claude::credential_watch_snapshot,
+        spec: &claude::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Codex,
         poll: codex::poll_codex,
         credential_watch: codex::credential_watch_snapshot,
+        spec: &codex::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Antigravity,
         poll: antigravity::poll_antigravity,
         credential_watch: antigravity::credential_watch_snapshot,
+        spec: &antigravity::SPEC,
     },
     ProviderPoller {
         id: ProviderId::OpenCode,
         poll: opencode::poll_opencode,
         credential_watch: opencode::credential_watch_snapshot,
+        spec: &opencode::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Cursor,
         poll: cursor::poll_cursor,
         credential_watch: cursor::credential_watch_snapshot,
+        spec: &cursor::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Grok,
         poll: grok::poll_grok,
         credential_watch: grok::credential_watch_snapshot,
+        spec: &grok::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Fireworks,
         poll: fireworks::poll_fireworks,
         credential_watch: fireworks::credential_watch_snapshot,
+        spec: &fireworks::SPEC,
     },
     ProviderPoller {
         id: ProviderId::Devin,
         poll: devin::poll_devin,
         credential_watch: devin::credential_watch_snapshot,
+        spec: &devin::SPEC,
     },
 ];
 
@@ -290,6 +299,33 @@ pub(crate) fn file_signature(label: &str, path: &std::path::Path) -> String {
         }
         Err(_) => format!("{label}|missing"),
     }
+}
+
+/// Apply the user's "where to look" settings to the credential engine.
+pub fn configure_credentials(settings: &crate::app_settings::SettingsFile) {
+    credentials::configure(credentials::Config {
+        extra_paths: settings.credential_paths.clone(),
+        wsl_distros: settings.wsl_distros.clone(),
+        wsl_users: settings.wsl_users.clone(),
+    });
+}
+
+/// The places a provider is looked for by default, for the settings page.
+pub fn default_places(provider: ProviderId) -> Vec<String> {
+    let Some(poller) = provider_poller(provider) else {
+        return Vec::new();
+    };
+    let spec = poller.spec;
+    let mut places: Vec<String> = spec.env.iter().map(|group| format!("env {}", group.join("+"))).collect();
+    places.extend(spec.native_extra.iter().map(|extra| extra.label.to_string()));
+    places.extend((spec.native_files)().into_iter().map(|path| path.display().to_string()));
+    places.extend(spec.wsl_paths.iter().map(|path| format!("WSL {path}")));
+    places
+}
+
+/// Every distro on the machine (unfiltered), for the settings page.
+pub fn detected_wsl_distros() -> Vec<String> {
+    wsl::list_distros()
 }
 
 /// Housekeeping at startup: sweep temp files a crash may have left.

@@ -97,6 +97,18 @@ fn list_distros_uncached() -> Vec<String> {
         .collect()
 }
 
+/// `wsl.exe -d <distro> [-u <user>]`: the distro's default user unless the
+/// settings name another -- the login often lives under a different user
+/// than the distro starts as.
+fn wsl_command(distro: &str, user: Option<&str>) -> Command {
+    let mut command = Command::new("wsl.exe");
+    command.arg("-d").arg(distro);
+    if let Some(user) = user.map(str::trim).filter(|user| !user.is_empty()) {
+        command.arg("-u").arg(user);
+    }
+    command
+}
+
 /// Read a file from inside `distro`, as the distro's default user.
 ///
 /// `script` is handed to `sh -lc` and must be quote-free: `wsl.exe` routes the
@@ -104,11 +116,9 @@ fn list_distros_uncached() -> Vec<String> {
 /// shell expands `$var` and strips escaped quotes first. `~` and
 /// `${VAR:-default}` survive the round trip; shell locals and embedded double
 /// quotes do not.
-pub(super) fn read_file(distro: &str, script: &str, what: &str) -> Option<String> {
+pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &str) -> Option<String> {
     let Some(output) = run_with_timeout(
-        Command::new("wsl.exe")
-            .arg("-d")
-            .arg(distro)
+        wsl_command(distro, user)
             .arg("--")
             .arg("sh")
             .arg("-lc")
@@ -141,11 +151,9 @@ pub(super) fn read_file(distro: &str, script: &str, what: &str) -> Option<String
 
 /// A cheap fingerprint of a path inside `distro`, used to notice that
 /// credentials were rewritten without reading them back out.
-pub(super) fn path_watch_signature(distro: &str, key: &str, script: &str) -> Option<String> {
+pub(super) fn path_watch_signature(distro: &str, user: Option<&str>, key: &str, script: &str) -> Option<String> {
     let output = run_with_timeout(
-        Command::new("wsl.exe")
-            .arg("-d")
-            .arg(distro)
+        wsl_command(distro, user)
             .arg("--")
             .arg("sh")
             .arg("-lc")
@@ -174,7 +182,7 @@ pub(super) fn path_watch_signature(distro: &str, key: &str, script: &str) -> Opt
 ///
 /// Used for refresh commands whose only purpose is the side effect of the CLI
 /// rewriting its own credential file.
-pub(super) fn run_detached(distro: &str, script: &str, what: &str) {
+pub(super) fn run_detached(distro: &str, user: Option<&str>, script: &str, what: &str) {
     use std::io::Write;
     diagnose::log(format!("attempting WSL {what} in distro {distro}"));
     crate::activity_log::record(
@@ -182,9 +190,7 @@ pub(super) fn run_detached(distro: &str, script: &str, what: &str) {
         None,
         format!("Attempted {what} in WSL ({distro})"),
     );
-    let spawned = Command::new("wsl.exe")
-        .arg("-d")
-        .arg(distro)
+    let spawned = wsl_command(distro, user)
         .arg("--")
         // coreutils `timeout` bounds the Linux side as well: killing wsl.exe
         // alone would leave the shell (and a CLI turn) running in the distro.

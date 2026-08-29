@@ -121,14 +121,16 @@ struct Credentials {
     expires_at: Option<i64>,
 }
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Claude,
     sign_in_hint: "run `claude login`, or sign in to the Claude desktop app",
     env: &[],
     native_files: || {
-        dirs::home_dir()
-            .map(|home| home.join(".claude").join(".credentials.json"))
+        // CLAUDE_CONFIG_DIR is the CLI's own override; the default follows.
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(|dir| PathBuf::from(dir).join(".credentials.json"))
             .into_iter()
+            .chain(dirs::home_dir().map(|home| home.join(".claude").join(".credentials.json")))
             .collect()
     },
     native_extra: &[credentials::NativeExtra {

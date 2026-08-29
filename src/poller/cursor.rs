@@ -38,7 +38,7 @@ struct CursorPlanUsage {
 /// Quote-free path expression -- see [`credentials`].
 const WSL_AGENT_AUTH_PATH: &str = "~/.config/cursor/auth.json";
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Cursor,
     sign_in_hint: "sign in to Cursor, run `cursor-agent login`, or set CURSOR_SESSION_TOKEN",
     env: &[&[CURSOR_SESSION_TOKEN_ENV]],

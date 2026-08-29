@@ -35,7 +35,7 @@ const BILLING_DAY_OFFSET_SECS: u64 = 8 * 60 * 60;
 /// Quote-free path expression -- see [`credentials`].
 const WSL_ENV_PATH: &str = "~/.claude/.env.devin";
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Devin,
     sign_in_hint: "set DEVIN_API_KEY or write ~/.claude/.env.devin",
     env: &[&[DEVIN_KEY_ENV]],

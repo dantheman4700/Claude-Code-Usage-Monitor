@@ -35,7 +35,7 @@ const MAX_QUOTA_DETAILS: usize = 6;
 /// Quote-free path expression -- see [`credentials`].
 const WSL_ENV_PATH: &str = "~/.claude/.env.fireworks";
 
-const SPEC: credentials::Spec = credentials::Spec {
+pub(super) const SPEC: credentials::Spec = credentials::Spec {
     provider: ProviderId::Fireworks,
     sign_in_hint: "set FIREWORKS_API_KEY or write ~/.claude/.env.fireworks",
     env: &[&[FIREWORKS_KEY_ENV]],
