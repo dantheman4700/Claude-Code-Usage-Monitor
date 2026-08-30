@@ -40,10 +40,11 @@ Features
   the whole fleet — as a number, bar, column or ring, used or left, monotone or
   tinted at your warning line; add more icons for more values at once
 - Tooltip with every reporting provider and the soonest reset
-- Dashboard: tightest limit first, every window per provider, reset countdowns
+- Dashboard: tightest limit first, every window per provider, reset countdowns;
+  pin the providers you watch to the top, hide the rest
 - Burn rate and projected time-to-cap from your own local history
-- Routing view: which provider has the most headroom for the next task
-- Activity log of sign-ins, outages and resets
+- "Next job" line: which provider has the most headroom right now
+- Change log of sign-ins, outages and refreshes under Settings
 - Warning and critical thresholds you set; history retention you choose
 - Start with Windows; refresh every 1, 5, 15 or 60 minutes
 - Reads credentials from Windows and from WSL distros
@@ -61,9 +62,9 @@ https://github.com/dantheman4700/headroom
 
 ## Screenshots (1366×768 or larger, PNG)
 1. Dashboard with three providers reporting (Claude, Codex, Cursor)
-2. Tray tooltip over the icon
-3. Routing page
-4. Activity page
+2. Tray tooltip over the icon, and two or three tray icons side by side
+3. Tray icons page (a provider icon with initials, the fleet as bars)
+4. Dashboard in Customize mode
 5. Settings → Providers
 Capture with the panel at its default 1100×600 on a 125 % display; the egui
 client area cannot be screenshotted by window-capture tools — use a full

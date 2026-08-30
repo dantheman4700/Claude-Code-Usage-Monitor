@@ -220,6 +220,14 @@ pub struct SettingsFile {
     /// Whether providers with nothing to read still get a row in the panel.
     #[serde(default = "default_true")]
     pub show_unreachable_providers: bool,
+    /// Providers pinned to the top of the dashboard, in the order chosen;
+    /// the rest follow in the dashboard's own order (tightest first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dashboard_pinned: Vec<String>,
+    /// Providers taken off the dashboard. Still polled -- a tray icon can
+    /// still show them -- just not on the page left open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dashboard_hidden: Vec<String>,
     /// Cleared once the first-run notice has been dismissed.
     #[serde(default)]
     pub first_run_seen: bool,
@@ -280,6 +288,8 @@ impl Default for SettingsFile {
             critical_percent: default_critical_percent(),
             history_retention_days: default_history_retention_days(),
             show_unreachable_providers: true,
+            dashboard_pinned: Vec::new(),
+            dashboard_hidden: Vec::new(),
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
@@ -362,6 +372,47 @@ impl SettingsFile {
     pub fn set_enabled_providers(&mut self, providers: ProviderSet) {
         for provider in ProviderId::ALL {
             self.set_provider_enabled(provider, providers.contains(provider));
+        }
+    }
+
+    /// Where a provider sits among the pinned ones, if it is pinned.
+    pub fn dashboard_pin_index(&self, provider: ProviderId) -> Option<usize> {
+        self.dashboard_pinned.iter().position(|key| key == provider.descriptor().key)
+    }
+
+    pub fn dashboard_hidden(&self, provider: ProviderId) -> bool {
+        self.dashboard_hidden.iter().any(|key| key == provider.descriptor().key)
+    }
+
+    /// Pin at the end of the pinned run, or unpin.
+    pub fn toggle_dashboard_pin(&mut self, provider: ProviderId) {
+        let key = provider.descriptor().key;
+        match self.dashboard_pin_index(provider) {
+            Some(index) => {
+                self.dashboard_pinned.remove(index);
+            }
+            None => self.dashboard_pinned.push(key.to_string()),
+        }
+    }
+
+    /// Move a pinned provider one place up (`-1`) or down (`1`) the run.
+    pub fn move_dashboard_pin(&mut self, provider: ProviderId, by: i32) {
+        let Some(index) = self.dashboard_pin_index(provider) else {
+            return;
+        };
+        let target = index as i32 + by;
+        if target < 0 || target as usize >= self.dashboard_pinned.len() {
+            return;
+        }
+        self.dashboard_pinned.swap(index, target as usize);
+    }
+
+    pub fn toggle_dashboard_hidden(&mut self, provider: ProviderId) {
+        let key = provider.descriptor().key;
+        if self.dashboard_hidden(provider) {
+            self.dashboard_hidden.retain(|candidate| candidate != key);
+        } else {
+            self.dashboard_hidden.push(key.to_string());
         }
     }
 
@@ -724,13 +775,14 @@ pub fn save_usage_cache(
 /// default and dropped the switches older files had frozen from the old
 /// defaults (1 was the first versioned file); 4 added tray icon options; 5
 /// made the icons one list and let a value name a per-model cap; 6 added
-/// the Letters style and an icon's own label. An older
+/// the Letters style and an icon's own label; 7 added the dashboard's
+/// pinned and hidden lists. An older
 /// build leaves a newer file alone once it holds a variant it cannot
 /// decode (a column style, a scoped value); until then it reads the file,
 /// and a save from it drops the nested icon fields it does not know. A
 /// downgrade costs those, no more -- which is why every shape change bumps
 /// this: an undecodable file at the build's own version is quarantined.
-pub const SETTINGS_SCHEMA: u32 = 6;
+pub const SETTINGS_SCHEMA: u32 = 7;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -1003,10 +1055,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":7,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":8,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(7));
+        assert_eq!(written["schema_version"], serde_json::json!(8));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -1015,8 +1067,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":7,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(7))));
-        assert!(matches!(decode_settings(r#"{"schema_version":6,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":8,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(8))));
+        assert!(matches!(decode_settings(r#"{"schema_version":7,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -1138,7 +1190,7 @@ mod tests {
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
         assert_eq!(loaded.tray_icons, settings.tray_icons);
-        assert_eq!(loaded.schema_version, 6);
+        assert_eq!(loaded.schema_version, 7);
         assert!(!written.contains("tray_icon\""), "the old key is not written");
 
         // A file from 3 has one `tray_icon`: it becomes the list's only entry,
@@ -1148,7 +1200,7 @@ mod tests {
         assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
         assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
         assert!(!older.tray_icons[0].alert_colour);
-        assert_eq!(older.schema_version, 6);
+        assert_eq!(older.schema_version, 7);
         assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
         // The short-lived first-plus-extras shape folds into the list too.
@@ -1197,6 +1249,30 @@ mod tests {
         // Nothing changed here: the disk is taken as it is.
         let same = merge_settings(&baseline, &baseline, &disk);
         assert_eq!(settings_json(&same), settings_json(&disk));
+    }
+
+    #[test]
+    fn dashboard_pins_keep_their_order_and_hidden_is_separate() {
+        let mut settings = SettingsFile::default();
+        settings.toggle_dashboard_pin(ProviderId::Codex);
+        settings.toggle_dashboard_pin(ProviderId::Claude);
+        assert_eq!(settings.dashboard_pinned, vec!["codex", "claude"]);
+        settings.move_dashboard_pin(ProviderId::Claude, -1);
+        assert_eq!(settings.dashboard_pinned, vec!["claude", "codex"]);
+        settings.move_dashboard_pin(ProviderId::Claude, -1);
+        assert_eq!(settings.dashboard_pinned, vec!["claude", "codex"], "the top stays the top");
+        settings.move_dashboard_pin(ProviderId::Grok, 1);
+        assert_eq!(settings.dashboard_pin_index(ProviderId::Grok), None, "an unpinned provider does not move");
+        settings.toggle_dashboard_pin(ProviderId::Claude);
+        assert_eq!(settings.dashboard_pinned, vec!["codex"]);
+        settings.toggle_dashboard_hidden(ProviderId::Devin);
+        assert!(settings.dashboard_hidden(ProviderId::Devin));
+        assert!(settings.provider_enabled(ProviderId::Devin), "hidden is not disabled");
+        settings.toggle_dashboard_hidden(ProviderId::Devin);
+        assert!(!settings.dashboard_hidden(ProviderId::Devin));
+        let written = settings_json(&settings);
+        assert_eq!(written["dashboard_pinned"], serde_json::json!(["codex"]));
+        assert!(written.get("dashboard_hidden").is_none(), "an empty list is not written");
     }
 
     #[test]

@@ -1,10 +1,12 @@
-//! The dashboard, and the two pages that hang off it.
+//! The dashboard: the page left open.
 //!
-//! The dashboard is one screen: what is closest to running out, then every
-//! provider as a card, the ones that are reporting first and the tightest at
-//! the top. A card opens into its detail -- plan extras, history, burn rate,
-//! and the conductor seats its account backs. Routing (where the next job can
-//! go) and Activity (what changed) are their own pages.
+//! One screen: what is closest to running out, where the next job has the
+//! most room, then every provider as a card -- the pinned ones first in the
+//! order chosen, then the ones that are reporting with the tightest at the
+//! top. A card opens into its detail: plan extras, history, burn rate, and
+//! the conductor seats its account backs. Customize pins, orders and hides
+//! cards. The change log (what came online, went dark, was refreshed) is a
+//! Settings tab, drawn from here.
 
 use super::*;
 use crate::models::{FailureKind, ProviderFailure};
@@ -82,6 +84,7 @@ impl PanelApp {
             self.first_run_notice(ui);
             self.fetch_all_row(ui);
             headline(ui, &insights, now, self.language());
+            routing_line(ui, &insights, now, self.language());
             self.provider_cards(ui, &usage, &insights, now, thresholds);
         });
     }
@@ -89,6 +92,44 @@ impl PanelApp {
     /// One button that asks the tray to poll every provider now. The tray
     /// applies its own cooldown; the button mirrors it so a press that was
     /// ignored does not look like a broken button.
+    /// The edit-mode row above a card: pin (and move a pinned one), hide.
+    fn customize_strip(&mut self, ui: &mut egui::Ui, provider: ProviderId, hidden: bool) {
+        let language = self.language();
+        let pinned = self.settings.dashboard_pin_index(provider);
+        let pinned_count = self.settings.dashboard_pinned.len();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            let name = language.text(provider_name(provider));
+            let title = if hidden { format!("{name} · {}", language.text("hidden")) } else { name.to_string() };
+            ui.label(egui::RichText::new(title).size(12.5).color(if hidden { muted() } else { accent() }));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(language.text(if hidden { "Show" } else { "Hide" })).clicked() {
+                    self.settings.toggle_dashboard_hidden(provider);
+                    changed = true;
+                }
+                if !hidden {
+                    if let Some(index) = pinned {
+                        if ui.add_enabled(index + 1 < pinned_count, egui::Button::new("↓").small()).clicked() {
+                            self.settings.move_dashboard_pin(provider, 1);
+                            changed = true;
+                        }
+                        if ui.add_enabled(index > 0, egui::Button::new("↑").small()).clicked() {
+                            self.settings.move_dashboard_pin(provider, -1);
+                            changed = true;
+                        }
+                    }
+                    if ui.small_button(language.text(if pinned.is_some() { "Unpin" } else { "Pin" })).clicked() {
+                        self.settings.toggle_dashboard_pin(provider);
+                        changed = true;
+                    }
+                }
+            });
+        });
+        if changed {
+            self.save_settings();
+        }
+    }
+
     fn fetch_all_row(&mut self, ui: &mut egui::Ui) {
         let language = self.language();
         ui.horizontal(|ui| {
@@ -103,11 +144,25 @@ impl PanelApp {
                         }
                     }
                 }
+                let label = if self.customizing { "Done" } else { "Customize" };
+                if ui.button(language.text(label)).clicked() {
+                    self.customizing = !self.customizing;
+                }
                 if let Some(at) = self.usage_updated_phrase() {
                     ui.label(egui::RichText::new(at).color(muted()).size(11.0));
                 }
             });
         });
+        if self.customizing {
+            ui.label(
+                egui::RichText::new(language.text(
+                    "Pin the providers you watch to the top, in your order; hide the ones you do not. A hidden provider is still read and can still sit in the tray.",
+                ))
+                .color(muted())
+                .size(11.5),
+            );
+            ui.add_space(4.0);
+        }
         ui.add_space(6.0);
     }
 
@@ -200,16 +255,32 @@ impl PanelApp {
                 .then(a.0.cmp(&b.0))
         });
 
+        // Pinned first, in the order chosen; the rest as ranked.
+        let pin_of = |provider: ProviderId| self.settings.dashboard_pin_index(provider);
+        order.sort_by_key(|(provider, ..)| pin_of(*provider).map_or(usize::MAX, |index| index));
+        let customizing = self.customizing;
+
         ui.add_space(4.0);
         let mut drew_any = false;
         let mut not_installed: Vec<ProviderId> = Vec::new();
         for (provider, rank, _, _) in order {
-            if rank == 4 {
+            let hidden = self.settings.dashboard_hidden(provider);
+            if hidden && !customizing {
+                continue;
+            }
+            if rank == 4 && !customizing {
                 not_installed.push(provider);
                 continue;
             }
-            if rank >= 2 && !show_unreachable {
+            if (2..4).contains(&rank) && !show_unreachable && !customizing {
                 continue;
+            }
+            if customizing {
+                self.customize_strip(ui, provider, hidden);
+                if hidden || rank == 4 {
+                    ui.add_space(8.0);
+                    continue;
+                }
             }
             drew_any = true;
             let reading = usage.get(provider);
@@ -245,6 +316,15 @@ impl PanelApp {
             }
             ui.add_space(8.0);
         }
+        if customizing {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(language.text("Providers with nothing to read")).size(12.5));
+                if Toggle::new(&mut self.settings.show_unreachable_providers).labels(language.text("Shown"), language.text("Hidden")).show(ui).changed() {
+                    self.save_settings();
+                }
+            });
+            ui.add_space(8.0);
+        }
         if show_unreachable && !not_installed.is_empty() {
             drew_any = true;
             let entries: Vec<(ProviderId, Option<&ProviderFailure>)> = not_installed
@@ -264,137 +344,19 @@ impl PanelApp {
     // Routing
     // ------------------------------------------------------------------
 
-    pub(super) fn routing_page(&mut self, ui: &mut egui::Ui) {
-        let Some((_, insights, _, now)) = self.dashboard_inputs() else {
-            settings_scroll_area(ui, |ui| self.nothing_yet(ui));
-            return;
-        };
-        let language = self.language();
-        let show_unreachable = self.settings.show_unreachable_providers;
-        settings_scroll_area(ui, |ui| {
-            section(ui, language.text("Where to route next"), |ui| {
-                ui.label(
-                    egui::RichText::new(language.text(
-                        "Ranked by the room left on each provider's tightest window. A provider is only as free as its worst cap.",
-                    ))
-                    .color(muted())
-                    .size(11.0),
-                );
-                ui.add_space(8.0);
-                let rows: Vec<&Headroom> = insights
-                    .headroom
-                    .iter()
-                    .filter(|headroom| headroom.available || show_unreachable)
-                    .collect();
-                if rows.is_empty() {
-                    ui.label(egui::RichText::new(language.text("Nothing to rank.")).color(muted()));
-                }
-                for (rank, headroom) in rows.iter().enumerate() {
-                    let projection = insights
-                        .projections
-                        .iter()
-                        .filter(|projection| projection.provider == headroom.provider)
-                        .max_by(|a, b| a.percent_per_hour.total_cmp(&b.percent_per_hour));
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{}.", rank + 1))
-                                .color(muted())
-                                .monospace(),
-                        );
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(104.0, 18.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(language.text(provider_name(headroom.provider)))
-                                        .strong(),
-                                );
-                            },
-                        );
-                        if !headroom.available {
-                            ui.label(
-                                egui::RichText::new(language.text("unreachable"))
-                                    .color(muted())
-                                    .italics(),
-                            );
-                            return;
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("{:.0}% free", headroom.percent_free))
-                                .strong()
-                                .color(headroom_colour(headroom)),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("via {}", headroom.limiting_window.label()))
-                                .color(muted())
-                                .size(11.0),
-                        );
-                        if let Some(projection) = projection {
-                            projection_label(ui, projection, now, language);
-                        }
-                    });
-                }
-            });
-
-            section(ui, language.text("Burn rate"), |ui| {
-                let mut projections: Vec<&Projection> = insights
-                    .projections
-                    .iter()
-                    .filter(|projection| projection.percent_per_hour > 0.0)
-                    .collect();
-                projections.sort_by(|a, b| b.percent_per_hour.total_cmp(&a.percent_per_hour));
-                if projections.is_empty() {
-                    ui.label(
-                        egui::RichText::new(language.text("Not enough history yet to measure a rate."))
-                            .color(muted()),
-                    );
-                }
-                for projection in projections {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(104.0, 18.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(language.text(provider_name(projection.provider)));
-                            },
-                        );
-                        projection_label(ui, projection, now, language);
-                    });
-                }
-            });
-        });
-    }
-
-    // ------------------------------------------------------------------
-    // Activity
-    // ------------------------------------------------------------------
-
-    pub(super) fn activity_page(&mut self, ui: &mut egui::Ui) {
+    /// The change log, for the Settings page: a provider coming online,
+    /// going dark, rejecting its credentials, a refresh, a migration.
+    pub(super) fn activity_log(&self, ui: &mut egui::Ui) {
         let language = self.language();
         let now = SystemTime::now();
-        settings_scroll_area(ui, |ui| {
-            section(ui, language.text("Activity"), |ui| {
-                ui.label(
-                    egui::RichText::new(language.text(
-                        "Only changes are recorded: a provider coming online, going dark, rejecting its credentials, a refresh, a migration.",
-                    ))
-                    .color(muted())
-                    .size(11.0),
-                );
-                ui.add_space(8.0);
-                let mut any = false;
-                for event in self.activity.recent(ACTIVITY_ROWS) {
-                    any = true;
-                    activity_row(ui, event, now, language);
-                }
-                if !any {
-                    ui.label(
-                        egui::RichText::new(language.text("Nothing has happened yet."))
-                            .color(muted()),
-                    );
-                }
-            });
-        });
+        let mut any = false;
+        for event in self.activity.recent(ACTIVITY_ROWS) {
+            any = true;
+            activity_row(ui, event, now, language);
+        }
+        if !any {
+            ui.label(egui::RichText::new(language.text("Nothing has happened yet.")).color(muted()));
+        }
     }
 }
 
@@ -734,6 +696,42 @@ fn status_chip(
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(10.5).color(colour));
         });
+}
+
+/// One line under the headline: where the next job has the most room,
+/// most free first, with a warning where a window would run dry before it
+/// renews. What the Routing page used to say, where it is acted on.
+fn routing_line(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: LanguageId) {
+    let mut free: Vec<&Headroom> = insights.headroom.iter().filter(|headroom| headroom.available).collect();
+    if free.is_empty() {
+        return;
+    }
+    free.sort_by(|a, b| b.percent_free.total_cmp(&a.percent_free));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(egui::RichText::new(language.text("Next job →")).color(muted()).size(12.0));
+        for (index, headroom) in free.iter().enumerate() {
+            if index > 0 {
+                ui.label(egui::RichText::new("·").color(muted()).size(12.0));
+            }
+            ui.label(egui::RichText::new(language.text(provider_name(headroom.provider))).size(12.0).strong());
+            ui.label(egui::RichText::new(format!("{:.0}% free", headroom.percent_free)).size(12.0).color(headroom_colour(headroom)));
+            // The window that runs dry soonest, not the one filling fastest.
+            let dry = insights
+                .projections
+                .iter()
+                .filter(|projection| projection.provider == headroom.provider && projection.exhausts_before_reset)
+                .min_by_key(|projection| projection.exhausted_at);
+            if let Some(projection) = dry {
+                ui.label(
+                    egui::RichText::new(format!("({} {})", language.text("runs out"), relative_phrase(projection.exhausted_at, now)))
+                        .size(11.5)
+                        .color(danger()),
+                );
+            }
+        }
+    });
+    ui.add_space(10.0);
 }
 
 fn projection_label(ui: &mut egui::Ui, projection: &Projection, now: SystemTime, language: LanguageId) {

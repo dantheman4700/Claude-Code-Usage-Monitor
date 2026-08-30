@@ -1,5 +1,5 @@
 //! The panel: a separate process the tray launches, showing the dashboard,
-//! routing, activity and settings.
+//! the tray icons and settings.
 
 mod app;
 mod dashboard;

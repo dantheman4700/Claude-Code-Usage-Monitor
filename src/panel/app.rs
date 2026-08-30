@@ -26,8 +26,6 @@ use crate::usage_history::UsageHistory;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     Fleet,
-    Routing,
-    Activity,
     TrayIcons,
     Settings,
 }
@@ -62,6 +60,8 @@ pub(crate) struct PanelApp {
     text_edit_active: bool,
     /// Which tab of the Settings page is open.
     pub(crate) settings_tab: super::settings::SettingsTab,
+    /// The dashboard's edit mode: pin, order and hide cards.
+    pub(crate) customizing: bool,
     /// The settings as last read from or written to the file, so a save can
     /// tell which keys this panel changed and fold them onto whatever the
     /// tray wrote in between.
@@ -190,6 +190,7 @@ impl PanelApp {
             settings_modified: settings_file_modified(),
             text_edit_active: false,
             settings_tab: Default::default(),
+            customizing: false,
             settings_baseline,
             hwnd,
             dark,
@@ -426,8 +427,6 @@ impl PanelApp {
                             ui.set_width(DEFAULT_MENU_WIDTH - 16.0);
                             for (page, label) in [
                                 (Page::Fleet, "Dashboard"),
-                                (Page::Routing, "Routing"),
-                                (Page::Activity, "Activity"),
                                 (Page::TrayIcons, "Tray icons"),
                                 (Page::Settings, "Settings"),
                             ] {
@@ -464,8 +463,6 @@ impl PanelApp {
                     }
                     match self.page {
                         Page::Fleet => self.fleet_page(ui),
-                        Page::Routing => self.routing_page(ui),
-                        Page::Activity => self.activity_page(ui),
                         Page::TrayIcons => self.tray_icons_page(ui),
                         Page::Settings => self.settings_page(ui),
                     }

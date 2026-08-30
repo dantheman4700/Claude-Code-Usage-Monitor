@@ -19,6 +19,7 @@ pub(crate) enum SettingsTab {
     General,
     Providers,
     Limits,
+    Log,
     About,
 }
 
@@ -37,6 +38,7 @@ impl PanelApp {
                     (SettingsTab::General, language.text("General")),
                     (SettingsTab::Providers, language.text("Providers")),
                     (SettingsTab::Limits, language.text("Limits")),
+                    (SettingsTab::Log, language.text("Log")),
                     (SettingsTab::About, language.text("About")),
                 ],
             );
@@ -45,6 +47,17 @@ impl PanelApp {
                 SettingsTab::General => self.general_tab(ui, language, &changed),
                 SettingsTab::Providers => self.providers_tab(ui, language, &changed),
                 SettingsTab::Limits => self.limits_tab(ui, language, &changed),
+                SettingsTab::Log => {
+                    ui.label(
+                        egui::RichText::new(language.text(
+                            "Only changes are recorded: a provider coming online, going dark, rejecting its credentials, a refresh, a migration.",
+                        ))
+                        .color(muted())
+                        .size(12.0),
+                    );
+                    ui.add_space(12.0);
+                    card(ui, None, |_| {}, |ui| self.activity_log(ui));
+                }
                 SettingsTab::About => about_tab(ui, language),
             }
         });
@@ -253,17 +266,6 @@ impl PanelApp {
                     changed.set(true);
                 }
             });
-            setting_separator(ui);
-            setting_row(
-                ui,
-                language.text("Show unreachable providers"),
-                language.text("List providers that have nothing to read, so a missing sign-in is visible"),
-                |ui| {
-                    if Toggle::new(&mut self.settings.show_unreachable_providers).labels(language.text("Shown"), language.text("Hidden")).show(ui).changed() {
-                        changed.set(true);
-                    }
-                },
-            );
         });
     }
 

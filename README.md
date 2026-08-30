@@ -6,9 +6,10 @@ icon and one panel.
 
 Headroom sits in the Windows system tray. Click the icon for the dashboard:
 every limit each provider reports, which one bites first, how fast each window
-is filling, and where there is still room to send the next job. Right-click
-for the menu, which mirrors Settings: update frequency, providers, the tray
-icon, appearance, start with Windows.
+is filling, and where there is still room to send the next job. It is the page
+to leave open: pin the providers you watch to the top in your order, hide the
+rest. Right-click the icon for the menu, which mirrors Settings: update
+frequency, providers, the tray icon, appearance, start with Windows.
 
 The tray icon is yours to shape: the logo, the tightest limit across the
 fleet, any one limit a provider reports (session, weekly, monthly, a per-model
