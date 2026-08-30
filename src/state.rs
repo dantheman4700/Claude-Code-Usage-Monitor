@@ -106,7 +106,10 @@ pub fn manual_retry_cooldown_secs(backoff: Option<&ProviderBackoff>) -> u64 {
     }
 }
 
-pub const FETCH_ALL_COOLDOWN_SECS: u64 = 15;
+/// A fetch-all pressed again within this is ignored: it is mash protection,
+/// not a wait for the round -- a request during a round queues exactly one
+/// more, and the panel keeps its button busy until the readings land.
+pub const FETCH_ALL_COOLDOWN_SECS: u64 = 3;
 
 pub struct AppState {
     pub providers: ProviderSet,

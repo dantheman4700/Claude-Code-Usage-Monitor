@@ -56,16 +56,23 @@ pub enum TrayIconMode {
     Rundown,
 }
 
-/// Which of a provider's windows an icon reads.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Which of a provider's limits an icon reads. Providers report different
+/// sets -- a session and a week, a month, per-model caps, credits -- so the
+/// choice is made from what the provider actually reports; one it no longer
+/// reports falls back to its tightest.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrayIconMetric {
     #[default]
     Tightest,
     Session,
     Weekly,
-    /// The monthly window where a provider has one; otherwise its weekly.
     Monthly,
+    /// Paid credits, where a provider reports them.
+    Credits,
+    /// A named cap beside the plan-wide windows -- a per-model weekly limit,
+    /// say -- by the label the provider gives it.
+    Scoped(String),
 }
 
 /// How a value is drawn.
@@ -683,13 +690,14 @@ pub fn save_usage_cache(
 
 /// Settings: 2 added the `providers` map; 3 switched every provider on by
 /// default and dropped the switches older files had frozen from the old
-/// defaults (1 was the first versioned file); 4 added tray icon options. A
-/// 3 build leaves a 4 file alone once it holds a variant it cannot decode
-/// (a column style, a monthly window, initials); until then it reads the
-/// file, and a save from it drops the nested icon fields it does not know
-/// (`measure`, `mark`, `alert_colour`) while keeping `extra_tray_icons`
-/// through the unknown-key map. A downgrade costs those three, no more.
-pub const SETTINGS_SCHEMA: u32 = 4;
+/// defaults (1 was the first versioned file); 4 added tray icon options; 5
+/// made the icons one list and let a value name a per-model cap. An older
+/// build leaves a newer file alone once it holds a variant it cannot
+/// decode (a column style, a scoped value); until then it reads the file,
+/// and a save from it drops the nested icon fields it does not know. A
+/// downgrade costs those, no more -- which is why every shape change bumps
+/// this: an undecodable file at the build's own version is quarantined.
+pub const SETTINGS_SCHEMA: u32 = 5;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -962,10 +970,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":5,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":6,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(5));
+        assert_eq!(written["schema_version"], serde_json::json!(6));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -974,8 +982,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":5,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(5))));
-        assert!(matches!(decode_settings(r#"{"schema_version":4,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":6,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(6))));
+        assert!(matches!(decode_settings(r#"{"schema_version":5,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -1097,7 +1105,7 @@ mod tests {
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
         assert_eq!(loaded.tray_icons, settings.tray_icons);
-        assert_eq!(loaded.schema_version, 4);
+        assert_eq!(loaded.schema_version, 5);
         assert!(!written.contains("tray_icon\""), "the old key is not written");
 
         // A file from 3 has one `tray_icon`: it becomes the list's only entry,
@@ -1107,7 +1115,7 @@ mod tests {
         assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
         assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
         assert!(!older.tray_icons[0].alert_colour);
-        assert_eq!(older.schema_version, 4);
+        assert_eq!(older.schema_version, 5);
         assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
         // The short-lived first-plus-extras shape folds into the list too.

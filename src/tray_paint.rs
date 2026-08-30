@@ -71,19 +71,87 @@ impl Render {
 }
 
 /// The percentage a provider contributes under a metric: its tightest
-/// window, or specifically the session, weekly or monthly one. Monthly
-/// falls back to weekly for a provider without a monthly window, so the
-/// icon keeps saying something rather than going blank.
-pub fn provider_percent(usage: &UsageData, metric: TrayIconMetric) -> f64 {
+/// window, or one particular limit. A limit the provider does not report
+/// (no monthly window, a per-model cap that has gone) falls back to the
+/// tightest, so the icon keeps saying something rather than going blank.
+pub fn provider_percent(usage: &UsageData, metric: &TrayIconMetric) -> f64 {
+    reported_percent(usage, metric).unwrap_or_else(|| tightest_percent(usage))
+}
+
+/// A provider's tightest window: the highest reading across everything it
+/// reports (credits aside -- a balance is not a cap).
+pub fn tightest_percent(usage: &UsageData) -> f64 {
+    [usage.session.percentage, usage.weekly.percentage]
+        .into_iter()
+        .chain(usage.monthly.as_ref().map(|monthly| monthly.percentage))
+        .chain(usage.scoped.iter().map(|scoped| scoped.section.percentage))
+        .fold(0.0, f64::max)
+}
+
+/// The percentage under a metric only if the provider reports that limit;
+/// `None` otherwise, so a fleet view can leave the provider out rather than
+/// compare a window it does not have. A window with neither a figure nor
+/// a reset time is one the provider does not bill, not one at zero.
+pub fn reported_percent(usage: &UsageData, metric: &TrayIconMetric) -> Option<f64> {
+    let real = |section: &crate::models::UsageSection| section.percentage > 0.0 || section.resets_at.is_some();
     match metric {
-        TrayIconMetric::Session => usage.session.percentage,
-        TrayIconMetric::Weekly => usage.weekly.percentage,
-        TrayIconMetric::Monthly => usage.monthly.as_ref().map_or(usage.weekly.percentage, |monthly| monthly.percentage),
-        TrayIconMetric::Tightest => [usage.session.percentage, usage.weekly.percentage]
-            .into_iter()
-            .chain(usage.monthly.as_ref().map(|monthly| monthly.percentage))
-            .chain(usage.scoped.iter().map(|scoped| scoped.section.percentage))
-            .fold(0.0, f64::max),
+        TrayIconMetric::Tightest => Some(tightest_percent(usage)),
+        TrayIconMetric::Session => real(&usage.session).then_some(usage.session.percentage),
+        TrayIconMetric::Weekly => real(&usage.weekly).then_some(usage.weekly.percentage),
+        TrayIconMetric::Monthly => usage.monthly.as_ref().map(|monthly| monthly.percentage),
+        TrayIconMetric::Credits => usage.credits.as_ref().map(|credits| credits.percentage),
+        TrayIconMetric::Scoped(label) => usage.scoped.iter().find(|scoped| &scoped.label == label).map(|scoped| scoped.section.percentage),
+    }
+}
+
+/// The limits a provider offers an icon, as the icon names them: the
+/// tightest first, then each window it reports, in the dashboard's order.
+/// Only windows with a figure or a reset time are real; a flat zero is a
+/// window the provider does not bill.
+pub fn provider_windows(usage: &UsageData) -> Vec<(TrayIconMetric, String)> {
+    let mut out = vec![(TrayIconMetric::Tightest, "Tightest window".to_string())];
+    if usage.session.percentage > 0.0 || usage.session.resets_at.is_some() {
+        out.push((TrayIconMetric::Session, "Session".to_string()));
+    }
+    if usage.weekly.percentage > 0.0 || usage.weekly.resets_at.is_some() {
+        let title = match &usage.weekly_label {
+            Some(label) => format!("Weekly ({label})"),
+            None => "Weekly".to_string(),
+        };
+        out.push((TrayIconMetric::Weekly, title));
+    }
+    for scoped in &usage.scoped {
+        let window = match scoped.window {
+            crate::models::LimitWindow::Session => "session",
+            crate::models::LimitWindow::Weekly => "weekly",
+            crate::models::LimitWindow::Monthly => "monthly",
+        };
+        out.push((TrayIconMetric::Scoped(scoped.label.clone()), format!("{} · {window}", scoped.label)));
+    }
+    if usage.monthly.is_some() {
+        out.push((TrayIconMetric::Monthly, "Monthly".to_string()));
+    }
+    if usage.credits.is_some() {
+        out.push((TrayIconMetric::Credits, "Credits".to_string()));
+    }
+    out
+}
+
+/// What a metric is called: the provider's own title when it reports that
+/// limit, otherwise the generic name.
+pub fn metric_name(metric: &TrayIconMetric, usage: Option<&UsageData>) -> String {
+    if let Some(usage) = usage {
+        if let Some((_, title)) = provider_windows(usage).into_iter().find(|(candidate, _)| candidate == metric) {
+            return title;
+        }
+    }
+    match metric {
+        TrayIconMetric::Tightest => "Tightest window".to_string(),
+        TrayIconMetric::Session => "Session".to_string(),
+        TrayIconMetric::Weekly => "Weekly".to_string(),
+        TrayIconMetric::Monthly => "Monthly".to_string(),
+        TrayIconMetric::Credits => "Credits".to_string(),
+        TrayIconMetric::Scoped(label) => label.clone(),
     }
 }
 
@@ -96,7 +164,7 @@ pub fn shown_provider(settings: &TrayIconSettings, data: Option<&AppUsageData>, 
     match settings.mode {
         TrayIconMode::Tightest => enabled
             .iter()
-            .filter_map(|provider| Some((provider, provider_percent(data.get(provider)?, settings.metric))))
+            .filter_map(|provider| Some((provider, reported_percent(data.get(provider)?, &settings.metric)?)))
             .fold(None, |best: Option<(ProviderId, f64)>, candidate| match best {
                 Some(best) if best.1 >= candidate.1 => Some(best),
                 _ => Some(candidate),
@@ -107,7 +175,7 @@ pub fn shown_provider(settings: &TrayIconSettings, data: Option<&AppUsageData>, 
                 .as_deref()
                 .and_then(ProviderId::from_key)
                 .or_else(|| enabled.iter().next())?;
-            Some((chosen, provider_percent(data.get(chosen)?, settings.metric)))
+            Some((chosen, provider_percent(data.get(chosen)?, &settings.metric)))
         }
         TrayIconMode::Logo | TrayIconMode::Rundown => None,
     }
@@ -131,7 +199,7 @@ fn rundown_bars(settings: &TrayIconSettings, data: Option<&AppUsageData>, enable
         .iter()
         .map(|provider| {
             data.and_then(|data| data.get(provider))
-                .map(|usage| provider_percent(usage, settings.metric))
+                .and_then(|usage| reported_percent(usage, &settings.metric))
         })
         .collect()
 }
@@ -720,10 +788,10 @@ mod tests {
     #[test]
     fn the_tightest_window_is_the_provider_value() {
         let mut data = usage(12.0, 40.0);
-        assert_eq!(provider_percent(&data, TrayIconMetric::Tightest), 40.0);
-        assert_eq!(provider_percent(&data, TrayIconMetric::Session), 12.0);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Tightest), 40.0);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Session), 12.0);
         data.monthly = Some(UsageSection { percentage: 77.0, resets_at: None });
-        assert_eq!(provider_percent(&data, TrayIconMetric::Tightest), 77.0);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Tightest), 77.0);
     }
 
     #[test]
@@ -760,15 +828,39 @@ mod tests {
         let settings = TrayIconSettings { mode: TrayIconMode::Tightest, metric: TrayIconMetric::Session, mark: TrayIconMark::Initials, ..Default::default() };
         assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 30.0, style: TrayIconStyle::Ring, mark: Mark::Text("CL".into()) });
         // Monthly falls back to weekly where there is no monthly window.
-        assert_eq!(provider_percent(&usage(30.0, 55.0), TrayIconMetric::Monthly), 55.0);
+        assert_eq!(provider_percent(&usage(30.0, 55.0), &TrayIconMetric::Monthly), 55.0);
         let mut monthly = usage(30.0, 55.0);
         monthly.monthly = Some(UsageSection { percentage: 9.0, resets_at: None });
-        assert_eq!(provider_percent(&monthly, TrayIconMetric::Monthly), 9.0);
+        assert_eq!(provider_percent(&monthly, &TrayIconMetric::Monthly), 9.0);
         // A rundown in the bar style is rows; its alert is its worst bar.
         let settings = TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, ..Default::default() };
         assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), Some(80.0)], rows: true });
         assert_eq!(shown_used_percent(&settings, Some(&data), enabled), Some(80.0));
         assert_eq!(shown_used_percent(&TrayIconSettings { mode: TrayIconMode::Logo, ..Default::default() }, Some(&data), enabled), None);
+    }
+
+    #[test]
+    fn a_provider_offers_the_limits_it_reports() {
+        let mut data = usage(30.0, 55.0);
+        assert_eq!(provider_windows(&data).len(), 3, "tightest, session, weekly");
+        data.weekly_label = Some("7d".into());
+        data.scoped.push(crate::models::ScopedLimit { label: "Fable".into(), window: crate::models::LimitWindow::Weekly, section: UsageSection { percentage: 71.0, resets_at: None } });
+        data.credits = Some(crate::models::CreditsSection { percentage: 12.0, remaining: 88.0, total: 100.0 });
+        let windows = provider_windows(&data);
+        let titles: Vec<&str> = windows.iter().map(|(_, title)| title.as_str()).collect();
+        assert_eq!(titles, vec!["Tightest window", "Session", "Weekly (7d)", "Fable · weekly", "Credits"]);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Scoped("Fable".into())), 71.0);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Credits), 12.0);
+        assert_eq!(provider_percent(&data, &TrayIconMetric::Scoped("gone".into())), 71.0, "a cap no longer reported falls back to the tightest");
+        assert_eq!(metric_name(&TrayIconMetric::Scoped("Fable".into()), Some(&data)), "Fable · weekly");
+        assert_eq!(metric_name(&TrayIconMetric::Scoped("Fable".into()), None), "Fable");
+        assert_eq!(metric_name(&TrayIconMetric::Weekly, Some(&data)), "Weekly (7d)");
+        // A session the provider does not bill is not offered, and an icon
+        // still set to it shows the tightest rather than a flat zero.
+        let weekly_only = usage(0.0, 40.0);
+        assert!(!provider_windows(&weekly_only).iter().any(|(metric, _)| *metric == TrayIconMetric::Session));
+        assert_eq!(provider_percent(&weekly_only, &TrayIconMetric::Session), 40.0);
+        assert_eq!(reported_percent(&weekly_only, &TrayIconMetric::Session), None, "a fleet view leaves it out instead");
     }
 
     #[test]

@@ -30,16 +30,21 @@ fn language() -> crate::localization::LanguageId {
 }
 
 pub fn show(owner: HWND) {
-    show_page(owner, false);
+    show_page(owner, None);
 }
 
 /// Open the panel on its Settings page; an already-open panel is brought
 /// forward as it is.
 pub fn show_settings(owner: HWND) {
-    show_page(owner, true);
+    show_page(owner, Some("--settings"));
 }
 
-fn show_page(owner: HWND, settings: bool) {
+/// Open the panel on its Tray icons page.
+pub fn show_tray_icons(owner: HWND) {
+    show_page(owner, Some("--tray-icons"));
+}
+
+fn show_page(owner: HWND, page: Option<&str>) {
     if focus_existing() {
         return;
     }
@@ -61,8 +66,8 @@ fn show_page(owner: HWND, settings: bool) {
         .arg("--studio")
         .arg("--owner")
         .arg((owner.0 as isize).to_string());
-    if settings {
-        command.arg("--settings");
+    if let Some(page) = page {
+        command.arg(page);
     }
     if crate::diagnose::is_enabled() {
         command.arg("--diagnose").arg("--diagnose-append");

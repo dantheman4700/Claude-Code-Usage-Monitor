@@ -284,6 +284,7 @@ fn handle_command(hwnd: HWND, id: u16, icon: usize) {
     match id {
         menu::CMD_OPEN => dashboard::show(hwnd),
         menu::CMD_SETTINGS => dashboard::show_settings(hwnd),
+        menu::CMD_TRAY_ICONS_PAGE => dashboard::show_tray_icons(hwnd),
         menu::CMD_REFRESH => manual_retry(hwnd, None),
         menu::CMD_STARTUP => set_startup_enabled(!is_startup_enabled()),
         menu::CMD_UPDATES => {
@@ -338,9 +339,10 @@ fn handle_command(hwnd: HWND, id: u16, icon: usize) {
                     sync_tray(hwnd);
                 }
             } else if let Some(change) = menu::TrayIconChange::for_command(id) {
-                let changed = lock_state()
-                    .as_mut()
-                    .is_some_and(|s| change.apply_to(&mut s.tray_icons, icon, s.providers));
+                let changed = lock_state().as_mut().is_some_and(|s| {
+                    let data = s.data.clone();
+                    change.apply_to(&mut s.tray_icons, icon, s.providers, data.as_ref())
+                });
                 if changed {
                     save_state_settings();
                     sync_tray(hwnd);
@@ -393,12 +395,10 @@ fn sync_tray(hwnd: HWND) {
         };
         let rgb = tray_colour(icon, data.as_ref(), enabled, thresholds, light);
         let render = crate::tray_paint::render_tinted(&content, size, rgb);
-        // An icon for one value leads with that value, then the fleet as
-        // far as the tooltip allows; a fleet view is the fleet.
+        // An icon for one value says that value and nothing else; the
+        // logo and a fleet view carry the fleet.
         let tooltip = match content {
-            crate::tray_paint::Content::Value { .. } => {
-                join_tooltip(&value_tray_tooltip(icon, data.as_ref(), enabled), &fleet_tooltip)
-            }
+            crate::tray_paint::Content::Value { .. } => value_tray_tooltip(icon, data.as_ref(), enabled),
             _ => fleet_tooltip.clone(),
         };
         let painted = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
@@ -442,20 +442,6 @@ pub(crate) fn tray_colour(
     }
 }
 
-/// A tooltip's first line, then as many of the rest as fit its limit.
-fn join_tooltip(first: &str, rest: &str) -> String {
-    const LIMIT: usize = 127;
-    let mut tip = first.to_string();
-    for line in rest.lines() {
-        if tip.chars().count() + 1 + line.chars().count() > LIMIT {
-            break;
-        }
-        tip.push('\n');
-        tip.push_str(line);
-    }
-    tip
-}
-
 /// The hover text for an icon that shows one value: whose, which window,
 /// used and left, and when it renews.
 pub fn value_tray_tooltip(
@@ -467,18 +453,22 @@ pub fn value_tray_tooltip(
         return "Headroom · nothing reporting".to_string();
     };
     let usage = data.and_then(|data| data.get(provider));
-    let window = match icon.metric {
-        app_settings::TrayIconMetric::Session => "session",
-        app_settings::TrayIconMetric::Weekly => "weekly",
-        app_settings::TrayIconMetric::Monthly if usage.is_some_and(|usage| usage.monthly.is_some()) => "monthly",
-        app_settings::TrayIconMetric::Monthly => "weekly",
-        app_settings::TrayIconMetric::Tightest => "tightest",
+    let window = match &icon.metric {
+        app_settings::TrayIconMetric::Session => "session".to_string(),
+        app_settings::TrayIconMetric::Weekly => "weekly".to_string(),
+        app_settings::TrayIconMetric::Monthly if usage.is_some_and(|usage| usage.monthly.is_some()) => "monthly".to_string(),
+        app_settings::TrayIconMetric::Monthly => "tightest".to_string(),
+        app_settings::TrayIconMetric::Credits => "credits".to_string(),
+        app_settings::TrayIconMetric::Scoped(label) => label.clone(),
+        app_settings::TrayIconMetric::Tightest => "tightest".to_string(),
     };
     let renews = usage
-        .and_then(|usage| match icon.metric {
+        .and_then(|usage| match &icon.metric {
             app_settings::TrayIconMetric::Session => usage.session.resets_at,
             app_settings::TrayIconMetric::Weekly => usage.weekly.resets_at,
-            app_settings::TrayIconMetric::Monthly => usage.monthly.as_ref().and_then(|monthly| monthly.resets_at).or(usage.weekly.resets_at),
+            app_settings::TrayIconMetric::Monthly => usage.monthly.as_ref().and_then(|monthly| monthly.resets_at),
+            app_settings::TrayIconMetric::Credits => None,
+            app_settings::TrayIconMetric::Scoped(label) => usage.scoped.iter().find(|scoped| &scoped.label == label).and_then(|scoped| scoped.section.resets_at),
             app_settings::TrayIconMetric::Tightest => [usage.session.resets_at, usage.weekly.resets_at, usage.monthly.as_ref().and_then(|monthly| monthly.resets_at)]
                 .into_iter()
                 .flatten()
@@ -1113,10 +1103,6 @@ mod tray_tooltip_tests {
         assert!(tip.starts_with("Codex weekly: 64% used · 36% left  ↻3h"), "{tip}");
         let missing = crate::app_settings::TrayIconSettings { provider: Some("grok".into()), ..icon };
         assert_eq!(value_tray_tooltip(&missing, Some(&data), enabled), "Headroom · nothing reporting");
-        let joined = join_tooltip("first", "a\nb");
-        assert_eq!(joined, "first\na\nb");
-        let long = "x".repeat(125);
-        assert_eq!(join_tooltip(&long, "a\nb"), format!("{long}\na"), "lines that would not fit are left out");
     }
 
     #[test]

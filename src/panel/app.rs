@@ -28,6 +28,7 @@ pub(crate) enum Page {
     Fleet,
     Routing,
     Activity,
+    TrayIcons,
     Settings,
 }
 
@@ -59,6 +60,8 @@ pub(crate) struct PanelApp {
     settings_modified: Option<std::time::SystemTime>,
     /// Whether a text box had the keyboard last frame.
     text_edit_active: bool,
+    /// Which tab of the Settings page is open.
+    pub(crate) settings_tab: super::settings::SettingsTab,
     /// The settings as last read from or written to the file, so a save can
     /// tell which keys this panel changed and fold them onto whatever the
     /// tray wrote in between.
@@ -81,6 +84,9 @@ pub(crate) struct PanelApp {
     /// Modification time of the cache at the last parse; unchanged means
     /// nothing to re-read.
     cache_modified: Option<std::time::SystemTime>,
+    /// When the panel last saw the cache change, so a retry button can stay
+    /// busy until the readings it asked for have landed.
+    cache_seen: Option<Instant>,
     /// When each retry button was last pressed, so the button reflects the
     /// tray's cooldown instead of looking dead.
     pub retry_pressed: std::collections::HashMap<Option<ProviderId>, Instant>,
@@ -108,6 +114,8 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
     };
     let initial_page = if args.iter().any(|argument| argument == "--settings") {
         Page::Settings
+    } else if args.iter().any(|argument| argument == "--tray-icons") {
+        Page::TrayIcons
     } else {
         Page::Fleet
     };
@@ -181,6 +189,7 @@ impl PanelApp {
             tray_previews: Default::default(),
             settings_modified: settings_file_modified(),
             text_edit_active: false,
+            settings_tab: Default::default(),
             settings_baseline,
             hwnd,
             dark,
@@ -194,6 +203,7 @@ impl PanelApp {
             usage_has_error,
             last_cache_read: Instant::now(),
             cache_modified: None,
+            cache_seen: None,
             retry_pressed: Default::default(),
         }
     }
@@ -289,8 +299,15 @@ impl PanelApp {
         }
     }
 
-    /// Seconds left on a retry button's cooldown, if any.
+    /// Whether a retry button is busy: `Some(seconds)` while the tray would
+    /// still ignore a second press, `Some(0)` while the readings it asked
+    /// for have not landed yet (the cache has not changed since the press),
+    /// `None` once they have -- or after the cap, in case they never do (a
+    /// press the tray refused, say). The cache is any round's, so a round
+    /// already in flight at the press can end the wait a few seconds early;
+    /// the round the press queued follows it at once, so nothing is lost.
     pub(crate) fn retry_cooldown_left(&self, target: Option<ProviderId>) -> Option<u64> {
+        const BUSY_CAP_SECS: u64 = 30;
         let cooldown = match target {
             // Mirrors the tray: the long cooldown is for a provider with
             // nothing current (a credential failure); a stale one is 2 s.
@@ -300,8 +317,13 @@ impl PanelApp {
             }
             None => crate::state::FETCH_ALL_COOLDOWN_SECS,
         };
-        let elapsed = self.retry_pressed.get(&target)?.elapsed().as_secs();
-        (elapsed < cooldown).then_some(cooldown - elapsed)
+        let pressed = *self.retry_pressed.get(&target)?;
+        let elapsed = pressed.elapsed().as_secs();
+        if elapsed < cooldown {
+            return Some(cooldown - elapsed);
+        }
+        let landed = self.cache_seen.is_some_and(|seen| seen > pressed);
+        (!landed && elapsed < BUSY_CAP_SECS).then_some(0)
     }
 
     /// Re-resolve the palette; the Appearance setting or Windows' app mode
@@ -334,6 +356,7 @@ impl PanelApp {
             return;
         }
         self.cache_modified = modified;
+        self.cache_seen = Some(Instant::now());
         if let Some(cache) = app_settings::load_usage_cache() {
             self.update_usage_cache(cache);
         }
@@ -405,6 +428,7 @@ impl PanelApp {
                                 (Page::Fleet, "Dashboard"),
                                 (Page::Routing, "Routing"),
                                 (Page::Activity, "Activity"),
+                                (Page::TrayIcons, "Tray icons"),
                                 (Page::Settings, "Settings"),
                             ] {
                                 if navigation_item(ui, self.page == page, language.text(label)).clicked() {
@@ -442,6 +466,7 @@ impl PanelApp {
                         Page::Fleet => self.fleet_page(ui),
                         Page::Routing => self.routing_page(ui),
                         Page::Activity => self.activity_page(ui),
+                        Page::TrayIcons => self.tray_icons_page(ui),
                         Page::Settings => self.settings_page(ui),
                     }
                 },

@@ -11,8 +11,8 @@ for the menu, which mirrors Settings: update frequency, providers, the tray
 icon, appearance, start with Windows.
 
 The tray icon is yours to shape: the logo, the tightest limit across the
-fleet, one provider's session, weekly or monthly window, or every provider as
-bars — drawn as a number, a bar, a column or a ring (with the percent or the
+fleet, any one limit a provider reports (session, weekly, monthly, a per-model
+cap, credits), or every provider as bars — drawn as a number, a bar, a column or a ring (with the percent or the
 provider's initials inside), showing what is used or what is left, monotone or
 tinted amber and red at your warning lines. Add as many icons as you like,
 each with its own source, style and hover text; right-click any of them for

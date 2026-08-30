@@ -95,7 +95,7 @@ impl PanelApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match self.retry_cooldown_left(None) {
                     Some(left) => {
-                        ui.add_enabled(false, egui::Button::new(format!("{} ({left}s)", language.text("Fetching…"))));
+                        ui.add_enabled(false, egui::Button::new(fetching_label(language, left)));
                     }
                     None => {
                         if ui.button(language.text("Fetch all now")).clicked() {
@@ -539,7 +539,8 @@ fn provider_card(
                     if let Some(cooldown) = retry.filter(|_| reading.is_none_or(|usage| usage.stale)) {
                         match cooldown {
                             Some(left) => {
-                                ui.add_enabled(false, egui::Button::new(format!("{left}s")).small());
+                                let label = if left == 0 { "…".to_string() } else { format!("{left}s") };
+                                ui.add_enabled(false, egui::Button::new(label).small()).on_disabled_hover_text(language.text("Fetching…"));
                             }
                             None => {
                                 if ui.add(egui::Button::new(language.text("Retry")).small()).clicked() {
@@ -794,6 +795,16 @@ fn activity_row(ui: &mut egui::Ui, event: &ActivityEvent, now: SystemTime, langu
 
 fn provider_name(provider: ProviderId) -> &'static str {
     provider.descriptor().display_name
+}
+
+/// "Fetching… (2s)" while a second press would be ignored, then plain
+/// "Fetching…" until the readings land.
+fn fetching_label(language: LanguageId, left: u64) -> String {
+    if left == 0 {
+        language.text("Fetching…").to_string()
+    } else {
+        format!("{} ({left}s)", language.text("Fetching…"))
+    }
 }
 
 fn constraint_title(constraint: &Constraint) -> String {

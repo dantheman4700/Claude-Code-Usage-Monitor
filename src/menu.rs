@@ -65,16 +65,24 @@ pub const CMD_TRAY_MARK_NONE: u16 = 52;
 pub const CMD_TRAY_ALERT_COLOUR: u16 = 53;
 pub const CMD_TRAY_ADD: u16 = 54;
 pub const CMD_TRAY_REMOVE: u16 = 55;
+pub const CMD_TRAY_METRIC_CREDITS: u16 = 56;
+pub const CMD_TRAY_ICONS_PAGE: u16 = 57;
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
+/// A per-model cap of the icon's provider, by its place in the provider's
+/// list; resolved to its label when applied.
+const CMD_TRAY_SCOPED_FIRST: u16 = 80;
+const CMD_TRAY_SCOPED_LAST: u16 = 99;
 // Provider on/off toggles use each descriptor's own command id (60..).
 
 /// What a menu command changes on the tray icon it came from, if it is one
 /// of those. Plain data so the mapping can be tested without a menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayIconChange {
     Mode(TrayIconMode),
     Provider(ProviderId),
     Metric(TrayIconMetric),
+    /// The n-th per-model cap the icon's provider reports.
+    ScopedWindow(usize),
     Measure(TrayIconMeasure),
     Style(TrayIconStyle),
     Mark(TrayIconMark),
@@ -112,6 +120,8 @@ impl TrayIconChange {
             CMD_TRAY_ALERT_COLOUR => Self::ToggleAlertColour,
             CMD_TRAY_ADD => Self::Add,
             CMD_TRAY_REMOVE => Self::Remove,
+            CMD_TRAY_METRIC_CREDITS => Self::Metric(TrayIconMetric::Credits),
+            id if (CMD_TRAY_SCOPED_FIRST..=CMD_TRAY_SCOPED_LAST).contains(&id) => Self::ScopedWindow((id - CMD_TRAY_SCOPED_FIRST) as usize),
             id => {
                 let index = id.checked_sub(CMD_TRAY_PROVIDER_FIRST)? as usize;
                 Self::Provider(*ProviderId::ALL.get(index)?)
@@ -121,8 +131,28 @@ impl TrayIconChange {
 
     /// Apply to icon `index` of the list; true when something changed. The
     /// list never goes empty.
-    pub fn apply_to(self, icons: &mut Vec<TrayIconSettings>, index: usize, enabled: crate::providers::ProviderSet) -> bool {
+    pub fn apply_to(
+        self,
+        icons: &mut Vec<TrayIconSettings>,
+        index: usize,
+        enabled: crate::providers::ProviderSet,
+        data: Option<&crate::models::AppUsageData>,
+    ) -> bool {
         match self {
+            Self::ScopedWindow(nth) => {
+                let Some(icon) = icons.get_mut(index) else {
+                    return false;
+                };
+                let provider = icon.provider.as_deref().and_then(ProviderId::from_key).or_else(|| enabled.iter().next());
+                let label = provider
+                    .and_then(|provider| data?.get(provider))
+                    .and_then(|usage| usage.scoped.get(nth))
+                    .map(|scoped| scoped.label.clone());
+                match label {
+                    Some(label) => Self::Metric(TrayIconMetric::Scoped(label)).apply(icon),
+                    None => false,
+                }
+            }
             Self::Add => {
                 let after = index.min(icons.len());
                 icons.insert(after.saturating_add(1).min(icons.len()), new_icon(icons, enabled));
@@ -144,7 +174,7 @@ impl TrayIconChange {
     pub fn apply(self, icon: &mut TrayIconSettings) -> bool {
         let before = icon.clone();
         match self {
-            Self::Add | Self::Remove => return false,
+            Self::Add | Self::Remove | Self::ScopedWindow(_) => return false,
             Self::Mode(mode) => icon.mode = mode,
             Self::Provider(provider) => {
                 icon.provider = Some(provider.descriptor().key.to_string());
@@ -199,15 +229,6 @@ pub fn mode_label(mode: TrayIconMode) -> &'static str {
     }
 }
 
-pub fn metric_label(metric: TrayIconMetric) -> &'static str {
-    match metric {
-        TrayIconMetric::Tightest => "Tightest window",
-        TrayIconMetric::Session => "Session",
-        TrayIconMetric::Weekly => "Weekly",
-        TrayIconMetric::Monthly => "Monthly (weekly where there is none)",
-    }
-}
-
 pub fn measure_label(measure: TrayIconMeasure) -> &'static str {
     match measure {
         TrayIconMeasure::Used => "What is used",
@@ -251,7 +272,7 @@ pub fn appearance_label(appearance: Appearance) -> &'static str {
 /// Show the menu at the cursor and return the chosen command, if any.
 /// `icon` is the tray icon that was right-clicked; the icon submenu is its.
 pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
-    let (language, interval, providers, install_channel, icon, icon_count, appearance) = {
+    let (language, interval, providers, install_channel, icon, icon_count, appearance, data) = {
         let state = lock_state();
         let s = state.as_ref()?;
         (
@@ -262,8 +283,17 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
             s.tray_icons.get(icon).cloned().unwrap_or_default(),
             s.tray_icons.len(),
             s.appearance,
+            s.data.clone(),
         )
     };
+    // What the icon's provider reports, so its Window submenu offers the
+    // provider's own limits.
+    let usage = icon
+        .provider
+        .as_deref()
+        .and_then(ProviderId::from_key)
+        .or_else(|| providers.iter().next())
+        .and_then(|provider| data.as_ref()?.get(provider).cloned());
     let startup = crate::tray::is_startup_enabled();
 
     unsafe {
@@ -311,7 +341,7 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
         });
 
         let icon_title = if icon_count > 1 { language.text("This icon") } else { language.text("Tray icon") };
-        submenu(menu, icon_title, &|tray| fill_tray_icon_menu(tray, &icon, icon_count, language, &item, &submenu, &separator));
+        submenu(menu, icon_title, &|tray| fill_tray_icon_menu(tray, &icon, icon_count, usage.as_ref(), language, &item, &submenu, &separator));
 
         submenu(menu, language.text("Appearance"), &|looks| {
             for (id, value) in [
@@ -354,10 +384,12 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
 /// One icon's options, in the order the Settings page lists them. Options
 /// that do not apply to the current mode are left out, as the page leaves
 /// them out, so the menu never offers a switch that does nothing.
+#[allow(clippy::too_many_arguments)]
 fn fill_tray_icon_menu(
     tray: HMENU,
     icon: &TrayIconSettings,
     icon_count: usize,
+    usage: Option<&crate::models::UsageData>,
     language: LanguageId,
     item: &ItemFn<'_>,
     submenu: &SubmenuFn<'_>,
@@ -390,14 +422,41 @@ fn fill_tray_icon_menu(
         });
     }
     if icon.mode != TrayIconMode::Logo {
-        submenu(tray, language.text("Window"), &|window| {
-            for (id, metric) in [
-                (CMD_TRAY_METRIC_TIGHTEST, TrayIconMetric::Tightest),
-                (CMD_TRAY_METRIC_SESSION, TrayIconMetric::Session),
-                (CMD_TRAY_METRIC_WEEKLY, TrayIconMetric::Weekly),
-                (CMD_TRAY_METRIC_MONTHLY, TrayIconMetric::Monthly),
-            ] {
-                item(window, checked(icon.metric == metric), id, language.text(metric_label(metric)));
+        submenu(tray, language.text("Value"), &|window| {
+            // One provider: the limits it reports, by their own names. The
+            // fleet: the generic windows, applied to every provider.
+            match usage.filter(|_| icon.mode == TrayIconMode::Provider) {
+                Some(usage) => {
+                    let mut scoped_index = 0u16;
+                    for (metric, title) in crate::tray_paint::provider_windows(usage) {
+                        let id = match &metric {
+                            TrayIconMetric::Tightest => CMD_TRAY_METRIC_TIGHTEST,
+                            TrayIconMetric::Session => CMD_TRAY_METRIC_SESSION,
+                            TrayIconMetric::Weekly => CMD_TRAY_METRIC_WEEKLY,
+                            TrayIconMetric::Monthly => CMD_TRAY_METRIC_MONTHLY,
+                            TrayIconMetric::Credits => CMD_TRAY_METRIC_CREDITS,
+                            TrayIconMetric::Scoped(_) => {
+                                let id = CMD_TRAY_SCOPED_FIRST + scoped_index;
+                                scoped_index += 1;
+                                if id > CMD_TRAY_SCOPED_LAST {
+                                    continue;
+                                }
+                                id
+                            }
+                        };
+                        item(window, checked(icon.metric == metric), id, &title);
+                    }
+                }
+                None => {
+                    for (id, metric) in [
+                        (CMD_TRAY_METRIC_TIGHTEST, TrayIconMetric::Tightest),
+                        (CMD_TRAY_METRIC_SESSION, TrayIconMetric::Session),
+                        (CMD_TRAY_METRIC_WEEKLY, TrayIconMetric::Weekly),
+                        (CMD_TRAY_METRIC_MONTHLY, TrayIconMetric::Monthly),
+                    ] {
+                        item(window, checked(icon.metric == metric), id, &crate::tray_paint::metric_name(&metric, None));
+                    }
+                }
             }
         });
         submenu(tray, language.text("Shows"), &|shows| {
@@ -455,7 +514,7 @@ fn fill_tray_icon_menu(
     if icon_count > 1 {
         item(tray, MF_STRING, CMD_TRAY_REMOVE, language.text("Remove this icon"));
     }
-    item(tray, MF_STRING, CMD_SETTINGS, language.text("All icons in Settings…"));
+    item(tray, MF_STRING, CMD_TRAY_ICONS_PAGE, language.text("All icons…"));
 }
 
 /// The provider a menu command switches on or off, if it is one.
@@ -494,17 +553,32 @@ mod tests {
     fn icons_are_added_beside_the_clicked_one_and_never_all_removed() {
         let enabled = crate::providers::ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Codex]);
         let mut icons = vec![TrayIconSettings::default()];
-        assert!(!TrayIconChange::Remove.apply_to(&mut icons, 0, enabled), "the last icon stays");
-        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled));
+        assert!(!TrayIconChange::Remove.apply_to(&mut icons, 0, enabled, None), "the last icon stays");
+        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled, None));
         assert_eq!(icons.len(), 2);
         assert_eq!((icons[1].mode, icons[1].provider.as_deref(), icons[1].mark), (TrayIconMode::Provider, Some("claude"), TrayIconMark::Initials));
-        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled));
+        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled, None));
         assert_eq!(icons[1].provider.as_deref(), Some("codex"), "a provider not yet on an icon, placed after the clicked one");
         assert_eq!(icons.len(), 3);
-        assert!(TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 2, enabled));
+        assert!(TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 2, enabled, None));
         assert_eq!(icons[2].style, TrayIconStyle::Number);
-        assert!(!TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 9, enabled), "no such icon");
-        assert!(TrayIconChange::Remove.apply_to(&mut icons, 1, enabled));
+        assert!(!TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 9, enabled, None), "no such icon");
+        assert!(TrayIconChange::Remove.apply_to(&mut icons, 1, enabled, None));
         assert_eq!(icons.len(), 2);
+    }
+
+    #[test]
+    fn a_per_model_cap_is_picked_by_its_place_and_kept_by_its_label() {
+        let enabled = crate::providers::ProviderSet::from_enabled([ProviderId::Claude]);
+        let mut data = crate::models::AppUsageData::default();
+        let mut usage = crate::models::UsageData::default();
+        usage.scoped.push(crate::models::ScopedLimit { label: "Fable".into(), window: Default::default(), section: Default::default() });
+        data.insert(ProviderId::Claude, usage);
+        let mut icons = vec![TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("claude".into()), ..Default::default() }];
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_SCOPED_FIRST), Some(TrayIconChange::ScopedWindow(0)));
+        assert!(TrayIconChange::ScopedWindow(0).apply_to(&mut icons, 0, enabled, Some(&data)));
+        assert_eq!(icons[0].metric, TrayIconMetric::Scoped("Fable".into()));
+        assert!(!TrayIconChange::ScopedWindow(3).apply_to(&mut icons, 0, enabled, Some(&data)), "no such cap");
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_METRIC_CREDITS), Some(TrayIconChange::Metric(TrayIconMetric::Credits)));
     }
 }

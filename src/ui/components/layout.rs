@@ -80,3 +80,68 @@ pub(crate) fn setting_separator(ui: &mut egui::Ui) {
     );
 }
 
+
+/// A row of tabs; the current one is underlined in the text colour.
+pub(crate) fn tab_strip<T: PartialEq + Copy>(ui: &mut egui::Ui, current: &mut T, tabs: &[(T, &str)]) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 22.0;
+        for (tab, title) in tabs {
+            let selected = *current == *tab;
+            let galley = ui.painter().layout_no_wrap(
+                title.to_string(),
+                egui::FontId::proportional(15.0),
+                crate::ui::theme::text(),
+            );
+            let size = egui::vec2(galley.size().x, 30.0);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            let colour = if selected || response.hovered() { crate::ui::theme::text() } else { muted() };
+            ui.painter().text(
+                egui::pos2(rect.left(), rect.center().y - 2.0),
+                egui::Align2::LEFT_CENTER,
+                *title,
+                egui::FontId::proportional(15.0),
+                colour,
+            );
+            if selected {
+                let underline = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.bottom() - 2.0),
+                    egui::pos2(rect.right(), rect.bottom()),
+                );
+                ui.painter().rect_filled(underline, 1.0, crate::ui::theme::text());
+            }
+            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *current = *tab;
+            }
+        }
+    });
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(1.0, section_border()));
+}
+
+/// A card: a framed block with an optional header line -- a title on the
+/// left, whatever `header_right` draws on the right -- above the body.
+pub(crate) fn card(
+    ui: &mut egui::Ui,
+    title: Option<&str>,
+    header_right: impl FnOnce(&mut egui::Ui),
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::new()
+        .fill(section_surface())
+        .stroke(egui::Stroke::new(1.0, section_border()))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(20, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if let Some(title) = title {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(title).size(17.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), header_right);
+                });
+                ui.add_space(4.0);
+            }
+            body(ui);
+        });
+    ui.add_space(14.0);
+}
