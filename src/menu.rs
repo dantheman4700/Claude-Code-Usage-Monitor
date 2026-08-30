@@ -259,9 +259,21 @@ pub fn mark_label(mark: TrayIconMark) -> &'static str {
 /// Where a style puts its text, for the row's caption.
 pub fn mark_place(style: TrayIconStyle) -> &'static str {
     match style {
-        TrayIconStyle::Ring => "Inside the ring, once the icon is large enough to read",
-        TrayIconStyle::Bar | TrayIconStyle::Column | TrayIconStyle::Number => "Above, once the icon is large enough to read",
-        TrayIconStyle::Letters => "",
+        TrayIconStyle::Ring => "Inside the ring; two characters fit the smallest icons",
+        TrayIconStyle::Bar => "Above the bar; two characters fit the smallest icons",
+        TrayIconStyle::Column => "Above the column; two characters fit the smallest icons",
+        TrayIconStyle::Number => "Above the number; two characters fit the smallest icons",
+        TrayIconStyle::Letters => "Above the letters; two characters fit the smallest icons",
+    }
+}
+
+/// The text choices a style offers: a number never carries a second
+/// percent, and the letters never carry themselves again.
+pub fn marks_for(style: TrayIconStyle) -> &'static [TrayIconMark] {
+    match style {
+        TrayIconStyle::Number => &[TrayIconMark::Initials, TrayIconMark::None],
+        TrayIconStyle::Letters => &[TrayIconMark::Digits, TrayIconMark::None],
+        _ => &[TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None],
     }
 }
 
@@ -492,17 +504,17 @@ fn fill_tray_icon_menu(
                 item(style_menu, checked(icon.style == style), id, language.text(style_label(style)));
             }
         });
-        if icon.style != TrayIconStyle::Letters {
-            submenu(tray, language.text("Text on the icon"), &|marks| {
-                for (id, mark) in [
-                    (CMD_TRAY_MARK_DIGITS, TrayIconMark::Digits),
-                    (CMD_TRAY_MARK_INITIALS, TrayIconMark::Initials),
-                    (CMD_TRAY_MARK_NONE, TrayIconMark::None),
-                ] {
-                    item(marks, checked(icon.mark == mark), id, language.text(mark_label(mark)));
-                }
-            });
-        }
+        let effective = icon.effective_mark();
+        submenu(tray, language.text("Text on the icon"), &|marks| {
+            for mark in marks_for(icon.style) {
+                let id = match mark {
+                    TrayIconMark::Digits => CMD_TRAY_MARK_DIGITS,
+                    TrayIconMark::Initials => CMD_TRAY_MARK_INITIALS,
+                    TrayIconMark::None => CMD_TRAY_MARK_NONE,
+                };
+                item(marks, checked(effective == *mark), id, language.text(mark_label(*mark)));
+            }
+        });
     } else if icon.mode == TrayIconMode::Rundown {
         submenu(tray, language.text("Layout"), &|layout| {
             item(layout, checked(icon.style != TrayIconStyle::Bar), CMD_TRAY_STYLE_RING, language.text("Columns"));

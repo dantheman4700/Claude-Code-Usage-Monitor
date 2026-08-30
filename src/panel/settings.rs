@@ -550,16 +550,19 @@ fn tray_icon_editor(
                 }
             });
         });
-        if icon.style != TrayIconStyle::Letters {
-            setting_separator(ui);
-            setting_row(ui, language.text("Text on the icon"), language.text(crate::menu::mark_place(icon.style)), |ui| {
-                Dropdown::from_id_salt(salt("mark")).width(260.0).selected_text(language.text(mark_label(icon.mark))).show_ui(ui, |ui| {
-                    for mark in [TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None] {
-                        changed |= dropdown_selectable_value(ui, &mut icon.mark, mark, language.text(mark_label(mark))).changed();
+        setting_separator(ui);
+        setting_row(ui, language.text("Text on the icon"), language.text(crate::menu::mark_place(icon.style)), |ui| {
+            // A choice saved under another style reads as what it does now.
+            let mut effective = icon.effective_mark();
+            Dropdown::from_id_salt(salt("mark")).width(260.0).selected_text(language.text(mark_label(effective))).show_ui(ui, |ui| {
+                for mark in crate::menu::marks_for(icon.style) {
+                    if dropdown_selectable_value(ui, &mut effective, *mark, language.text(mark_label(*mark))).changed() {
+                        icon.mark = effective;
+                        changed = true;
                     }
-                });
+                }
             });
-        }
+        });
         if icon.style == TrayIconStyle::Letters || icon.mark == TrayIconMark::Initials {
             setting_separator(ui);
             let provider = icon_provider(icon, scene.enabled).or_else(|| {

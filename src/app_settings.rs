@@ -155,6 +155,18 @@ pub struct TrayIconSettings {
 pub const TRAY_LABEL_MAX: usize = 3;
 
 impl TrayIconSettings {
+    /// The text setting as it applies to this style: a number never
+    /// carries a second percent, and the letters never carry themselves
+    /// again -- a stale choice saved under another style reads as "nothing"
+    /// everywhere, the menu and the page included.
+    pub fn effective_mark(&self) -> TrayIconMark {
+        match (self.style, self.mark) {
+            (TrayIconStyle::Number, TrayIconMark::Digits) => TrayIconMark::None,
+            (TrayIconStyle::Letters, TrayIconMark::Initials) => TrayIconMark::None,
+            (_, mark) => mark,
+        }
+    }
+
     /// The label as drawn: the icon's own, cut to what the font has and
     /// to three characters, upper case; or the provider's initials.
     pub fn label_for(&self, provider: Option<crate::providers::ProviderId>) -> String {
