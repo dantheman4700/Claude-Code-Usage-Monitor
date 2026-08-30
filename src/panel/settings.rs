@@ -543,19 +543,41 @@ fn tray_icon_editor(
         setting_separator(ui);
         setting_row(ui, language.text("Style"), language.text("How the value is drawn"), |ui| {
             Dropdown::from_id_salt(salt("style")).width(260.0).selected_text(language.text(style_label(icon.style))).show_ui(ui, |ui| {
-                for style in [TrayIconStyle::Ring, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
+                for style in [TrayIconStyle::Ring, TrayIconStyle::Letters, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
                     changed |= dropdown_selectable_value(ui, &mut icon.style, style, language.text(style_label(style))).changed();
                 }
             });
         });
-        if icon.style == TrayIconStyle::Ring {
+        if icon.style != TrayIconStyle::Letters {
             setting_separator(ui);
-            setting_row(ui, language.text("Inside the ring"), language.text("Shown once the icon is large enough to read"), |ui| {
+            setting_row(ui, language.text("Text on the icon"), language.text(crate::menu::mark_place(icon.style)), |ui| {
                 Dropdown::from_id_salt(salt("mark")).width(260.0).selected_text(language.text(mark_label(icon.mark))).show_ui(ui, |ui| {
                     for mark in [TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None] {
                         changed |= dropdown_selectable_value(ui, &mut icon.mark, mark, language.text(mark_label(mark))).changed();
                     }
                 });
+            });
+        }
+        if icon.style == TrayIconStyle::Letters || icon.mark == TrayIconMark::Initials {
+            setting_separator(ui);
+            let provider = icon_provider(icon, scene.enabled).or_else(|| {
+                crate::tray_paint::shown_provider(icon, scene.usage, scene.enabled).map(|(provider, _)| provider)
+            });
+            let drawn = icon.label_for(provider);
+            let detail = format!("{} · {} {drawn}", language.text("Up to three letters or digits"), language.text("drawn as"));
+            setting_row(ui, language.text("Label"), &detail, |ui| {
+                let mut text = icon.label.clone().unwrap_or_default();
+                let hint = provider.map(|provider| provider.descriptor().tray_mark).unwrap_or("CL");
+                // Typed freely; what is drawn is the sanitised form shown beside it.
+                let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(90.0).hint_text(hint).char_limit(12));
+                if edit.changed() {
+                    // Committed as typed; saved when the box is left.
+                    let trimmed = text.trim().to_string();
+                    icon.label = (!trimmed.is_empty()).then_some(trimmed);
+                }
+                if edit.lost_focus() {
+                    changed = true;
+                }
             });
         }
     } else if icon.mode == TrayIconMode::Rundown {

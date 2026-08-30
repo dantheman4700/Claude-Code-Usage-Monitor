@@ -12,8 +12,9 @@ icon, appearance, start with Windows.
 
 The tray icon is yours to shape: the logo, the tightest limit across the
 fleet, any one limit a provider reports (session, weekly, monthly, a per-model
-cap, credits), or every provider as bars — drawn as a number, a bar, a column or a ring (with the percent or the
-provider's initials inside), showing what is used or what is left, monotone or
+cap, credits), or every provider as bars — drawn as a number, a bar, a column, a ring, or letters that fill (the
+icon's own one-to-three character label, so several icons can be told apart at a glance), with the percent or the
+label as text where the icon has room, showing what is used or what is left, monotone or
 tinted amber and red at your warning lines. Add as many icons as you like,
 each with its own source, style and hover text; right-click any of them for
 its menu.

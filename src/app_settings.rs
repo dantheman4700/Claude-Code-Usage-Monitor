@@ -86,6 +86,9 @@ pub enum TrayIconStyle {
     Ring,
     /// A vertical bar that fills from the bottom.
     Column,
+    /// The icon's label, drawn large, filling from the bottom: the one
+    /// style that says whose value it is at sixteen pixels.
+    Letters,
 }
 
 /// Whether the icon shows what is used or what is left.
@@ -98,13 +101,14 @@ pub enum TrayIconMeasure {
     Remaining,
 }
 
-/// What sits inside a ring when there is room for it.
+/// Text on a value icon, when there is room for it: inside a ring, or in
+/// a band above a bar, column or number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrayIconMark {
     #[default]
     Digits,
-    /// The provider's two-letter mark, so several icons can be told apart.
+    /// The icon's label: its own, or the provider's initials.
     Initials,
     None,
 }
@@ -140,6 +144,34 @@ pub struct TrayIconSettings {
     /// otherwise it stays monotone.
     #[serde(default)]
     pub alert_colour: bool,
+    /// One to three characters that name the icon, for the Letters style
+    /// and the label text; absent means the provider's initials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The most characters an icon's label can carry: three is what fits a
+/// sixteen-pixel square.
+pub const TRAY_LABEL_MAX: usize = 3;
+
+impl TrayIconSettings {
+    /// The label as drawn: the icon's own, cut to what the font has and
+    /// to three characters, upper case; or the provider's initials.
+    pub fn label_for(&self, provider: Option<crate::providers::ProviderId>) -> String {
+        let own: String = self
+            .label
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_uppercase())
+            .take(TRAY_LABEL_MAX)
+            .collect();
+        if !own.is_empty() {
+            return own;
+        }
+        provider.map(|provider| provider.descriptor().tray_mark.to_string()).unwrap_or_default()
+    }
 }
 
 
@@ -691,13 +723,14 @@ pub fn save_usage_cache(
 /// Settings: 2 added the `providers` map; 3 switched every provider on by
 /// default and dropped the switches older files had frozen from the old
 /// defaults (1 was the first versioned file); 4 added tray icon options; 5
-/// made the icons one list and let a value name a per-model cap. An older
+/// made the icons one list and let a value name a per-model cap; 6 added
+/// the Letters style and an icon's own label. An older
 /// build leaves a newer file alone once it holds a variant it cannot
 /// decode (a column style, a scoped value); until then it reads the file,
 /// and a save from it drops the nested icon fields it does not know. A
 /// downgrade costs those, no more -- which is why every shape change bumps
 /// this: an undecodable file at the build's own version is quarantined.
-pub const SETTINGS_SCHEMA: u32 = 5;
+pub const SETTINGS_SCHEMA: u32 = 6;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -970,10 +1003,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":6,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":7,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(6));
+        assert_eq!(written["schema_version"], serde_json::json!(7));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -982,8 +1015,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":6,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(6))));
-        assert!(matches!(decode_settings(r#"{"schema_version":5,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":7,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(7))));
+        assert!(matches!(decode_settings(r#"{"schema_version":6,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -1105,7 +1138,7 @@ mod tests {
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
         assert_eq!(loaded.tray_icons, settings.tray_icons);
-        assert_eq!(loaded.schema_version, 5);
+        assert_eq!(loaded.schema_version, 6);
         assert!(!written.contains("tray_icon\""), "the old key is not written");
 
         // A file from 3 has one `tray_icon`: it becomes the list's only entry,
@@ -1115,12 +1148,21 @@ mod tests {
         assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
         assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
         assert!(!older.tray_icons[0].alert_colour);
-        assert_eq!(older.schema_version, 5);
+        assert_eq!(older.schema_version, 6);
         assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
         // The short-lived first-plus-extras shape folds into the list too.
         let pair = decode_settings(r#"{"schema_version":4,"tray_icon":{"mode":"logo"},"extra_tray_icons":[{"mode":"rundown"},{"mode":"provider","provider":"grok"}]}"#).ok().unwrap();
         assert_eq!(pair.tray_icons.iter().map(|icon| icon.mode).collect::<Vec<_>>(), vec![TrayIconMode::Logo, TrayIconMode::Rundown, TrayIconMode::Provider]);
+
+        // A label is cut to what the font can draw.
+        let labelled = TrayIconSettings { label: Some(" op-us 4 ".into()), ..Default::default() };
+        assert_eq!(labelled.label_for(Some(ProviderId::Claude)), "OPU");
+        let folded = TrayIconSettings { label: Some("ßab".into()), ..Default::default() };
+        assert_eq!(folded.label_for(None), "AB", "only what the font has, not a case-fold of it");
+        let blank = TrayIconSettings { label: Some("--".into()), ..Default::default() };
+        assert_eq!(blank.label_for(Some(ProviderId::Codex)), "CX", "nothing drawable falls back to the initials");
+        assert_eq!(blank.label_for(None), "");
 
         // There is always at least one icon.
         let mut none = SettingsFile::default();

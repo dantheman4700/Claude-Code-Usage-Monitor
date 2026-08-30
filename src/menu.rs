@@ -67,6 +67,7 @@ pub const CMD_TRAY_ADD: u16 = 54;
 pub const CMD_TRAY_REMOVE: u16 = 55;
 pub const CMD_TRAY_METRIC_CREDITS: u16 = 56;
 pub const CMD_TRAY_ICONS_PAGE: u16 = 57;
+pub const CMD_TRAY_STYLE_LETTERS: u16 = 58;
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
 /// A per-model cap of the icon's provider, by its place in the provider's
 /// list; resolved to its label when applied.
@@ -105,6 +106,7 @@ impl TrayIconChange {
             CMD_TRAY_STYLE_BAR => Self::Style(TrayIconStyle::Bar),
             CMD_TRAY_STYLE_RING => Self::Style(TrayIconStyle::Ring),
             CMD_TRAY_STYLE_COLUMN => Self::Style(TrayIconStyle::Column),
+            CMD_TRAY_STYLE_LETTERS => Self::Style(TrayIconStyle::Letters),
             CMD_TRAY_TONE_AUTO => Self::Tone(TrayIconTone::Auto),
             CMD_TRAY_TONE_LIGHT => Self::Tone(TrayIconTone::Light),
             CMD_TRAY_TONE_DARK => Self::Tone(TrayIconTone::Dark),
@@ -242,14 +244,24 @@ pub fn style_label(style: TrayIconStyle) -> &'static str {
         TrayIconStyle::Bar => "A bar that fills",
         TrayIconStyle::Ring => "A ring that fills",
         TrayIconStyle::Column => "A column that fills",
+        TrayIconStyle::Letters => "Letters that fill",
     }
 }
 
 pub fn mark_label(mark: TrayIconMark) -> &'static str {
     match mark {
         TrayIconMark::Digits => "The percent",
-        TrayIconMark::Initials => "The provider's initials",
+        TrayIconMark::Initials => "The label",
         TrayIconMark::None => "Nothing",
+    }
+}
+
+/// Where a style puts its text, for the row's caption.
+pub fn mark_place(style: TrayIconStyle) -> &'static str {
+    match style {
+        TrayIconStyle::Ring => "Inside the ring, once the icon is large enough to read",
+        TrayIconStyle::Bar | TrayIconStyle::Column | TrayIconStyle::Number => "Above, once the icon is large enough to read",
+        TrayIconStyle::Letters => "",
     }
 }
 
@@ -475,12 +487,13 @@ fn fill_tray_icon_menu(
                 (CMD_TRAY_STYLE_BAR, TrayIconStyle::Bar),
                 (CMD_TRAY_STYLE_COLUMN, TrayIconStyle::Column),
                 (CMD_TRAY_STYLE_NUMBER, TrayIconStyle::Number),
+                (CMD_TRAY_STYLE_LETTERS, TrayIconStyle::Letters),
             ] {
                 item(style_menu, checked(icon.style == style), id, language.text(style_label(style)));
             }
         });
-        if icon.style == TrayIconStyle::Ring {
-            submenu(tray, language.text("Inside the ring"), &|marks| {
+        if icon.style != TrayIconStyle::Letters {
+            submenu(tray, language.text("Text on the icon"), &|marks| {
                 for (id, mark) in [
                     (CMD_TRAY_MARK_DIGITS, TrayIconMark::Digits),
                     (CMD_TRAY_MARK_INITIALS, TrayIconMark::Initials),
