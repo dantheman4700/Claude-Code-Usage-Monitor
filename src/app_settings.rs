@@ -135,8 +135,6 @@ pub struct TrayIconSettings {
     pub alert_colour: bool,
 }
 
-/// The most icons the tray will carry: one primary and one more per provider.
-pub const MAX_TRAY_ICONS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsFile {
@@ -193,14 +191,10 @@ pub struct SettingsFile {
     /// The panel's palette.
     #[serde(default)]
     pub appearance: Appearance,
-    /// What the tray icon shows.
-    #[serde(default)]
-    pub tray_icon: TrayIconSettings,
-    /// Further tray icons, each with its own content, shown beside the
-    /// first. The first icon carries the fleet tooltip and the menu; these
-    /// carry their own value's tooltip and the same menu.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_tray_icons: Vec<TrayIconSettings>,
+    /// The tray icons, in tray order, each with its own content. Never
+    /// empty: the app is found through its icon. Add as many as you like.
+    #[serde(default = "default_tray_icons")]
+    pub tray_icons: Vec<TrayIconSettings>,
     /// Extra login files per provider key: native paths or
     /// `wsl:<distro>:<path>`. For installs in places the defaults do not
     /// cover.
@@ -251,8 +245,7 @@ impl Default for SettingsFile {
             dashboard_width: None,
             dashboard_height: None,
             appearance: Appearance::Auto,
-            tray_icon: TrayIconSettings::default(),
-            extra_tray_icons: Vec::new(),
+            tray_icons: default_tray_icons(),
             credential_paths: BTreeMap::new(),
             wsl_distros: None,
             wsl_users: BTreeMap::new(),
@@ -279,15 +272,9 @@ impl SettingsFile {
         }
         self.dashboard_width = valid_dashboard_dimension(self.dashboard_width);
         self.dashboard_height = valid_dashboard_dimension(self.dashboard_height);
-        self.extra_tray_icons.truncate(MAX_TRAY_ICONS - 1);
-    }
-
-    /// Every tray icon in tray order: the primary first, then the extras.
-    pub fn tray_icons(&self) -> Vec<TrayIconSettings> {
-        std::iter::once(self.tray_icon.clone())
-            .chain(self.extra_tray_icons.iter().cloned())
-            .take(MAX_TRAY_ICONS)
-            .collect()
+        if self.tray_icons.is_empty() {
+            self.tray_icons = default_tray_icons();
+        }
     }
 
     pub fn enabled_providers(&self) -> ProviderSet {
@@ -519,8 +506,9 @@ enum SettingsDecodeError {
 }
 
 fn decode_settings(content: &str) -> Result<SettingsFile, SettingsDecodeError> {
-    let value: serde_json::Value = serde_json::from_str(content)
+    let mut value: serde_json::Value = serde_json::from_str(content)
         .map_err(|error| SettingsDecodeError::Corrupt(error.to_string()))?;
+    migrate_tray_icon_keys(&mut value);
     let on_disk = value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
@@ -539,6 +527,29 @@ fn decode_settings(content: &str) -> Result<SettingsFile, SettingsDecodeError> {
     }
     settings.schema_version = on_disk.max(SETTINGS_SCHEMA);
     Ok(settings)
+}
+
+/// Before the list there was one `tray_icon`, and briefly a first icon plus
+/// `extra_tray_icons`. Fold both shapes into `tray_icons` so the old keys
+/// are neither lost nor carried along as unknowns.
+fn migrate_tray_icon_keys(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("tray_icons") {
+        object.remove("tray_icon");
+        object.remove("extra_tray_icons");
+        return;
+    }
+    let first = object.remove("tray_icon");
+    let rest = object.remove("extra_tray_icons");
+    let mut icons: Vec<serde_json::Value> = first.into_iter().filter(|icon| icon.is_object()).collect();
+    if let Some(serde_json::Value::Array(rest)) = rest {
+        icons.extend(rest.into_iter().filter(|icon| icon.is_object()));
+    }
+    if !icons.is_empty() {
+        object.insert("tray_icons".to_string(), serde_json::Value::Array(icons));
+    }
 }
 
 fn settings_json(settings: &SettingsFile) -> serde_json::Value {
@@ -812,6 +823,10 @@ fn default_show_devin() -> bool {
     ProviderId::Devin.descriptor().default_enabled
 }
 
+fn default_tray_icons() -> Vec<TrayIconSettings> {
+    vec![TrayIconSettings::default()]
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1067,35 +1082,47 @@ mod tests {
     #[test]
     fn tray_icons_round_trip_and_older_files_get_the_defaults() {
         let mut settings = SettingsFile::default();
-        settings.tray_icon.mode = TrayIconMode::Provider;
-        settings.tray_icon.provider = Some("codex".into());
-        settings.tray_icon.measure = TrayIconMeasure::Remaining;
-        settings.tray_icon.mark = TrayIconMark::Initials;
-        settings.tray_icon.alert_colour = true;
-        settings.extra_tray_icons = vec![
+        settings.tray_icons = vec![
+            TrayIconSettings {
+                mode: TrayIconMode::Provider,
+                provider: Some("codex".into()),
+                measure: TrayIconMeasure::Remaining,
+                mark: TrayIconMark::Initials,
+                alert_colour: true,
+                ..Default::default()
+            },
             TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, ..Default::default() },
             TrayIconSettings { metric: TrayIconMetric::Monthly, style: TrayIconStyle::Column, ..Default::default() },
         ];
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
-        assert_eq!(loaded.tray_icon, settings.tray_icon);
-        assert_eq!(loaded.extra_tray_icons, settings.extra_tray_icons);
-        assert_eq!(loaded.tray_icons().len(), 3);
+        assert_eq!(loaded.tray_icons, settings.tray_icons);
         assert_eq!(loaded.schema_version, 4);
+        assert!(!written.contains("tray_icon\""), "the old key is not written");
 
-        // A file from 3 has only the old fields: the new ones take defaults.
+        // A file from 3 has one `tray_icon`: it becomes the list's only entry,
+        // with the new fields at their defaults.
         let older = decode_settings(r#"{"schema_version":3,"tray_icon":{"mode":"tightest","style":"bar"}}"#).ok().unwrap();
-        assert_eq!(older.tray_icon.style, TrayIconStyle::Bar);
-        assert_eq!(older.tray_icon.measure, TrayIconMeasure::Used);
-        assert!(!older.tray_icon.alert_colour);
-        assert!(older.extra_tray_icons.is_empty());
+        assert_eq!(older.tray_icons.len(), 1);
+        assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
+        assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
+        assert!(!older.tray_icons[0].alert_colour);
         assert_eq!(older.schema_version, 4);
+        assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
-        // Too many icons are cut back to the cap.
-        let mut crowded = SettingsFile::default();
-        crowded.extra_tray_icons = vec![TrayIconSettings::default(); 12];
-        crowded.normalize();
-        assert_eq!(crowded.tray_icons().len(), MAX_TRAY_ICONS);
+        // The short-lived first-plus-extras shape folds into the list too.
+        let pair = decode_settings(r#"{"schema_version":4,"tray_icon":{"mode":"logo"},"extra_tray_icons":[{"mode":"rundown"},{"mode":"provider","provider":"grok"}]}"#).ok().unwrap();
+        assert_eq!(pair.tray_icons.iter().map(|icon| icon.mode).collect::<Vec<_>>(), vec![TrayIconMode::Logo, TrayIconMode::Rundown, TrayIconMode::Provider]);
+
+        // There is always at least one icon.
+        let mut none = SettingsFile::default();
+        none.tray_icons.clear();
+        none.normalize();
+        assert_eq!(none.tray_icons, vec![TrayIconSettings::default()]);
+        let empty_list = decode_settings(r#"{"schema_version":4,"tray_icons":[]}"#).ok().unwrap();
+        let mut empty_list = empty_list;
+        empty_list.normalize();
+        assert_eq!(empty_list.tray_icons.len(), 1);
     }
 
     #[test]
@@ -1108,14 +1135,14 @@ mod tests {
         mine.language = None;
         // The other side meanwhile: a new tray icon and a provider off.
         let mut disk = baseline.clone();
-        disk.tray_icon.style = TrayIconStyle::Column;
-        disk.extra_tray_icons.push(TrayIconSettings::default());
+        disk.tray_icons[0].style = TrayIconStyle::Column;
+        disk.tray_icons.push(TrayIconSettings::default());
         disk.set_provider_enabled(ProviderId::Grok, false);
         let merged = merge_settings(&baseline, &mine, &disk);
         assert_eq!(merged.warn_percent, 60);
         assert_eq!(merged.language, None, "a cleared optional is a change too");
-        assert_eq!(merged.tray_icon.style, TrayIconStyle::Column);
-        assert_eq!(merged.extra_tray_icons.len(), 1);
+        assert_eq!(merged.tray_icons[0].style, TrayIconStyle::Column);
+        assert_eq!(merged.tray_icons.len(), 2);
         assert!(!merged.provider_enabled(ProviderId::Grok));
         // Nothing changed here: the disk is taken as it is.
         let same = merge_settings(&baseline, &baseline, &disk);

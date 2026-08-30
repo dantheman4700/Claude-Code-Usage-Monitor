@@ -63,11 +63,13 @@ pub const CMD_TRAY_MARK_DIGITS: u16 = 50;
 pub const CMD_TRAY_MARK_INITIALS: u16 = 51;
 pub const CMD_TRAY_MARK_NONE: u16 = 52;
 pub const CMD_TRAY_ALERT_COLOUR: u16 = 53;
+pub const CMD_TRAY_ADD: u16 = 54;
+pub const CMD_TRAY_REMOVE: u16 = 55;
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
 // Provider on/off toggles use each descriptor's own command id (60..).
 
-/// What a menu command changes on the first tray icon, if it is one of
-/// those. Plain data so the mapping can be tested without a menu.
+/// What a menu command changes on the tray icon it came from, if it is one
+/// of those. Plain data so the mapping can be tested without a menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayIconChange {
     Mode(TrayIconMode),
@@ -78,6 +80,10 @@ pub enum TrayIconChange {
     Mark(TrayIconMark),
     Tone(TrayIconTone),
     ToggleAlertColour,
+    /// Another icon after this one, for a provider not yet on an icon.
+    Add,
+    /// This icon, unless it is the last.
+    Remove,
 }
 
 impl TrayIconChange {
@@ -104,6 +110,8 @@ impl TrayIconChange {
             CMD_TRAY_MARK_INITIALS => Self::Mark(TrayIconMark::Initials),
             CMD_TRAY_MARK_NONE => Self::Mark(TrayIconMark::None),
             CMD_TRAY_ALERT_COLOUR => Self::ToggleAlertColour,
+            CMD_TRAY_ADD => Self::Add,
+            CMD_TRAY_REMOVE => Self::Remove,
             id => {
                 let index = id.checked_sub(CMD_TRAY_PROVIDER_FIRST)? as usize;
                 Self::Provider(*ProviderId::ALL.get(index)?)
@@ -111,10 +119,32 @@ impl TrayIconChange {
         })
     }
 
-    /// Apply to an icon's settings; true when something changed.
+    /// Apply to icon `index` of the list; true when something changed. The
+    /// list never goes empty.
+    pub fn apply_to(self, icons: &mut Vec<TrayIconSettings>, index: usize, enabled: crate::providers::ProviderSet) -> bool {
+        match self {
+            Self::Add => {
+                let after = index.min(icons.len());
+                icons.insert(after.saturating_add(1).min(icons.len()), new_icon(icons, enabled));
+                true
+            }
+            Self::Remove => {
+                if icons.len() > 1 && index < icons.len() {
+                    icons.remove(index);
+                    true
+                } else {
+                    false
+                }
+            }
+            change => icons.get_mut(index).is_some_and(|icon| change.apply(icon)),
+        }
+    }
+
+    /// Apply to one icon's settings; true when something changed.
     pub fn apply(self, icon: &mut TrayIconSettings) -> bool {
         let before = icon.clone();
         match self {
+            Self::Add | Self::Remove => return false,
             Self::Mode(mode) => icon.mode = mode,
             Self::Provider(provider) => {
                 icon.provider = Some(provider.descriptor().key.to_string());
@@ -128,6 +158,24 @@ impl TrayIconChange {
             Self::ToggleAlertColour => icon.alert_colour = !icon.alert_colour,
         }
         *icon != before
+    }
+}
+
+/// A new icon to add beside `icons`: one provider not yet on an icon
+/// (the first enabled one when they all are), ringed, marked with its
+/// initials so it can be told from the rest.
+pub fn new_icon(icons: &[TrayIconSettings], enabled: crate::providers::ProviderSet) -> TrayIconSettings {
+    let taken: Vec<&str> = icons.iter().filter_map(|icon| icon.provider.as_deref()).collect();
+    let provider = enabled
+        .iter()
+        .map(|provider| provider.descriptor().key)
+        .find(|key| !taken.contains(key))
+        .or_else(|| enabled.iter().next().map(|provider| provider.descriptor().key));
+    TrayIconSettings {
+        mode: TrayIconMode::Provider,
+        provider: provider.map(str::to_string),
+        mark: TrayIconMark::Initials,
+        ..Default::default()
     }
 }
 
@@ -201,8 +249,9 @@ pub fn appearance_label(appearance: Appearance) -> &'static str {
 }
 
 /// Show the menu at the cursor and return the chosen command, if any.
-pub fn show(hwnd: HWND) -> Option<u16> {
-    let (language, interval, providers, install_channel, icon, appearance) = {
+/// `icon` is the tray icon that was right-clicked; the icon submenu is its.
+pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
+    let (language, interval, providers, install_channel, icon, icon_count, appearance) = {
         let state = lock_state();
         let s = state.as_ref()?;
         (
@@ -210,7 +259,8 @@ pub fn show(hwnd: HWND) -> Option<u16> {
             s.poll_interval_ms,
             s.providers,
             s.install_channel,
-            s.tray_icons.first().cloned().unwrap_or_default(),
+            s.tray_icons.get(icon).cloned().unwrap_or_default(),
+            s.tray_icons.len(),
             s.appearance,
         )
     };
@@ -260,7 +310,8 @@ pub fn show(hwnd: HWND) -> Option<u16> {
             }
         });
 
-        submenu(menu, language.text("Tray icon"), &|tray| fill_tray_icon_menu(tray, &icon, language, &item, &submenu, &separator));
+        let icon_title = if icon_count > 1 { language.text("This icon") } else { language.text("Tray icon") };
+        submenu(menu, icon_title, &|tray| fill_tray_icon_menu(tray, &icon, icon_count, language, &item, &submenu, &separator));
 
         submenu(menu, language.text("Appearance"), &|looks| {
             for (id, value) in [
@@ -300,12 +351,13 @@ pub fn show(hwnd: HWND) -> Option<u16> {
     }
 }
 
-/// The first icon's options, in the order the Settings page lists them.
-/// Options that do not apply to the current mode are left out, as the page
-/// leaves them out, so the menu never offers a switch that does nothing.
+/// One icon's options, in the order the Settings page lists them. Options
+/// that do not apply to the current mode are left out, as the page leaves
+/// them out, so the menu never offers a switch that does nothing.
 fn fill_tray_icon_menu(
     tray: HMENU,
     icon: &TrayIconSettings,
+    icon_count: usize,
     language: LanguageId,
     item: &ItemFn<'_>,
     submenu: &SubmenuFn<'_>,
@@ -399,7 +451,11 @@ fn fill_tray_icon_menu(
         }
     });
     separator(tray);
-    item(tray, MF_STRING, CMD_SETTINGS, language.text("More icons and options…"));
+    item(tray, MF_STRING, CMD_TRAY_ADD, language.text("Add another icon"));
+    if icon_count > 1 {
+        item(tray, MF_STRING, CMD_TRAY_REMOVE, language.text("Remove this icon"));
+    }
+    item(tray, MF_STRING, CMD_SETTINGS, language.text("All icons in Settings…"));
 }
 
 /// The provider a menu command switches on or off, if it is one.
@@ -432,5 +488,23 @@ mod tests {
         }
         assert!(TrayIconChange::for_command(CMD_TRAY_PROVIDER_FIRST + ProviderId::ALL.len() as u16).is_none());
         assert_eq!(appearance_for_command(CMD_APPEARANCE_LIGHT), Some(Appearance::Light));
+    }
+
+    #[test]
+    fn icons_are_added_beside_the_clicked_one_and_never_all_removed() {
+        let enabled = crate::providers::ProviderSet::from_enabled([ProviderId::Claude, ProviderId::Codex]);
+        let mut icons = vec![TrayIconSettings::default()];
+        assert!(!TrayIconChange::Remove.apply_to(&mut icons, 0, enabled), "the last icon stays");
+        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled));
+        assert_eq!(icons.len(), 2);
+        assert_eq!((icons[1].mode, icons[1].provider.as_deref(), icons[1].mark), (TrayIconMode::Provider, Some("claude"), TrayIconMark::Initials));
+        assert!(TrayIconChange::Add.apply_to(&mut icons, 0, enabled));
+        assert_eq!(icons[1].provider.as_deref(), Some("codex"), "a provider not yet on an icon, placed after the clicked one");
+        assert_eq!(icons.len(), 3);
+        assert!(TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 2, enabled));
+        assert_eq!(icons[2].style, TrayIconStyle::Number);
+        assert!(!TrayIconChange::Style(TrayIconStyle::Number).apply_to(&mut icons, 9, enabled), "no such icon");
+        assert!(TrayIconChange::Remove.apply_to(&mut icons, 1, enabled));
+        assert_eq!(icons.len(), 2);
     }
 }

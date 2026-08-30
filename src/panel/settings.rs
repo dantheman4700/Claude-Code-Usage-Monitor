@@ -225,7 +225,7 @@ impl PanelApp {
             section(ui, language.text("Tray icons"), |ui| {
                 ui.label(
                     egui::RichText::new(language.text(
-                        "The first icon carries the whole fleet in its hover text and holds the menu. Add more to keep several values in view at once; each has its own settings.",
+                        "As many icons as you like, each with its own source and style. Right-click any of them for its menu; click any of them for the panel.",
                     ))
                     .color(crate::ui::theme::muted())
                     .size(11.0),
@@ -238,48 +238,36 @@ impl PanelApp {
                     critical: f64::from(self.settings.critical_percent),
                 };
                 let scene = IconScene { usage: usage.as_ref(), enabled, thresholds, language };
-                changed |= tray_icon_editor(ui, 0, &mut self.settings.tray_icon, &scene, &mut self.tray_previews);
+                let count = self.settings.tray_icons.len();
                 let mut remove = None;
-                for index in 0..self.settings.extra_tray_icons.len() {
-                    setting_separator(ui);
+                for index in 0..count {
+                    if index > 0 {
+                        setting_separator(ui);
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("{} {}", language.text("Icon"), index + 2)).strong().size(13.0));
+                        ui.label(egui::RichText::new(format!("{} {}", language.text("Icon"), index + 1)).strong().size(13.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(language.text("Remove")).clicked() {
+                            if ui.add_enabled(count > 1, egui::Button::new(language.text("Remove"))).clicked() {
                                 remove = Some(index);
                             }
                         });
                     });
-                    changed |= tray_icon_editor(ui, index + 1, &mut self.settings.extra_tray_icons[index], &scene, &mut self.tray_previews);
+                    changed |= tray_icon_editor(ui, index, &mut self.settings.tray_icons[index], &scene, &mut self.tray_previews);
                 }
                 if let Some(index) = remove {
-                    self.settings.extra_tray_icons.remove(index);
+                    self.settings.tray_icons.remove(index);
                     self.tray_previews.clear();
                     changed = true;
                 }
-                if self.settings.tray_icons().len() < crate::app_settings::MAX_TRAY_ICONS {
-                    setting_separator(ui);
-                    ui.add_space(8.0);
-                    if ui.button(language.text("Add an icon")).clicked() {
-                        // One provider not yet on an icon, marked with its
-                        // initials so the new icon can be told from the rest.
-                        let taken: Vec<String> = self.settings.tray_icons().iter().filter_map(|icon| icon.provider.clone()).collect();
-                        let next = enabled
-                            .iter()
-                            .map(|provider| provider.descriptor().key.to_string())
-                            .find(|key| !taken.contains(key))
-                            .or_else(|| enabled.iter().next().map(|provider| provider.descriptor().key.to_string()));
-                        self.settings.extra_tray_icons.push(crate::app_settings::TrayIconSettings {
-                            mode: crate::app_settings::TrayIconMode::Provider,
-                            provider: next,
-                            mark: crate::app_settings::TrayIconMark::Initials,
-                            ..Default::default()
-                        });
-                        changed = true;
-                    }
-                    ui.add_space(4.0);
+                setting_separator(ui);
+                ui.add_space(8.0);
+                if ui.button(language.text("Add an icon")).clicked() {
+                    let icon = crate::menu::new_icon(&self.settings.tray_icons, enabled);
+                    self.settings.tray_icons.push(icon);
+                    changed = true;
                 }
+                ui.add_space(4.0);
             });
 
             section(ui, language.text("Fleet"), |ui| {

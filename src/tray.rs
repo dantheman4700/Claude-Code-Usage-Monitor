@@ -148,7 +148,7 @@ pub fn run(open_dashboard_on_start: bool) {
             provider_backoff: Default::default(),
             manual_retry_unix: Default::default(),
             last_fetch_all_unix: 0,
-            tray_icons: settings.tray_icons(),
+            tray_icons: settings.tray_icons.clone(),
             thresholds: thresholds_of(&settings),
             appearance: settings.appearance,
         });
@@ -249,17 +249,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_COMMAND => {
-            handle_command(hwnd, wparam.0 as u16);
+            handle_command(hwnd, wparam.0 as u16, 0);
             LRESULT(0)
         }
         m if m == WM_APP_TRAY => {
-            // Every icon answers alike: the panel on a click, the menu on
-            // a right-click.
-            match tray_icon::handle_message(wparam, lparam).1 {
+            // Every icon opens the panel on a click; the menu on a
+            // right-click is for the icon that was clicked.
+            let (icon_id, action) = tray_icon::handle_message(wparam, lparam);
+            let index = icon_id.saturating_sub(tray_icon::FIRST_ICON_ID) as usize;
+            match action {
                 tray_icon::TrayAction::OpenDashboard => dashboard::show(hwnd),
                 tray_icon::TrayAction::ShowContextMenu => {
-                    if let Some(id) = menu::show(hwnd) {
-                        handle_command(hwnd, id);
+                    if let Some(id) = menu::show(hwnd, index) {
+                        handle_command(hwnd, id, index);
                     }
                 }
                 tray_icon::TrayAction::None => {}
@@ -276,7 +278,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
-fn handle_command(hwnd: HWND, id: u16) {
+/// `icon` is the tray icon whose menu this came from; the icon commands
+/// act on it.
+fn handle_command(hwnd: HWND, id: u16, icon: usize) {
     match id {
         menu::CMD_OPEN => dashboard::show(hwnd),
         menu::CMD_SETTINGS => dashboard::show_settings(hwnd),
@@ -336,8 +340,7 @@ fn handle_command(hwnd: HWND, id: u16) {
             } else if let Some(change) = menu::TrayIconChange::for_command(id) {
                 let changed = lock_state()
                     .as_mut()
-                    .and_then(|s| s.tray_icons.first_mut().map(|icon| change.apply(icon)))
-                    .unwrap_or(false);
+                    .is_some_and(|s| change.apply_to(&mut s.tray_icons, icon, s.providers));
                 if changed {
                     save_state_settings();
                     sync_tray(hwnd);
@@ -390,12 +393,13 @@ fn sync_tray(hwnd: HWND) {
         };
         let rgb = tray_colour(icon, data.as_ref(), enabled, thresholds, light);
         let render = crate::tray_paint::render_tinted(&content, size, rgb);
-        // The first icon, and any fleet view, carries the whole fleet; an
-        // icon for one value says what that value is.
-        let tooltip = if index == 0 || matches!(content, crate::tray_paint::Content::Rundown { .. } | crate::tray_paint::Content::Logo) {
-            fleet_tooltip.clone()
-        } else {
-            value_tray_tooltip(icon, data.as_ref(), enabled)
+        // An icon for one value leads with that value, then the fleet as
+        // far as the tooltip allows; a fleet view is the fleet.
+        let tooltip = match content {
+            crate::tray_paint::Content::Value { .. } => {
+                join_tooltip(&value_tray_tooltip(icon, data.as_ref(), enabled), &fleet_tooltip)
+            }
+            _ => fleet_tooltip.clone(),
         };
         let painted = tray_icon::icon_from_pixels(render.size, &render.bgra_premultiplied());
         if painted.is_invalid() {
@@ -436,6 +440,20 @@ pub(crate) fn tray_colour(
         crate::insights::Severity::Warning => crate::tray_paint::ALERT_WARNING[on],
         crate::insights::Severity::Normal => [tone; 3],
     }
+}
+
+/// A tooltip's first line, then as many of the rest as fit its limit.
+fn join_tooltip(first: &str, rest: &str) -> String {
+    const LIMIT: usize = 127;
+    let mut tip = first.to_string();
+    for line in rest.lines() {
+        if tip.chars().count() + 1 + line.chars().count() > LIMIT {
+            break;
+        }
+        tip.push('\n');
+        tip.push_str(line);
+    }
+    tip
 }
 
 /// The hover text for an icon that shows one value: whose, which window,
@@ -613,7 +631,7 @@ fn reload_settings(hwnd: HWND) {
         s.providers = settings.enabled_providers();
         s.language_override = language_override;
         s.language = localization::resolve_language(language_override);
-        s.tray_icons = settings.tray_icons();
+        s.tray_icons = settings.tray_icons.clone();
         s.thresholds = thresholds_of(&settings);
         s.appearance = settings.appearance;
         changed
@@ -654,9 +672,7 @@ fn save_state_settings() {
     persisted.set_enabled_providers(owned.1);
     persisted.language = owned.2;
     persisted.last_update_check_unix = owned.3;
-    let mut icons = owned.4.into_iter();
-    persisted.tray_icon = icons.next().unwrap_or_default();
-    persisted.extra_tray_icons = icons.collect();
+    persisted.tray_icons = owned.4;
     persisted.appearance = owned.5;
     if let Err(error) = save_settings(&persisted) {
         diagnose::log(format!("unable to save settings: {error}"));
@@ -1097,6 +1113,10 @@ mod tray_tooltip_tests {
         assert!(tip.starts_with("Codex weekly: 64% used · 36% left  ↻3h"), "{tip}");
         let missing = crate::app_settings::TrayIconSettings { provider: Some("grok".into()), ..icon };
         assert_eq!(value_tray_tooltip(&missing, Some(&data), enabled), "Headroom · nothing reporting");
+        let joined = join_tooltip("first", "a\nb");
+        assert_eq!(joined, "first\na\nb");
+        let long = "x".repeat(125);
+        assert_eq!(join_tooltip(&long, "a\nb"), format!("{long}\na"), "lines that would not fit are left out");
     }
 
     #[test]
