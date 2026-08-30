@@ -304,6 +304,45 @@ pub(super) fn run_detached(distro: &str, user: Option<&str>, script: &str, what:
     }
 }
 
+/// Write `content` to a file inside `distro`, as `user`, replacing it in one
+/// step. `path` is a path expression already quoted for the shell by
+/// [`super::credentials::shell_path`] (`~/'.grok/auth.json'`), expanded by
+/// the outer shell; the content goes on stdin, untouched. Used to hand a
+/// CLI a token Headroom renewed for it.
+pub(super) fn write_file(distro: &str, user: Option<&str>, path: &str, content: &str, what: &str) -> Result<(), String> {
+    use std::io::Write;
+    let script = format!("umask 077 && cat > {path}.headroom-tmp && mv -f {path}.headroom-tmp {path}");
+    let mut child = wsl_command(distro, user)
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg(script)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("unable to start wsl.exe for {what}: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(content.as_bytes()).map_err(|error| format!("{what}: {error}"))?;
+        // Dropping stdin closes it; `cat` finishes and `mv` runs.
+    }
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("{what} in {distro} failed with status {status}")),
+            Ok(None) if start.elapsed() > WSL_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{what} in {distro} timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("{what} in {distro}: {error}")),
+        }
+    }
+}
+
 /// `wsl.exe` emits UTF-16LE for its own messages but passes program output
 /// through untouched, so both encodings turn up depending on the command.
 pub(super) fn decode_text(bytes: &[u8]) -> String {

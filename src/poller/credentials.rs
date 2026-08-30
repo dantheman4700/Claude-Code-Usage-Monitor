@@ -83,6 +83,11 @@ pub fn configure(config: Config) {
     }
 }
 
+/// The user a distro's files are read as, when the settings name one.
+pub(super) fn wsl_user_for(distro: &str) -> Option<String> {
+    config().user_for(distro)
+}
+
 fn config() -> Config {
     CONFIG.read().map(|config| config.clone()).unwrap_or_default()
 }
@@ -602,7 +607,7 @@ fn watch_script(path: &str) -> String {
 /// which expands nothing; a `~/` or `$HOME/` prefix stays outside the quotes
 /// so it still expands. A `$`, `;`, `(` or space inside a user path is
 /// therefore never seen by the shell as anything but a path character.
-fn shell_path(path: &str) -> String {
+pub(super) fn shell_path(path: &str) -> String {
     if is_shipped_path_expression(path) {
         return path.to_string();
     }

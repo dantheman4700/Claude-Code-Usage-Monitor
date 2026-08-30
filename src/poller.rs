@@ -414,6 +414,11 @@ impl Request {
     pub fn send_json(self, body: impl serde::Serialize) -> Result<ureq::Response, ureq::Error> {
         self.0.send_json(body).inspect_err(note_transport)
     }
+    /// `application/x-www-form-urlencoded`, what an OAuth token endpoint takes.
+    #[allow(clippy::result_large_err)]
+    pub fn send_form(self, form: &[(&str, &str)]) -> Result<ureq::Response, ureq::Error> {
+        self.0.send_form(form).inspect_err(note_transport)
+    }
 }
 
 /// What the last failed request looked like, for the report. Thread-local:
