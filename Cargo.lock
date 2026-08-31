@@ -245,29 +245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "headroom"
-version = "1.0.0"
-dependencies = [
- "dirs",
- "eframe",
- "epaint_default_fonts",
- "heck",
- "image",
- "lucide-icons",
- "native-tls",
- "oxifont-subset",
- "proc-macro2",
- "raw-window-handle",
- "serde",
- "serde_json",
- "toml 0.8.23",
- "ureq",
- "windows",
- "winres",
- "zip",
-]
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -969,6 +946,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "headroom"
+version = "1.0.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "epaint_default_fonts",
+ "heck",
+ "image",
+ "lucide-icons",
+ "native-tls",
+ "oxifont-subset",
+ "proc-macro2",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "ureq",
+ "windows",
+ "winres",
+ "zip",
 ]
 
 [[package]]

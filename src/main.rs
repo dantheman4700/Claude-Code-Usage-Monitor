@@ -16,6 +16,7 @@ mod providers;
 mod state;
 mod tray;
 mod tray_icon;
+mod license;
 mod tray_paint;
 mod ui;
 mod updater;

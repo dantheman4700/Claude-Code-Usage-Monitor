@@ -32,6 +32,7 @@ zip = { version = "7.2", default-features = false, features = ["deflate"] }
 version = "0.58"
 features = [
     "ApplicationModel",
+    "Services_Store",
     "Foundation",
     "Win32_Foundation",
     "Win32_Security_Cryptography",

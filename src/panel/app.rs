@@ -175,6 +175,11 @@ impl PanelApp {
         let usage_poll_ok = cache.as_ref().is_some_and(|cache| cache.poll_ok);
         let usage_has_error = cache.as_ref().is_some_and(|cache| !cache.poll_ok);
         let settings_baseline = settings.clone();
+        // The licence is read off-thread: the first read talks to the
+        // Store service and must not stall the first frame.
+        std::thread::spawn(|| {
+            let _ = crate::license::state();
+        });
         Self {
             owner,
             page,

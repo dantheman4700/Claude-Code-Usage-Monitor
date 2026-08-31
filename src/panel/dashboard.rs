@@ -76,6 +76,10 @@ impl PanelApp {
     // ------------------------------------------------------------------
 
     pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
+        if matches!(crate::license::cached(), Some(crate::license::LicenseState::Expired)) {
+            settings_scroll_area(ui, |ui| trial_over_card(ui, self.language()));
+            return;
+        }
         let Some((usage, insights, thresholds, now)) = self.dashboard_inputs() else {
             settings_scroll_area(ui, |ui| self.nothing_yet(ui));
             return;
@@ -83,6 +87,7 @@ impl PanelApp {
         settings_scroll_area(ui, |ui| {
             self.first_run_notice(ui);
             self.fetch_all_row(ui);
+            trial_line(ui, self.language());
             headline(ui, &insights, now, self.language());
             routing_line(ui, &insights, now, self.language());
             self.provider_cards(ui, &usage, &insights, now, thresholds);
@@ -695,6 +700,62 @@ fn status_chip(
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(10.5).color(colour));
+        });
+}
+
+/// The one line a Store trial shows while it runs.
+fn trial_line(ui: &mut egui::Ui, language: LanguageId) {
+    if let Some(crate::license::LicenseState::Trial { days_left }) = crate::license::cached() {
+        ui.horizontal(|ui| {
+            let phrase = match days_left {
+                0 => language.text("Trial — ends today").to_string(),
+                1 => language.text("Trial — 1 day left").to_string(),
+                n => format!("{} — {n} {}", language.text("Trial"), language.text("days left")),
+            };
+            ui.label(egui::RichText::new(phrase).color(warning()).size(12.0));
+            if let Some(uri) = crate::license::store_page_uri() {
+                if ui.small_button(language.text("Buy")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
+                }
+            }
+        });
+        ui.add_space(6.0);
+    }
+}
+
+/// What an expired Store trial shows instead of the fleet: one card, one
+/// button, nothing else stops existing -- readings resume with a licence.
+fn trial_over_card(ui: &mut egui::Ui, language: LanguageId) {
+    ui.add_space(24.0);
+    egui::Frame::new()
+        .fill(section_surface())
+        .stroke(egui::Stroke::new(1.0, section_border()))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(24, 18))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(language.text("The trial is over")).size(18.0).strong());
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(language.text(
+                    "Headroom has stopped asking the providers for usage. Your logins and settings are untouched; buy a licence and the readings pick up where they left off.",
+                ))
+                .size(13.0),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if let Some(uri) = crate::license::store_page_uri() {
+                    if ui.button(language.text("Buy Headroom")).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
+                    }
+                }
+                if ui.button(language.text("I bought it — check again")).clicked() {
+                    crate::license::invalidate();
+                    std::thread::spawn(|| {
+                        let _ = crate::license::state();
+                    });
+                }
+            });
         });
 }
 
