@@ -1,5 +1,7 @@
 # Headroom privacy policy
 
+Canonical copy: <https://dantheman4700.github.io/headroom-privacy/>
+
 Last updated: 2026-08-28
 
 Headroom is a Windows desktop utility that shows how much of your usage

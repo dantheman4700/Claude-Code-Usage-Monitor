@@ -54,7 +54,7 @@ Fireworks AI or Cognition. It is inspired by Claude Code Usage Monitor by
 Craig Constable (MIT).
 
 ## Privacy policy URL
-https://github.com/dantheman4700/headroom/blob/main/PRIVACY.md
+https://dantheman4700.github.io/headroom-privacy/
 (move to GitHub Pages before submission so the URL is a plain page)
 
 ## Support / website

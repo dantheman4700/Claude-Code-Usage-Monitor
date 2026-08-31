@@ -377,7 +377,7 @@ fn about_tab(ui: &mut egui::Ui, language: LanguageId) {
             .size(12.0),
         );
         ui.add_space(4.0);
-        ui.hyperlink_to(language.text("Privacy policy"), "https://github.com/dantheman4700/headroom/blob/main/PRIVACY.md");
+        ui.hyperlink_to(language.text("Privacy policy"), "https://dantheman4700.github.io/headroom-privacy/");
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new("Inspired by Claude Code Usage Monitor by Craig Constable (MIT). Icons by Lucide (ISC). Built with egui.")
