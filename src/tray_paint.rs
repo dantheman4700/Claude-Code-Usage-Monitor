@@ -681,6 +681,12 @@ pub fn render_app_icon(size: usize) -> Render {
 pub fn write_app_icon(dir: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let sizes = [16usize, 20, 24, 32, 48, 64, 128, 256];
+    // The Store listing's 1:1 logos, PNG only -- an ICO tops out at 256.
+    for size in [300usize, 1080] {
+        let render = render_app_icon(size);
+        let image = image::RgbaImage::from_raw(size as u32, size as u32, render.rgba.clone()).ok_or("bad buffer")?;
+        image.save(dir.join(format!("{size}x{size}.png"))).map_err(|e| e.to_string())?;
+    }
     let mut pngs: Vec<(usize, Vec<u8>)> = Vec::new();
     for size in sizes {
         let render = render_app_icon(size);
