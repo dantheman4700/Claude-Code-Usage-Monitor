@@ -5,9 +5,9 @@ text; edit in place and paste.
 
 ## Identity
 - **App name (reserve first):** Headroom
-- **Publisher display name:** Danny Lamphere
+- **Publisher display name:** CopperBit Software
 - **Category:** Developer tools
-- **Pricing:** Free
+- **Pricing:** $4.99, 7-day time-limited free trial
 - **Markets:** all · **Languages:** English (United States)
 - **Age rating:** IARC questionnaire — no user content, no purchases, no
   ads, no personal data collected → expect 3+.
@@ -55,7 +55,6 @@ Craig Constable (MIT).
 
 ## Privacy policy URL
 https://dantheman4700.github.io/headroom-privacy/
-(move to GitHub Pages before submission so the URL is a plain page)
 
 ## Support / website
 https://github.com/dantheman4700/headroom
