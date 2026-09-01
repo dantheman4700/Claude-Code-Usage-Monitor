@@ -646,6 +646,31 @@ fn glyph(c: char) -> Option<&'static [u8; 5]> {
 /// The application icon: the gauge in white on a black rounded plate, so
 /// it reads on any background the desktop, taskbar or Store puts it on.
 pub fn render_app_icon(size: usize) -> Render {
+    render_app_icon_with(size, 0.30, 0.195, 0.06)
+}
+
+/// The set of gauge weights, at the sizes worth judging: pick one, then
+/// its numbers become `render_app_icon`'s.
+pub fn write_app_icon_weights(dir: &std::path::Path) -> Result<usize, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut written = 0;
+    for (name, r_out, r_in, hub) in [
+        ("thin", 0.30, 0.215, 0.048),
+        ("regular", 0.30, 0.195, 0.060),
+        ("bold", 0.315, 0.175, 0.075),
+        ("heavy", 0.33, 0.155, 0.092),
+    ] {
+        for size in [24usize, 48, 256] {
+            let render = render_app_icon_with(size, r_out, r_in, hub);
+            let image = image::RgbaImage::from_raw(size as u32, size as u32, render.rgba.clone()).ok_or("bad buffer")?;
+            image.save(dir.join(format!("{name}-{size}.png"))).map_err(|e| e.to_string())?;
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
+fn render_app_icon_with(size: usize, r_out_factor: f32, r_in_factor: f32, hub_factor: f32) -> Render {
     let mut canvas = Canvas::new(size.max(8));
     let n = canvas.size as f32;
     let radius = n * 0.22;
@@ -661,10 +686,10 @@ pub fn render_app_icon(size: usize) -> Render {
     // the plate stays black underneath.
     let mut glyph = Canvas::new(canvas.size);
     let (cx, cy) = (n / 2.0, n / 2.0);
-    let (r_out, r_in) = (n * 0.30, n * 0.195);
+    let (r_out, r_in) = (n * r_out_factor, n * r_in_factor);
     glyph.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, 0.38);
     glyph.ring_arc(cx, cy, r_in, r_out, 225.0, 170.0, 1.0);
-    glyph.disc(cx, cy, n * 0.06, 1.0);
+    glyph.disc(cx, cy, n * hub_factor, 1.0);
     let mut rgba = Vec::with_capacity(canvas.size * canvas.size * 4);
     for (plate_cov, glyph_cov) in plate.iter().zip(glyph.coverage.iter()) {
         // White glyph over black plate; alpha is the plate's.

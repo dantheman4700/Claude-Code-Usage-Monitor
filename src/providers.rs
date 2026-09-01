@@ -35,6 +35,9 @@ pub struct ProviderDescriptor {
     /// Two letters the tray icon can carry so icons for different providers
     /// can be told apart at a glance.
     pub tray_mark: &'static str,
+    /// Where to get the provider's tool, for the card of a provider that
+    /// is not installed yet.
+    pub install_url: &'static str,
     /// Every provider is on by default: a provider that is not installed
     /// says so on its own card, and switching one off is the user's call.
     pub default_enabled: bool,
@@ -49,6 +52,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from Anthropic",
         native_menu_command_id: 60,
         tray_mark: "CL",
+        install_url: "https://claude.com/claude-code",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -59,6 +63,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from OpenAI",
         native_menu_command_id: 61,
         tray_mark: "CX",
+        install_url: "https://openai.com/codex",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -69,6 +74,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from Google",
         native_menu_command_id: 62,
         tray_mark: "AG",
+        install_url: "https://antigravity.google",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -79,6 +85,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from OpenCode Go",
         native_menu_command_id: 63,
         tray_mark: "OC",
+        install_url: "https://opencode.ai",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -89,6 +96,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from Cursor",
         native_menu_command_id: 64,
         tray_mark: "CU",
+        install_url: "https://cursor.com",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -99,6 +107,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from xAI",
         native_menu_command_id: 65,
         tray_mark: "GK",
+        install_url: "https://grok.com",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -109,6 +118,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from Fireworks",
         native_menu_command_id: 66,
         tray_mark: "FW",
+        install_url: "https://fireworks.ai",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -119,6 +129,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         settings_description: "Collect usage from Devin",
         native_menu_command_id: 67,
         tray_mark: "DV",
+        install_url: "https://devin.ai",
         default_enabled: true,
     },
 ];

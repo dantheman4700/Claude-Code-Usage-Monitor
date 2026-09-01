@@ -61,7 +61,7 @@ impl PanelApp {
         ui.add_space(24.0);
         ui.label(
             egui::RichText::new(language.text("No usage has been collected yet"))
-                .size(16.0)
+                .size(TYPE_LG)
                 .color(muted()),
         );
         ui.add_space(4.0);
@@ -106,7 +106,7 @@ impl PanelApp {
         ui.horizontal(|ui| {
             let name = language.text(provider_name(provider));
             let title = if hidden { format!("{name} · {}", language.text("hidden")) } else { name.to_string() };
-            ui.label(egui::RichText::new(title).size(12.5).color(if hidden { muted() } else { accent() }));
+            ui.label(egui::RichText::new(title).size(TYPE_SM).color(if hidden { muted() } else { accent() }));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button(language.text(if hidden { "Show" } else { "Hide" })).clicked() {
                     self.settings.toggle_dashboard_hidden(provider);
@@ -154,7 +154,7 @@ impl PanelApp {
                     self.customizing = !self.customizing;
                 }
                 if let Some(at) = self.usage_updated_phrase() {
-                    ui.label(egui::RichText::new(at).color(muted()).size(11.0));
+                    ui.label(egui::RichText::new(at).color(muted()).size(TYPE_XS));
                 }
             });
         });
@@ -164,7 +164,7 @@ impl PanelApp {
                     "Pin the providers you watch to the top, in your order; hide the ones you do not. A hidden provider is still read and can still sit in the tray.",
                 ))
                 .color(muted())
-                .size(11.5),
+                .size(TYPE_XS),
             );
             ui.add_space(4.0);
         }
@@ -194,13 +194,13 @@ impl PanelApp {
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(language.text("Welcome to Headroom")).size(15.0).strong());
+                ui.label(egui::RichText::new(language.text("Welcome to Headroom")).size(TYPE_MD).strong());
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(language.text(
                         "Headroom reads the logins your AI coding tools already keep on this PC (and in WSL) and shows how much of each plan is used, which limit bites first, and where there is still room. Nothing leaves this machine except the usage requests to the providers themselves. Sign in with a provider's own tool and it appears here on the next refresh.",
                     ))
-                    .size(12.5),
+                    .size(TYPE_SM),
                 );
                 ui.add_space(6.0);
                 if ui.button(language.text("Got it")).clicked() {
@@ -323,7 +323,7 @@ impl PanelApp {
         }
         if customizing {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(language.text("Providers with nothing to read")).size(12.5));
+                ui.label(egui::RichText::new(language.text("Providers with nothing to read")).size(TYPE_SM));
                 if Toggle::new(&mut self.settings.show_unreachable_providers).labels(language.text("Shown"), language.text("Hidden")).show(ui).changed() {
                     self.save_settings();
                 }
@@ -370,36 +370,31 @@ impl PanelApp {
 // ----------------------------------------------------------------------
 
 /// The one line worth reading first.
+/// One number the page leads with: the limit that bites first, huge, with
+/// its name and renewal beside it.
 fn headline(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, language: LanguageId) {
     section(ui, language.text("Right now"), |ui| match &insights.binding {
-        Some(binding) if binding.severity() != Severity::Normal => {
-            let colour = severity_colour(binding.severity());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new(constraint_title(binding))
-                        .size(18.0)
-                        .strong()
-                        .color(colour),
-                );
+        Some(binding) => {
+            let normal = binding.severity() == Severity::Normal;
+            let colour = if normal { accent() } else { severity_colour(binding.severity()) };
+            ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("{:.0}%", binding.percentage))
-                        .size(18.0)
+                        .size(TYPE_HERO)
                         .strong()
                         .color(colour),
                 );
-                ui.label(egui::RichText::new(reset_phrase(binding.resets_at, now)).color(muted()));
+                ui.vertical(|ui| {
+                    ui.add_space(3.0);
+                    ui.label(egui::RichText::new(constraint_title(binding)).size(TYPE_MD).strong());
+                    let phrase = if normal {
+                        format!("{} · {}", language.text("nothing is tight"), reset_phrase(binding.resets_at, now))
+                    } else {
+                        reset_phrase(binding.resets_at, now)
+                    };
+                    ui.label(egui::RichText::new(phrase).size(TYPE_SM).color(muted()));
+                });
             });
-        }
-        Some(binding) => {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Nothing is tight. Highest is {} at {:.0}%.",
-                    constraint_title(binding),
-                    binding.percentage
-                ))
-                .size(15.0)
-                .color(accent()),
-            );
         }
         None => {
             ui.label(egui::RichText::new(language.text("No limits are being reported.")).color(muted()));
@@ -421,7 +416,7 @@ fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&Provide
             let names: Vec<&str> = entries.iter().map(|(provider, _)| language.text(provider_name(*provider))).collect();
             egui::CollapsingHeader::new(
                 egui::RichText::new(format!("{}: {}", language.text("Not installed on this PC"), names.join(", ")))
-                    .size(13.0)
+                    .size(TYPE_SM)
                     .color(muted()),
             )
             .id_salt("not-installed")
@@ -429,18 +424,19 @@ fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&Provide
                 for (provider, failure) in entries {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(language.text(provider_name(*provider))).strong().size(12.5));
+                        ui.label(egui::RichText::new(language.text(provider_name(*provider))).strong().size(TYPE_SM));
+                        ui.hyperlink_to(egui::RichText::new(language.text("Get it")).size(TYPE_XS), provider.descriptor().install_url);
                         if ui.add(egui::Button::new(language.text("Retry")).small()).clicked() {
                             retry = Some(*provider);
                         }
                     });
                     if let Some(failure) = failure {
-                        ui.label(egui::RichText::new(&failure.summary).size(11.5));
+                        ui.label(egui::RichText::new(&failure.summary).size(TYPE_XS));
                         if !failure.hint.is_empty() {
-                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(11.5));
+                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(TYPE_XS));
                         }
                         for place in &failure.looked {
-                            ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(11.0).monospace());
+                            ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(TYPE_XS).monospace());
                         }
                     }
                 }
@@ -448,7 +444,7 @@ fn not_installed_card(ui: &mut egui::Ui, entries: &[(ProviderId, Option<&Provide
                 ui.label(
                     egui::RichText::new(language.text("Switch a provider off in Settings to stop looking for it."))
                         .color(muted())
-                        .size(11.0),
+                        .size(TYPE_XS),
                 );
             });
         });
@@ -488,11 +484,12 @@ fn provider_card(
                 ui.label(
                     egui::RichText::new(if expanded { "▾" } else { "▸" })
                         .color(muted())
-                        .size(13.0),
+                        .size(TYPE_SM),
                 );
+                monogram_chip(ui, provider.descriptor().tray_mark);
                 ui.label(
                     egui::RichText::new(language.text(provider_name(provider)))
-                        .size(15.0)
+                        .size(TYPE_MD)
                         .strong(),
                 );
                 if let Some(plan) = reading.and_then(|usage| usage.plan.as_deref()) {
@@ -532,20 +529,20 @@ fn provider_card(
                 ui.add_space(4.0);
                 match failure {
                     Some(failure) => {
-                        ui.label(egui::RichText::new(&failure.summary).size(12.5));
+                        ui.label(egui::RichText::new(&failure.summary).size(TYPE_SM));
                         if !failure.hint.is_empty() {
-                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(11.5));
+                            ui.label(egui::RichText::new(&failure.hint).color(muted()).size(TYPE_XS));
                         }
                         if expanded && !failure.looked.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(language.text("Where Headroom looked")).color(muted()).size(11.0).strong());
+                            ui.label(egui::RichText::new(language.text("Where Headroom looked")).color(muted()).size(TYPE_XS).strong());
                             for place in &failure.looked {
-                                ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(11.0).monospace());
+                                ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(TYPE_XS).monospace());
                             }
                         }
                     }
                     None => {
-                        ui.label(egui::RichText::new(language.text("Waiting for the first reading.")).color(muted()).size(11.5));
+                        ui.label(egui::RichText::new(language.text("Waiting for the first reading.")).color(muted()).size(TYPE_XS));
                     }
                 }
                 return;
@@ -559,7 +556,7 @@ fn provider_card(
                 ui.label(
                     egui::RichText::new(language.text("Reporting, with nothing metered yet."))
                         .color(muted())
-                        .size(11.0),
+                        .size(TYPE_XS),
                 );
             }
             for row in rows {
@@ -582,7 +579,7 @@ fn provider_card(
                         for detail in &reading.details {
                             ui.label(
                                 egui::RichText::new(format!("{} {}", detail.label, detail.value))
-                                    .size(12.0),
+                                    .size(TYPE_SM),
                             );
                         }
                     });
@@ -600,7 +597,7 @@ fn provider_card(
                     ui.label(
                         egui::RichText::new(language.text("not enough history yet"))
                             .color(muted())
-                            .size(12.0),
+                            .size(TYPE_SM),
                     );
                 }
             });
@@ -616,7 +613,7 @@ fn provider_card(
                 ui.label(
                     egui::RichText::new(seats.join("   "))
                         .monospace()
-                        .size(11.5)
+                        .size(TYPE_XS)
                         .color(muted()),
                 );
             });
@@ -630,7 +627,7 @@ fn detail_line(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui))
             egui::vec2(LABEL_COLUMN, 18.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(egui::RichText::new(label).color(muted()).size(11.0));
+                ui.label(egui::RichText::new(label).color(muted()).size(TYPE_XS));
             },
         );
         body(ui);
@@ -644,7 +641,7 @@ fn limit_row(ui: &mut egui::Ui, row: &Constraint, now: SystemTime, thresholds: T
             egui::vec2(LABEL_COLUMN, 16.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(egui::RichText::new(window_caption(row)).color(muted()).size(11.0));
+                ui.label(egui::RichText::new(window_caption(row)).color(muted()).size(TYPE_XS));
             },
         );
         meter(ui, row.percentage, row.severity(), thresholds);
@@ -658,11 +655,11 @@ fn limit_row(ui: &mut egui::Ui, row: &Constraint, now: SystemTime, thresholds: T
             ui.label(
                 egui::RichText::new(reset_phrase(Some(resets_at), now))
                     .color(muted())
-                    .size(11.0),
+                    .size(TYPE_XS),
             );
         }
         if row.stale {
-            ui.label(egui::RichText::new("stale").color(muted()).italics().size(11.0));
+            ui.label(egui::RichText::new("stale").color(muted()).italics().size(TYPE_XS));
         }
     });
 }
@@ -699,7 +696,7 @@ fn status_chip(
         .corner_radius(9)
         .inner_margin(egui::Margin::symmetric(8, 2))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(10.5).color(colour));
+            ui.label(egui::RichText::new(text).size(TYPE_XS).color(colour));
         });
 }
 
@@ -712,7 +709,7 @@ fn trial_line(ui: &mut egui::Ui, language: LanguageId) {
                 1 => language.text("Trial — 1 day left").to_string(),
                 n => format!("{} — {n} {}", language.text("Trial"), language.text("days left")),
             };
-            ui.label(egui::RichText::new(phrase).color(warning()).size(12.0));
+            ui.label(egui::RichText::new(phrase).color(warning()).size(TYPE_SM));
             if let Some(uri) = crate::license::store_page_uri() {
                 if ui.small_button(language.text("Buy")).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(uri));
@@ -734,13 +731,13 @@ fn trial_over_card(ui: &mut egui::Ui, language: LanguageId) {
         .inner_margin(egui::Margin::symmetric(24, 18))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(language.text("The trial is over")).size(18.0).strong());
+            ui.label(egui::RichText::new(language.text("The trial is over")).size(TYPE_LG).strong());
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(language.text(
                     "Headroom has stopped asking the providers for usage. Your logins and settings are untouched; buy a licence and the readings pick up where they left off.",
                 ))
-                .size(13.0),
+                .size(TYPE_SM),
             );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -770,13 +767,13 @@ fn routing_line(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, languag
     free.sort_by(|a, b| b.percent_free.total_cmp(&a.percent_free));
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(egui::RichText::new(language.text("Next job →")).color(muted()).size(12.0));
+        ui.label(egui::RichText::new(language.text("Next job →")).color(muted()).size(TYPE_SM));
         for (index, headroom) in free.iter().enumerate() {
             if index > 0 {
-                ui.label(egui::RichText::new("·").color(muted()).size(12.0));
+                ui.label(egui::RichText::new("·").color(muted()).size(TYPE_SM));
             }
-            ui.label(egui::RichText::new(language.text(provider_name(headroom.provider))).size(12.0).strong());
-            ui.label(egui::RichText::new(format!("{:.0}% free", headroom.percent_free)).size(12.0).color(headroom_colour(headroom)));
+            ui.label(egui::RichText::new(language.text(provider_name(headroom.provider))).size(TYPE_SM).strong());
+            ui.label(egui::RichText::new(format!("{:.0}% free", headroom.percent_free)).size(TYPE_SM).color(headroom_colour(headroom)));
             // The window that runs dry soonest, not the one filling fastest.
             let dry = insights
                 .projections
@@ -786,7 +783,7 @@ fn routing_line(ui: &mut egui::Ui, insights: &Insights, now: SystemTime, languag
             if let Some(projection) = dry {
                 ui.label(
                     egui::RichText::new(format!("({} {})", language.text("runs out"), relative_phrase(projection.exhausted_at, now)))
-                        .size(11.5)
+                        .size(TYPE_XS)
                         .color(danger()),
                 );
             }
@@ -799,7 +796,7 @@ fn projection_label(ui: &mut egui::Ui, projection: &Projection, now: SystemTime,
     ui.label(
         egui::RichText::new(format!("+{:.1}%/h {}", projection.percent_per_hour, projection.window.label()))
             .monospace()
-            .size(11.5)
+            .size(TYPE_XS)
             .color(muted()),
     );
     if projection.exhausts_before_reset {
@@ -812,10 +809,10 @@ fn projection_label(ui: &mut egui::Ui, projection: &Projection, now: SystemTime,
             ))
             .color(danger())
             .strong()
-            .size(11.5),
+            .size(TYPE_XS),
         );
     } else {
-        ui.label(egui::RichText::new(language.text("renews first")).color(muted()).size(11.0));
+        ui.label(egui::RichText::new(language.text("renews first")).color(muted()).size(TYPE_XS));
     }
 }
 
@@ -834,7 +831,7 @@ fn activity_row(ui: &mut egui::Ui, event: &ActivityEvent, now: SystemTime, langu
                 ui.label(
                     egui::RichText::new(since_phrase(event.unix, now))
                         .monospace()
-                        .size(10.5)
+                        .size(TYPE_XS)
                         .color(muted()),
                 );
             },
@@ -845,11 +842,23 @@ fn activity_row(ui: &mut egui::Ui, event: &ActivityEvent, now: SystemTime, langu
             ui.label(
                 egui::RichText::new(language.text(provider_name(provider)))
                     .strong()
-                    .size(12.0),
+                    .size(TYPE_SM),
             );
         }
-        ui.label(egui::RichText::new(&event.message).size(12.0));
+        ui.label(egui::RichText::new(&event.message).size(TYPE_SM));
     });
+}
+
+/// The provider's two-letter mark in a small chip: the same mark the tray
+/// icons carry, so the card and the icon read as one thing.
+fn monogram_chip(ui: &mut egui::Ui, mark: &str) {
+    egui::Frame::new()
+        .fill(crate::ui::theme::selected_menu_fill())
+        .corner_radius(5)
+        .inner_margin(egui::Margin::symmetric(5, 2))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(mark).size(TYPE_XS).strong().monospace());
+        });
 }
 
 fn provider_name(provider: ProviderId) -> &'static str {
@@ -971,7 +980,7 @@ fn sparkline(ui: &mut egui::Ui, series: &[(u64, Reading)], thresholds: Threshold
 
 fn reset_phrase(resets_at: Option<SystemTime>, now: SystemTime) -> String {
     match resets_at {
-        Some(resets_at) => format!("resets {}", relative_phrase(Some(resets_at), now)),
+        Some(resets_at) => format!("renews {}", relative_phrase(Some(resets_at), now)),
         None => "no reset".to_string(),
     }
 }

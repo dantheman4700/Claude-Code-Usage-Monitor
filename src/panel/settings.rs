@@ -29,7 +29,7 @@ impl PanelApp {
         let changed = Cell::new(false);
         settings_scroll_area(ui, |ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(language.text("Settings")).size(25.0).strong());
+            ui.label(egui::RichText::new(language.text("Settings")).size(TYPE_XL).strong());
             ui.add_space(10.0);
             tab_strip(
                 ui,
@@ -53,7 +53,7 @@ impl PanelApp {
                             "Only changes are recorded: a provider coming online, going dark, rejecting its credentials, a refresh, a migration.",
                         ))
                         .color(muted())
-                        .size(12.0),
+                        .size(TYPE_SM),
                     );
                     ui.add_space(12.0);
                     card(ui, None, |_| {}, |ui| self.activity_log(ui));
@@ -151,7 +151,7 @@ impl PanelApp {
                 "Every provider is on by default. One that is off is not read at all: its login files are left alone and nothing is sent to it. Headroom reads each tool's own login files from the places listed; add your own when a tool is installed somewhere else.",
             ))
             .color(muted())
-            .size(12.0),
+            .size(TYPE_SM),
         );
         ui.add_space(12.0);
 
@@ -159,12 +159,12 @@ impl PanelApp {
         let detected = self.detected_distros();
         card(ui, Some("WSL"), |_| {}, |ui| {
             if detected.is_none() {
-                ui.label(egui::RichText::new(language.text("Looking for WSL distros…")).color(muted()).size(12.0));
+                ui.label(egui::RichText::new(language.text("Looking for WSL distros…")).color(muted()).size(TYPE_SM));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
             }
             let detected = detected.clone().unwrap_or_default();
             if detected.is_empty() && self.wsl_distros_detected.is_some() {
-                ui.label(egui::RichText::new(language.text("No WSL distros found on this PC.")).color(muted()).size(12.0));
+                ui.label(egui::RichText::new(language.text("No WSL distros found on this PC.")).color(muted()).size(TYPE_SM));
             }
             for (index, distro) in detected.iter().enumerate() {
                 if index > 0 {
@@ -182,7 +182,7 @@ impl PanelApp {
                         self.settings.wsl_distros = if detected.iter().all(|name| chosen.contains(name)) { None } else { Some(chosen) };
                         changed.set(true);
                     }
-                    ui.label(egui::RichText::new(language.text("as user")).color(muted()).size(11.0));
+                    ui.label(egui::RichText::new(language.text("as user")).color(muted()).size(TYPE_XS));
                     let edit = ui.add(egui::TextEdit::singleline(user).desired_width(90.0).hint_text("default"));
                     if edit.changed() {
                         // Committed as typed; saved when the box is left.
@@ -214,11 +214,11 @@ impl PanelApp {
                     }
                 },
                 |ui| {
-                    ui.label(egui::RichText::new(language.text(descriptor.settings_description)).color(muted()).size(12.5));
+                    ui.label(egui::RichText::new(language.text(descriptor.settings_description)).color(muted()).size(TYPE_SM));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(language.text("Reads")).strong().size(12.5));
+                    ui.label(egui::RichText::new(language.text("Reads")).strong().size(TYPE_SM));
                     for place in crate::poller::default_places(descriptor.id) {
-                        ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(11.0).monospace());
+                        ui.label(egui::RichText::new(format!("· {place}")).color(muted()).size(TYPE_XS).monospace());
                     }
                     ui.add_space(6.0);
                     let edit = ui.add(
@@ -277,7 +277,7 @@ impl PanelApp {
             ui.add_space(8.0);
             let enabled = self.settings.enabled_providers();
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(language.text("Tray icons")).size(25.0).strong());
+                ui.label(egui::RichText::new(language.text("Tray icons")).size(TYPE_XL).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(language.text("Add an icon")).clicked() {
                         let icon = crate::menu::new_icon(&self.settings.tray_icons, enabled);
@@ -292,7 +292,7 @@ impl PanelApp {
                     "As many icons as you like, each with its own source and style. Click any of them for the panel; right-click any of them for its menu.",
                 ))
                 .color(muted())
-                .size(12.0),
+                .size(TYPE_SM),
             );
             ui.add_space(14.0);
 
@@ -306,21 +306,29 @@ impl PanelApp {
                 ensure_preview(ui.ctx(), index, icon, &scene, &mut self.tray_previews);
             }
             card(ui, Some(language.text("Your tray")), |_| {}, |ui| {
-                ui.horizontal(|ui| {
-                    for (dark_taskbar, background) in [(true, egui::Color32::from_rgb(32, 32, 32)), (false, egui::Color32::from_rgb(243, 243, 243))] {
-                        egui::Frame::new().fill(background).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
-                                for index in 0..count {
-                                    if let Some((_, dark, light)) = self.tray_previews.get(&index) {
-                                        let texture = if dark_taskbar { dark } else { light };
-                                        ui.add(egui::Image::new((texture.id(), egui::vec2(24.0, 24.0))));
-                                    }
-                                }
-                            });
+                // At tray truth (16 px), then doubled, on both taskbars.
+                for (label, size) in [("At size", 16.0f32), ("Doubled", 32.0)] {
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(egui::vec2(70.0, 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(language.text(label)).color(muted()).size(TYPE_XS));
                         });
-                    }
-                });
+                        for side in [0usize, 1] {
+                            let background = if side == 0 { egui::Color32::from_rgb(32, 32, 32) } else { egui::Color32::from_rgb(243, 243, 243) };
+                            egui::Frame::new().fill(background).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    for index in 0..count {
+                                        if let Some(preview) = self.tray_previews.get(&index) {
+                                            let texture = if size < 20.0 { &preview.small[side] } else { &preview.big[side] };
+                                            ui.add(egui::Image::new((texture.id(), egui::vec2(size, size))));
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
             });
 
             let mut remove = None;
@@ -336,7 +344,7 @@ impl PanelApp {
                             remove = Some(index);
                         }
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(summary).color(muted()).size(12.0));
+                        ui.label(egui::RichText::new(summary).color(muted()).size(TYPE_SM));
                     },
                     |ui| {
                         if tray_icon_editor(ui, index, icon, &scene, previews) {
@@ -359,7 +367,7 @@ impl PanelApp {
 
 fn about_tab(ui: &mut egui::Ui, language: LanguageId) {
     card(ui, None, |_| {}, |ui| {
-        ui.label(egui::RichText::new(format!("Headroom {}", env!("CARGO_PKG_VERSION"))).size(15.0).strong());
+        ui.label(egui::RichText::new(format!("Headroom {}", env!("CARGO_PKG_VERSION"))).size(TYPE_MD).strong());
         ui.label(
             egui::RichText::new(match crate::updater::current_install_channel() {
                 crate::updater::InstallChannel::Store => "Installed from the Microsoft Store; updates arrive through the Store.",
@@ -367,14 +375,14 @@ fn about_tab(ui: &mut egui::Ui, language: LanguageId) {
                 crate::updater::InstallChannel::Portable => "Portable install.",
             })
             .color(muted())
-            .size(12.0),
+            .size(TYPE_SM),
         );
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(
                 "Headroom reads the logins your provider tools already keep on this PC and asks each provider how much of your plan is used. Nothing leaves this machine except those requests.",
             )
-            .size(12.0),
+            .size(TYPE_SM),
         );
         ui.add_space(4.0);
         ui.hyperlink_to(language.text("Privacy policy"), "https://dantheman4700.github.io/headroom-privacy/");
@@ -382,12 +390,12 @@ fn about_tab(ui: &mut egui::Ui, language: LanguageId) {
         ui.label(
             egui::RichText::new("Inspired by Claude Code Usage Monitor by Craig Constable (MIT). Icons by Lucide (ISC). Built with egui.")
                 .color(muted())
-                .size(11.0),
+                .size(TYPE_XS),
         );
         ui.label(
             egui::RichText::new("Not affiliated with Anthropic, OpenAI, Google, xAI, Cursor, Fireworks AI or Cognition.")
                 .color(muted())
-                .size(11.0),
+                .size(TYPE_XS),
         );
     });
 }
@@ -410,7 +418,17 @@ struct IconScene<'a> {
     language: LanguageId,
 }
 
-type TrayPreviews = std::collections::HashMap<usize, (String, egui::TextureHandle, egui::TextureHandle)>;
+/// One icon's rendered previews: at tray truth (16 px) and at a 2x zoom,
+/// each on both taskbar tones.
+pub(crate) struct IconPreview {
+    key: String,
+    /// dark-taskbar, light-taskbar at 16 px.
+    small: [egui::TextureHandle; 2],
+    /// dark-taskbar, light-taskbar at 32 px.
+    big: [egui::TextureHandle; 2],
+}
+
+pub(crate) type TrayPreviews = std::collections::HashMap<usize, IconPreview>;
 
 /// The provider an icon reads, when it reads one.
 fn icon_provider(icon: &TrayIconSettings, enabled: crate::providers::ProviderSet) -> Option<crate::providers::ProviderId> {
@@ -455,7 +473,7 @@ fn icon_summary(icon: &TrayIconSettings, usage: Option<&crate::models::AppUsageD
 fn ensure_preview(ctx: &egui::Context, index: usize, icon: &TrayIconSettings, scene: &IconScene<'_>, previews: &mut TrayPreviews) {
     let content = crate::tray_paint::content(icon, scene.usage, scene.enabled);
     let key = format!("{icon:?}|{content:?}|{:?}", scene.thresholds);
-    if previews.get(&index).is_some_and(|(painted_for, _, _)| *painted_for == key) {
+    if previews.get(&index).is_some_and(|preview| preview.key == key) {
         return;
     }
     let light_on = |dark_taskbar: bool| match icon.tone {
@@ -463,15 +481,19 @@ fn ensure_preview(ctx: &egui::Context, index: usize, icon: &TrayIconSettings, sc
         TrayIconTone::Light => true,
         TrayIconTone::Dark => false,
     };
-    let texture = |light: bool, name: String| {
+    let texture = |light: bool, size: usize, name: String| {
         let rgb = crate::tray::tray_colour(icon, scene.usage, scene.enabled, scene.thresholds, light);
-        let render = crate::tray_paint::render_tinted(&content, 32, rgb);
+        let render = crate::tray_paint::render_tinted(&content, size, rgb);
         let image = egui::ColorImage::from_rgba_unmultiplied([render.size, render.size], &render.rgba);
         ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
     };
-    let dark = texture(light_on(true), format!("tray-preview-{index}-dark"));
-    let light = texture(light_on(false), format!("tray-preview-{index}-light"));
-    previews.insert(index, (key, dark, light));
+    let at = |size: usize| {
+        [
+            texture(light_on(true), size, format!("tray-preview-{index}-{size}-dark")),
+            texture(light_on(false), size, format!("tray-preview-{index}-{size}-light")),
+        ]
+    };
+    previews.insert(index, IconPreview { key, small: at(16), big: at(32) });
 }
 
 /// The rows for one tray icon, in the order the tray menu lists them and
@@ -616,13 +638,16 @@ fn tray_icon_editor(
     });
     setting_separator(ui);
     ensure_preview(ui.ctx(), index, icon, scene, previews);
-    if let Some((_, dark, light)) = previews.get(&index) {
+    if let Some(preview) = previews.get(&index) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(language.text("Preview")).color(muted()).size(11.5));
-            for (texture, background) in [(dark, egui::Color32::from_rgb(32, 32, 32)), (light, egui::Color32::from_rgb(243, 243, 243))] {
+            ui.label(egui::RichText::new(language.text("Preview")).color(muted()).size(TYPE_XS));
+            for (side, background) in [(0usize, egui::Color32::from_rgb(32, 32, 32)), (1, egui::Color32::from_rgb(243, 243, 243))] {
                 egui::Frame::new().fill(background).corner_radius(6).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                    ui.add(egui::Image::new((texture.id(), egui::vec2(48.0, 48.0))));
+                    // Tray truth first, then the doubled look.
+                    ui.add(egui::Image::new((preview.small[side].id(), egui::vec2(16.0, 16.0))));
+                    ui.add_space(6.0);
+                    ui.add(egui::Image::new((preview.big[side].id(), egui::vec2(32.0, 32.0))));
                 });
             }
         });

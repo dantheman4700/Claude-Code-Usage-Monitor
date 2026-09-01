@@ -20,7 +20,7 @@ pub(crate) fn settings_scroll_area<R>(
 
 pub(crate) fn settings_section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
-    ui.label(egui::RichText::new(title).size(25.0).strong());
+    ui.label(egui::RichText::new(title).size(crate::ui::tokens::TYPE_XL).strong());
     ui.add_space(10.0);
     egui::Frame::new()
         .fill(section_surface())
@@ -58,8 +58,8 @@ pub(crate) fn setting_row(
     );
     label_ui.set_clip_rect(label_rect.intersect(ui.clip_rect()));
     label_ui.add_space(8.0);
-    label_ui.label(egui::RichText::new(title).size(16.0).strong());
-    label_ui.label(egui::RichText::new(detail).size(14.0).color(muted()));
+    label_ui.label(egui::RichText::new(title).size(crate::ui::tokens::TYPE_LG).strong());
+    label_ui.label(egui::RichText::new(detail).size(crate::ui::tokens::TYPE_MD).color(muted()));
 
     let mut control_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -136,7 +136,7 @@ pub(crate) fn card(
             ui.set_width(ui.available_width());
             if let Some(title) = title {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(title).size(17.0).strong());
+                    ui.label(egui::RichText::new(title).size(crate::ui::tokens::TYPE_LG).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), header_right);
                 });
                 ui.add_space(4.0);

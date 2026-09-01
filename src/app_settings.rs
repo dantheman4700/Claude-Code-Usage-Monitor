@@ -247,6 +247,9 @@ pub struct SettingsFile {
     pub dashboard_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_height: Option<f32>,
+    /// Whether the panel was maximized when last closed.
+    #[serde(default)]
+    pub dashboard_maximized: bool,
     /// The panel's palette.
     #[serde(default)]
     pub appearance: Appearance,
@@ -305,6 +308,7 @@ impl Default for SettingsFile {
             first_run_seen: false,
             dashboard_width: None,
             dashboard_height: None,
+            dashboard_maximized: false,
             appearance: Appearance::Auto,
             tray_icons: default_tray_icons(),
             credential_paths: BTreeMap::new(),

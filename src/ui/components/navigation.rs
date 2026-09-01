@@ -27,7 +27,7 @@ pub(crate) fn navigation_item(ui: &mut egui::Ui, selected: bool, title: &str) ->
         egui::pos2(rect.left() + 18.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         title,
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(crate::ui::tokens::TYPE_LG),
         menu_text(),
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)

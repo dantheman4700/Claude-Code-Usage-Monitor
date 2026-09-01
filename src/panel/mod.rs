@@ -20,3 +20,4 @@ pub(crate) use crate::ui::components::layout::{
 pub(crate) use crate::ui::components::number_field::NumberField;
 pub(crate) use crate::ui::components::toggle::Toggle;
 pub(crate) use crate::ui::theme::configure_style;
+pub(crate) use crate::ui::tokens::{TYPE_HERO, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS};

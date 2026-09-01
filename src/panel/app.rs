@@ -51,7 +51,7 @@ pub(crate) struct PanelApp {
     /// and the two textures (dark taskbar, light taskbar).
     /// One preview pair (dark taskbar, light taskbar) per tray icon, keyed
     /// by its index, painted for the settings and readings it shows.
-    pub tray_previews: std::collections::HashMap<usize, (String, egui::TextureHandle, egui::TextureHandle)>,
+    pub tray_previews: super::settings::TrayPreviews,
     /// When the settings file was last read or written by this panel, so a
     /// change the tray makes from its menu is picked up rather than
     /// overwritten by the next save from here.
@@ -128,6 +128,7 @@ pub fn handle_cli_mode(args: &[String]) -> bool {
         viewport: egui::ViewportBuilder::default()
             .with_title("Headroom")
             .with_inner_size([width, height])
+            .with_maximized(settings.dashboard_maximized)
             .with_min_inner_size([560.0, 360.0])
             .with_icon(icon),
         renderer: eframe::Renderer::Glow,
@@ -480,9 +481,14 @@ impl PanelApp {
 
 impl eframe::App for PanelApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(size) = ui.ctx().input(|input| input.viewport().inner_rect.map(|rect| rect.size())) {
-            self.settings.dashboard_width = Some(size.x);
-            self.settings.dashboard_height = Some(size.y);
+        let maximized = ui.ctx().input(|input| input.viewport().maximized.unwrap_or(false));
+        self.settings.dashboard_maximized = maximized;
+        // A maximized window's size is the monitor's, not a choice to keep.
+        if !maximized {
+            if let Some(size) = ui.ctx().input(|input| input.viewport().inner_rect.map(|rect| rect.size())) {
+                self.settings.dashboard_width = Some(size.x);
+                self.settings.dashboard_height = Some(size.y);
+            }
         }
         self.text_edit_active = ui.ctx().memory(|memory| memory.focused().is_some());
         self.refresh_usage_cache();
@@ -502,6 +508,7 @@ impl eframe::App for PanelApp {
         };
         settings.dashboard_width = self.settings.dashboard_width;
         settings.dashboard_height = self.settings.dashboard_height;
+        settings.dashboard_maximized = self.settings.dashboard_maximized;
         // Location edits are committed as typed; a box that never lost
         // focus before the window closed is still in these fields.
         if self.settings_writable {
