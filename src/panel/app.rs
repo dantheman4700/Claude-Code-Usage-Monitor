@@ -385,10 +385,11 @@ impl PanelApp {
             return;
         };
         self.settings_modified = modified;
-        let (width, height) = (self.settings.dashboard_width, self.settings.dashboard_height);
+        let (width, height, maximized) = (self.settings.dashboard_width, self.settings.dashboard_height, self.settings.dashboard_maximized);
         self.settings = loaded;
         self.settings.dashboard_width = width;
         self.settings.dashboard_height = height;
+        self.settings.dashboard_maximized = maximized;
         self.settings_baseline = self.settings.clone();
         self.settings_writable = true;
         self.wsl_user_text = self.settings.wsl_users.clone();

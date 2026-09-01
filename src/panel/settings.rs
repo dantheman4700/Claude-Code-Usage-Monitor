@@ -631,27 +631,24 @@ fn tray_icon_editor(
     setting_separator(ui);
     setting_row(ui, language.text("Colour"), language.text("Monotone follows the taskbar; a colour is this icon's own"), |ui| {
         let current = icon.colour.as_deref().unwrap_or("");
-        let swatch = |ui: &mut egui::Ui, name: &str| {
-            if let Some(rgb) = crate::tray_paint::icon_colour_rgb(name, true) {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 3.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-            }
-        };
         Dropdown::from_id_salt(salt("colour")).width(260.0).selected_text(language.text(crate::menu::colour_label(current))).show_ui(ui, |ui| {
             let mut choice = icon.colour.clone();
             if dropdown_selectable_value(ui, &mut choice, None, language.text("Monotone")).changed() {
                 changed = true;
             }
             for (name, _) in crate::tray_paint::ICON_COLOURS {
-                ui.horizontal(|ui| {
-                    swatch(ui, name);
-                    if dropdown_selectable_value(ui, &mut choice, Some(name.to_string()), language.text(crate::menu::colour_label(name))).changed() {
-                        changed = true;
-                    }
-                });
+                if dropdown_selectable_value(ui, &mut choice, Some(name.to_string()), language.text(crate::menu::colour_label(name))).changed() {
+                    changed = true;
+                }
             }
             icon.colour = choice;
         });
+        // The swatch sits beside the dropdown, where it cannot narrow the
+        // rows inside it; the preview below shows the colour at work.
+        if let Some(rgb) = crate::tray_paint::icon_colour_rgb(current, true) {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+        }
     });
     setting_separator(ui);
     setting_row(ui, language.text("Tone"), language.text("Auto follows the Windows taskbar theme"), |ui| {

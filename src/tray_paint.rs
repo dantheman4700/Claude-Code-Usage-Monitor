@@ -349,6 +349,17 @@ fn paint_ring(canvas: &mut Canvas, percent: f64, text: &str) {
 /// whole pixel per cell readable, so one pixel is the floor.
 const MARK_MIN_SCALE: f32 = 1.0;
 
+/// The one snapping rule: half-pixel steps for small text so a stroke is
+/// a crisp pixel, never above the fitted bound, and below one pixel a
+/// cell the fitted scale is kept as it was (tiny canvases still bounded).
+fn snap_text_scale(scale: f32) -> f32 {
+    if scale >= 3.0 {
+        return scale;
+    }
+    let snapped = (scale * 2.0).floor() / 2.0;
+    if snapped >= 1.0 { snapped } else { scale }
+}
+
 /// The caption a bar, column or number carries: the mark's text in a band
 /// across the top, when a font cell would stay above a pixel -- which two
 /// characters manage at sixteen pixels. Returns the vertical band left
@@ -364,8 +375,7 @@ fn paint_caption(canvas: &mut Canvas, text: &str) -> (f32, f32) {
         return whole;
     }
     // The caption's true height after the same snapping text applies.
-    let snapped = if scale < 3.0 { (scale * 2.0).floor().max(2.0) / 2.0 } else { scale };
-    let height = 5.0 * snapped;
+    let height = 5.0 * snap_text_scale(scale);
     let band_top = (height + 1.0).min(n * 0.5);
     canvas.text(text, n / 2.0, band_top / 2.0, scale, 1.0);
     (band_top, n)
@@ -437,8 +447,11 @@ fn paint_letters(canvas: &mut Canvas, percent: f64, label: &str, band: (f32, f32
     canvas.text(&letters, cx, cy, scale, 0.30);
     let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
     if fraction > 0.0 {
-        let top = cy + 2.5 * scale;
-        let line = top - 5.0 * scale * fraction;
+        // The fill line comes from the same snapped geometry the letters
+        // are drawn with, or the fill sits at the wrong height.
+        let drawn = snap_text_scale(scale);
+        let bottom = ((cy - 2.5 * drawn).round() + 5.0 * drawn).max(cy);
+        let line = bottom - 5.0 * drawn * fraction;
         canvas.text_below(&letters, cx, cy, scale, 1.0, line);
     }
 }
@@ -584,7 +597,7 @@ impl Canvas {
         if glyphs.is_empty() {
             return;
         }
-        let scale = if scale < 3.0 { (scale * 2.0).floor().max(2.0) / 2.0 } else { scale };
+        let scale = snap_text_scale(scale);
         let width = (4 * glyphs.len() - 1) as f32 * scale;
         let height = 5.0 * scale;
         let left = (cx - width / 2.0).round();
