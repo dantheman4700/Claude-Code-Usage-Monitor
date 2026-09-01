@@ -3,9 +3,24 @@
 Things worth doing, not yet done. Each entry says what, why, and what it
 would take; none is a promise. Struck through when shipped or dropped.
 
+## 1.0.x polish punch list (owner approved 2026-08-31; screenshot-driven)
+
+In order: one focal number (the binding constraint, huge) · monogram chips
+on cards · a four-step type scale · card grid/density alignment · tray
+strip at true 16 px beside a 2x zoom · app-icon weight variants to choose
+from · first-run that sells (install link + sign-in per provider) · slimmer
+navigation (icons or top tabs) · one countdown phrasing family · remembered
+window state. Ground each change in the owner's screenshots; the panel
+cannot be seen from the WSL side.
+
 ## Dashboard
 
-- **Provider detail view.** Click a card to open the provider on its own:
+- **Tile redesign (owner, 2026-08-31).** One viewport, no scrolling for the
+  common case: providers as tiles, each showing the values the user chose
+  for it (per-provider show/hide of windows/credits/burn rate), click a
+  tile to open the provider's detail. Replaces the card list as the main
+  view; the customize mode grows into "which values on which tile".
+- **Provider detail view.** Click a tile to open the provider on its own:
   every window with its history, the plan and tier, credits, the per-model
   caps, when each renews. The natural home for the two below rather than
   another page in the nav (owner, 2026-08-30).
@@ -24,6 +39,14 @@ would take; none is a promise. Struck through when shipped or dropped.
 
 ## Tray
 
+- **Flyout panel (owner, 2026-08-31).** A styled pop-out anchored to the
+  tray icon, the way EarTrumpet opens: every provider at a glance, light,
+  dismisses on focus loss. A second, faster way in -- the full panel stays
+  for depth. Likely its own borderless always-on-top window near the
+  cursor.
+- **Colour accents (owner, 2026-08-31).** Beyond the monotone default and
+  the warning tint: an optional per-icon colour for the icon or its text,
+  so several icons can be told apart by colour as well as by label.
 - **Per-icon click action.** Open the panel (today), or open that provider's
   detail view, or copy the value.
 - **Balloon on crossing a line.** Once per window per crossing: "Claude
