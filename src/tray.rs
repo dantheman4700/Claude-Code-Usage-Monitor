@@ -428,17 +428,23 @@ pub(crate) fn tray_colour(
     light: bool,
 ) -> [u8; 3] {
     let tone: u8 = if light { 255 } else { 16 };
+    // The chosen colour, when there is one the palette knows.
+    let base = icon
+        .colour
+        .as_deref()
+        .and_then(|name| crate::tray_paint::icon_colour_rgb(name, light))
+        .unwrap_or([tone; 3]);
     if !icon.alert_colour {
-        return [tone; 3];
+        return base;
     }
     let Some(used) = crate::tray_paint::shown_used_percent(icon, data, enabled) else {
-        return [tone; 3];
+        return base;
     };
     let on = usize::from(!light);
     match crate::insights::Severity::of(used, thresholds) {
         crate::insights::Severity::Critical => crate::tray_paint::ALERT_CRITICAL[on],
         crate::insights::Severity::Warning => crate::tray_paint::ALERT_WARNING[on],
-        crate::insights::Severity::Normal => [tone; 3],
+        crate::insights::Severity::Normal => base,
     }
 }
 

@@ -345,9 +345,9 @@ fn paint_ring(canvas: &mut Canvas, percent: f64, text: &str) {
     }
 }
 
-/// Pixels per font cell below which text is left out rather than drawn as
-/// mush. At 1.15 a two-character mark reads at sixteen pixels.
-const MARK_MIN_SCALE: f32 = 1.15;
+/// Pixels per font cell below which text is left out. Snapping makes a
+/// whole pixel per cell readable, so one pixel is the floor.
+const MARK_MIN_SCALE: f32 = 1.0;
 
 /// The caption a bar, column or number carries: the mark's text in a band
 /// across the top, when a font cell would stay above a pixel -- which two
@@ -363,18 +363,25 @@ fn paint_caption(canvas: &mut Canvas, text: &str) -> (f32, f32) {
     if scale < MARK_MIN_SCALE {
         return whole;
     }
-    let height = 5.0 * scale;
-    let band_top = height + (n * 0.06).max(1.0);
+    // The caption's true height after the same snapping text applies.
+    let snapped = if scale < 3.0 { (scale * 2.0).floor().max(2.0) / 2.0 } else { scale };
+    let height = 5.0 * snapped;
+    let band_top = (height + 1.0).min(n * 0.5);
     canvas.text(text, n / 2.0, band_top / 2.0, scale, 1.0);
     (band_top, n)
 }
 
 /// A horizontal bar across the middle of `band`, filling from the left.
+/// Under a caption the bar takes a third of what is left, never less than
+/// three pixels: a two-pixel bar was the unreadable case.
 fn paint_bar(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
     let n = canvas.size as f32;
     let (x0, x1) = (n * 0.06, n * 0.94);
     let mid = (band.0 + band.1) / 2.0;
-    let half = ((band.1 - band.0) * 0.17).clamp(1.5, n * 0.16);
+    let mut half = ((band.1 - band.0) * 0.17).clamp(1.5, n * 0.16);
+    if band.0 > 0.0 {
+        half = half.max(((band.1 - band.0) * 0.20).min(n * 0.16)).max(1.5);
+    }
     let (y0, y1) = (mid - half, mid + half);
     let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
     // Track, then the fill from the left.
@@ -406,12 +413,14 @@ fn paint_column(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
     }
 }
 
-/// The whole percent, as large as `band` allows.
+/// The whole percent, as large as `band` allows -- the full height when a
+/// caption already took its share above.
 fn paint_number(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
     let n = canvas.size as f32;
     let text = digits_for(percent);
     let height = band.1 - band.0;
-    let scale = fit_scale(n * 0.92, height * 0.80, text.len());
+    let headroom = if band.0 > 0.0 { 0.94 } else { 0.80 };
+    let scale = fit_scale(n * 0.92, height * headroom, text.len());
     canvas.text(&text, n / 2.0, (band.0 + band.1) / 2.0, scale, 1.0);
 }
 
@@ -566,15 +575,20 @@ impl Canvas {
     }
 
     /// `text`, but only the part at or below `y_from`: how letters fill.
+    ///
+    /// Small text is snapped: the scale to half pixels and the origin to
+    /// whole ones, so a stroke is a crisp pixel instead of two grey ones.
+    /// Above three pixels a cell, the eye stops caring and layout wins.
     fn text_below(&mut self, text: &str, cx: f32, cy: f32, scale: f32, alpha: f32, y_from: f32) {
         let glyphs: Vec<&'static [u8; 5]> = text.chars().filter_map(glyph).collect();
         if glyphs.is_empty() {
             return;
         }
+        let scale = if scale < 3.0 { (scale * 2.0).floor().max(2.0) / 2.0 } else { scale };
         let width = (4 * glyphs.len() - 1) as f32 * scale;
         let height = 5.0 * scale;
-        let left = cx - width / 2.0;
-        let top = cy - height / 2.0;
+        let left = (cx - width / 2.0).round();
+        let top = (cy - height / 2.0).round();
         self.paint(alpha, move |x, y| {
             if y < y_from {
                 return false;
@@ -853,6 +867,29 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
         }
     }
     Ok(written)
+}
+
+/// The colours an icon can wear by choice, each as a dark-taskbar and a
+/// light-taskbar variant so it carries on both. Names, not hex, in the
+/// settings file: a palette can improve without breaking anyone.
+pub const ICON_COLOURS: [(&str, [[u8; 3]; 2]); 8] = [
+    ("blue", [[96, 165, 250], [37, 99, 235]]),
+    ("teal", [[45, 212, 191], [13, 148, 136]]),
+    ("green", [[74, 222, 128], [22, 163, 74]]),
+    ("yellow", [[250, 204, 21], [202, 138, 4]]),
+    ("orange", [[251, 146, 60], [234, 88, 12]]),
+    ("red", [[248, 113, 113], [220, 38, 38]]),
+    ("violet", [[167, 139, 250], [124, 58, 237]]),
+    ("pink", [[244, 114, 182], [219, 39, 119]]),
+];
+
+/// The RGB for a named colour, on a dark taskbar (`light` foreground) or a
+/// light one. An unknown name is nobody's colour: monotone.
+pub fn icon_colour_rgb(name: &str, light_foreground: bool) -> Option<[u8; 3]> {
+    ICON_COLOURS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, pair)| pair[usize::from(!light_foreground)])
 }
 
 /// The tint for a value at the warning line, on a dark taskbar then a light one.

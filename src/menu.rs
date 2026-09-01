@@ -68,6 +68,8 @@ pub const CMD_TRAY_REMOVE: u16 = 55;
 pub const CMD_TRAY_METRIC_CREDITS: u16 = 56;
 pub const CMD_TRAY_ICONS_PAGE: u16 = 57;
 pub const CMD_TRAY_STYLE_LETTERS: u16 = 58;
+/// Monotone, then the palette in order; 100..=108.
+const CMD_TRAY_COLOUR_FIRST: u16 = 100;
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
 /// A per-model cap of the icon's provider, by its place in the provider's
 /// list; resolved to its label when applied.
@@ -84,6 +86,8 @@ pub enum TrayIconChange {
     Metric(TrayIconMetric),
     /// The n-th per-model cap the icon's provider reports.
     ScopedWindow(usize),
+    /// A named colour from the painter's palette; `None` is monotone.
+    Colour(Option<&'static str>),
     Measure(TrayIconMeasure),
     Style(TrayIconStyle),
     Mark(TrayIconMark),
@@ -124,6 +128,10 @@ impl TrayIconChange {
             CMD_TRAY_REMOVE => Self::Remove,
             CMD_TRAY_METRIC_CREDITS => Self::Metric(TrayIconMetric::Credits),
             id if (CMD_TRAY_SCOPED_FIRST..=CMD_TRAY_SCOPED_LAST).contains(&id) => Self::ScopedWindow((id - CMD_TRAY_SCOPED_FIRST) as usize),
+            CMD_TRAY_COLOUR_FIRST => Self::Colour(None),
+            id if (CMD_TRAY_COLOUR_FIRST + 1..CMD_TRAY_COLOUR_FIRST + 1 + crate::tray_paint::ICON_COLOURS.len() as u16).contains(&id) => {
+                Self::Colour(Some(crate::tray_paint::ICON_COLOURS[(id - CMD_TRAY_COLOUR_FIRST - 1) as usize].0))
+            }
             id => {
                 let index = id.checked_sub(CMD_TRAY_PROVIDER_FIRST)? as usize;
                 Self::Provider(*ProviderId::ALL.get(index)?)
@@ -177,6 +185,7 @@ impl TrayIconChange {
         let before = icon.clone();
         match self {
             Self::Add | Self::Remove | Self::ScopedWindow(_) => return false,
+            Self::Colour(name) => icon.colour = name.map(str::to_string),
             Self::Mode(mode) => icon.mode = mode,
             Self::Provider(provider) => {
                 icon.provider = Some(provider.descriptor().key.to_string());
@@ -274,6 +283,21 @@ pub fn marks_for(style: TrayIconStyle) -> &'static [TrayIconMark] {
         TrayIconStyle::Number => &[TrayIconMark::Initials, TrayIconMark::None],
         TrayIconStyle::Letters => &[TrayIconMark::Digits, TrayIconMark::None],
         _ => &[TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None],
+    }
+}
+
+/// The palette names with a capital, as the menu and the page print them.
+pub fn colour_label(name: &str) -> &'static str {
+    match name {
+        "blue" => "Blue",
+        "teal" => "Teal",
+        "green" => "Green",
+        "yellow" => "Yellow",
+        "orange" => "Orange",
+        "red" => "Red",
+        "violet" => "Violet",
+        "pink" => "Pink",
+        _ => "Monotone",
     }
 }
 
@@ -522,6 +546,17 @@ fn fill_tray_icon_menu(
         });
     }
     separator(tray);
+    submenu(tray, language.text("Colour"), &|colours| {
+        item(colours, checked(icon.colour.is_none()), CMD_TRAY_COLOUR_FIRST, language.text("Monotone"));
+        for (index, (name, _)) in crate::tray_paint::ICON_COLOURS.iter().enumerate() {
+            item(
+                colours,
+                checked(icon.colour.as_deref() == Some(*name)),
+                CMD_TRAY_COLOUR_FIRST + 1 + index as u16,
+                language.text(colour_label(name)),
+            );
+        }
+    });
     if icon.mode != TrayIconMode::Logo {
         item(tray, checked(icon.alert_colour), CMD_TRAY_ALERT_COLOUR, language.text("Colour at the warning line"));
     }
@@ -605,5 +640,19 @@ mod tests {
         assert_eq!(icons[0].metric, TrayIconMetric::Scoped("Fable".into()));
         assert!(!TrayIconChange::ScopedWindow(3).apply_to(&mut icons, 0, enabled, Some(&data)), "no such cap");
         assert_eq!(TrayIconChange::for_command(CMD_TRAY_METRIC_CREDITS), Some(TrayIconChange::Metric(TrayIconMetric::Credits)));
+    }
+
+    #[test]
+    fn colours_map_by_place_and_apply() {
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST), Some(TrayIconChange::Colour(None)));
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST + 1), Some(TrayIconChange::Colour(Some("blue"))));
+        let last = CMD_TRAY_COLOUR_FIRST + crate::tray_paint::ICON_COLOURS.len() as u16;
+        assert_eq!(TrayIconChange::for_command(last), Some(TrayIconChange::Colour(Some("pink"))));
+        assert_eq!(TrayIconChange::for_command(last + 1), None);
+        let mut icon = TrayIconSettings::default();
+        assert!(TrayIconChange::Colour(Some("teal")).apply(&mut icon));
+        assert_eq!(icon.colour.as_deref(), Some("teal"));
+        assert!(TrayIconChange::Colour(None).apply(&mut icon));
+        assert_eq!(icon.colour, None);
     }
 }
