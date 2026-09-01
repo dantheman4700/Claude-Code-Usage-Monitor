@@ -85,3 +85,16 @@ its settings, and exits cleanly.
 - 10.2.5 no self-update: the updater is disabled on the Store channel.
 - 10.5.1 privacy policy: linked above and from Settings → About.
 - 10.7 localization: English (United States) only.
+
+## Notes for certification (paste into the submission's notes box)
+
+The Windows App Certification Kit's "Blocked executables" test flags
+references to cmd.exe and powershell.exe. Both are deliberate and
+user-serving: Headroom refreshes sign-in tokens by running the AI CLIs the
+user already has installed (for example `codex`), which on Windows are
+npm-style `.cmd` shims that must be started through the command
+interpreter. PowerShell is additionally referenced by the self-update path,
+which is disabled entirely in the Store build (updates arrive through the
+Store). The app launches no other programs, downloads no code, and sends
+nothing anywhere except the usage requests described in the privacy policy:
+https://dantheman4700.github.io/headroom-privacy/
