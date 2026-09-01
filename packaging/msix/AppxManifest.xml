@@ -14,14 +14,14 @@
   IgnorableNamespaces="uap desktop rescap">
 
   <Identity
-    Name="DannyLamphere.Headroom"
-    Publisher="CN=Danny Lamphere"
+    Name="CopperBitSoftware.Headroom"
+    Publisher="CN=A9A54CBC-DC39-435A-B848-D262BF02DD27"
     Version="1.0.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Headroom</DisplayName>
-    <PublisherDisplayName>Danny Lamphere</PublisherDisplayName>
+    <PublisherDisplayName>CopperBit Software</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>How much of each AI coding plan you have left, from the system tray.</Description>
   </Properties>
