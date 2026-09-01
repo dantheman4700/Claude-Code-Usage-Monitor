@@ -59,6 +59,15 @@ cannot be seen from the WSL side.
 - **Other providers.** Whichever CLIs people ask for; each is one poller
   module and one descriptor.
 
+## Accessibility
+
+- **AccessKit (owner, 2026-08-31).** The panel is an egui surface and the
+  build does not enable AccessKit, so a screen reader sees nothing inside
+  it. eframe carries AccessKit support behind a feature flag: turn it on,
+  walk the panel with Narrator and keyboard only, fix what that surfaces,
+  and only then check the Store's "tested to meet accessibility
+  guidelines" declaration honestly in a later submission.
+
 ## Settings
 
 - **Import / export.** The settings file already round-trips; a button to
