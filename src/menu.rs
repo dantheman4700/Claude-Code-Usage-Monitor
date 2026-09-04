@@ -68,6 +68,7 @@ pub const CMD_TRAY_REMOVE: u16 = 55;
 pub const CMD_TRAY_METRIC_CREDITS: u16 = 56;
 pub const CMD_TRAY_ICONS_PAGE: u16 = 57;
 pub const CMD_TRAY_STYLE_LETTERS: u16 = 58;
+pub const CMD_TRAY_STYLE_TEXT_BAR: u16 = 59;
 /// Monotone, then the palette in order; 100..=108.
 const CMD_TRAY_COLOUR_FIRST: u16 = 100;
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
@@ -111,6 +112,7 @@ impl TrayIconChange {
             CMD_TRAY_STYLE_RING => Self::Style(TrayIconStyle::Ring),
             CMD_TRAY_STYLE_COLUMN => Self::Style(TrayIconStyle::Column),
             CMD_TRAY_STYLE_LETTERS => Self::Style(TrayIconStyle::Letters),
+            CMD_TRAY_STYLE_TEXT_BAR => Self::Style(TrayIconStyle::TextBar),
             CMD_TRAY_TONE_AUTO => Self::Tone(TrayIconTone::Auto),
             CMD_TRAY_TONE_LIGHT => Self::Tone(TrayIconTone::Light),
             CMD_TRAY_TONE_DARK => Self::Tone(TrayIconTone::Dark),
@@ -216,6 +218,7 @@ pub fn new_icon(icons: &[TrayIconSettings], enabled: crate::providers::ProviderS
         mode: TrayIconMode::Provider,
         provider: provider.map(str::to_string),
         mark: TrayIconMark::Initials,
+        style: TrayIconStyle::TextBar,
         ..Default::default()
     }
 }
@@ -254,6 +257,7 @@ pub fn style_label(style: TrayIconStyle) -> &'static str {
         TrayIconStyle::Ring => "A ring that fills",
         TrayIconStyle::Column => "A column that fills",
         TrayIconStyle::Letters => "Letters that fill",
+        TrayIconStyle::TextBar => "Big text, bar below",
     }
 }
 
@@ -273,6 +277,7 @@ pub fn mark_place(style: TrayIconStyle) -> &'static str {
         TrayIconStyle::Column => "Above the column; two characters fit the smallest icons",
         TrayIconStyle::Number => "Above the number; two characters fit the smallest icons",
         TrayIconStyle::Letters => "Above the letters; two characters fit the smallest icons",
+        TrayIconStyle::TextBar => "What the big text says",
     }
 }
 
@@ -282,6 +287,7 @@ pub fn marks_for(style: TrayIconStyle) -> &'static [TrayIconMark] {
     match style {
         TrayIconStyle::Number => &[TrayIconMark::Initials, TrayIconMark::None],
         TrayIconStyle::Letters => &[TrayIconMark::Digits, TrayIconMark::None],
+        TrayIconStyle::TextBar => &[TrayIconMark::Digits, TrayIconMark::Initials],
         _ => &[TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None],
     }
 }
@@ -519,6 +525,7 @@ fn fill_tray_icon_menu(
     if shows_value {
         submenu(tray, language.text("Style"), &|style_menu| {
             for (id, style) in [
+                (CMD_TRAY_STYLE_TEXT_BAR, TrayIconStyle::TextBar),
                 (CMD_TRAY_STYLE_RING, TrayIconStyle::Ring),
                 (CMD_TRAY_STYLE_BAR, TrayIconStyle::Bar),
                 (CMD_TRAY_STYLE_COLUMN, TrayIconStyle::Column),

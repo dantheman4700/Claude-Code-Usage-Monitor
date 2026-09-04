@@ -329,6 +329,17 @@ impl PanelApp {
                     });
                     ui.add_space(4.0);
                 }
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(language.text(
+                        "Missing an icon? Windows tucks new tray icons into the overflow (the ^ on the taskbar) until you pin them: Settings → Personalization → Taskbar → Other system tray icons, switch on each Headroom entry -- or drag an icon out of the overflow onto the taskbar.",
+                    ))
+                    .color(muted())
+                    .size(TYPE_XS),
+                );
+                if ui.small_button(language.text("Open taskbar settings")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab("ms-settings:taskbar"));
+                }
             });
 
             let mut remove = None;
@@ -567,7 +578,7 @@ fn tray_icon_editor(
         setting_separator(ui);
         setting_row(ui, language.text("Style"), language.text("How the value is drawn"), |ui| {
             Dropdown::from_id_salt(salt("style")).width(260.0).selected_text(language.text(style_label(icon.style))).show_ui(ui, |ui| {
-                for style in [TrayIconStyle::Ring, TrayIconStyle::Letters, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
+                for style in [TrayIconStyle::TextBar, TrayIconStyle::Ring, TrayIconStyle::Letters, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
                     changed |= dropdown_selectable_value(ui, &mut icon.style, style, language.text(style_label(style))).changed();
                 }
             });
