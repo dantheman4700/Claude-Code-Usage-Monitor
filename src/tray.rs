@@ -89,6 +89,7 @@ pub fn run(open_dashboard_on_start: bool) {
 
     let settings = load_settings();
     poller::configure_credentials(&settings);
+    crate::tray_paint::configure_provider_colours(&settings);
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
     let language = localization::resolve_language(language_override);
 
@@ -435,7 +436,7 @@ pub(crate) fn tray_colour(
         Some(app_settings::MONOTONE) => [tone; 3],
         Some(name) => crate::tray_paint::icon_colour_rgb(name, light).unwrap_or([tone; 3]),
         None => crate::tray_paint::shown_provider(icon, data, enabled)
-            .and_then(|(provider, _)| crate::tray_paint::icon_colour_rgb(provider.descriptor().colour, light))
+            .and_then(|(provider, _)| crate::tray_paint::icon_colour_rgb(crate::tray_paint::provider_colour(provider), light))
             .unwrap_or([tone; 3]),
     };
     if !icon.alert_colour {
@@ -614,6 +615,7 @@ fn reload_settings(hwnd: HWND) {
     // "Where to look" may have changed: apply it, forget the cached distro
     // list, and give every backed-off provider another go.
     poller::configure_credentials(&settings);
+    crate::tray_paint::configure_provider_colours(&settings);
     poller::invalidate_wsl_caches();
     if let Some(s) = lock_state().as_mut() {
         for entry in s.provider_backoff.values_mut() {

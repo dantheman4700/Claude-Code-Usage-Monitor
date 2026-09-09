@@ -157,6 +157,7 @@ impl PanelApp {
         let loaded = app_settings::load_settings_if_readable();
         let settings_writable = loaded.is_some();
         let settings = loaded.unwrap_or_default();
+        crate::tray_paint::configure_provider_colours(&settings);
         let wsl_user_text = settings.wsl_users.clone();
         let credential_path_text: std::collections::BTreeMap<String, String> = settings
             .credential_paths
@@ -248,6 +249,8 @@ impl PanelApp {
                 self.settings_error = None;
                 self.settings_modified = settings_file_modified();
                 self.settings_baseline = self.settings.clone();
+                crate::tray_paint::configure_provider_colours(&self.settings);
+                self.tray_previews.clear();
                 self.post_owner(WM_APP_SETTINGS_UPDATED);
             }
             Err(error) => {
@@ -391,6 +394,7 @@ impl PanelApp {
         self.settings.dashboard_height = height;
         self.settings.dashboard_maximized = maximized;
         self.settings_baseline = self.settings.clone();
+        crate::tray_paint::configure_provider_colours(&self.settings);
         self.settings_writable = true;
         self.wsl_user_text = self.settings.wsl_users.clone();
         self.credential_path_text = self

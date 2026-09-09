@@ -205,12 +205,30 @@ impl PanelApp {
             let text = self.credential_path_text.entry(descriptor.key.to_string()).or_default();
             let mut enabled = settings.provider_enabled(descriptor.id);
             let toggled = Cell::new(false);
+            let current_colour = settings.provider_colour(descriptor.id);
+            let picked_colour: Cell<Option<String>> = Cell::new(None);
             card(
                 ui,
                 Some(language.text(descriptor.display_name)),
                 |ui| {
                     if Toggle::new(&mut enabled).labels(language.text("Enabled"), language.text("Disabled")).show(ui).changed() {
                         toggled.set(true);
+                    }
+                    // The colour this provider wears on the tray.
+                    ui.add_space(10.0);
+                    let swatch_rgb = crate::tray_paint::icon_colour_rgb(&current_colour, true);
+                    Dropdown::from_id_salt(format!("provider_colour_{}", descriptor.key)).width(130.0).selected_text(language.text(crate::menu::colour_label(&current_colour))).show_ui(ui, |ui| {
+                        let mut choice = current_colour.clone();
+                        for (name, _) in crate::tray_paint::ICON_COLOURS {
+                            let label = if name == descriptor.colour { format!("{} ({})", language.text(crate::menu::colour_label(name)), language.text("default")) } else { language.text(crate::menu::colour_label(name)).to_string() };
+                            if dropdown_selectable_value(ui, &mut choice, name.to_string(), label).changed() {
+                                picked_colour.set(Some(choice.clone()));
+                            }
+                        }
+                    });
+                    if let Some(rgb) = swatch_rgb {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
                     }
                 },
                 |ui| {
@@ -242,6 +260,14 @@ impl PanelApp {
                 },
             );
             if toggled.get() && self.settings.toggle_provider(descriptor.id) {
+                changed.set(true);
+            }
+            if let Some(choice) = picked_colour.take() {
+                if choice == descriptor.colour {
+                    self.settings.provider_colours.remove(descriptor.key);
+                } else {
+                    self.settings.provider_colours.insert(descriptor.key.to_string(), choice);
+                }
                 changed.set(true);
             }
         }

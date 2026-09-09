@@ -245,7 +245,7 @@ pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled
                 // Each bar in its provider's colour, unless the icon wears
                 // one colour or none.
                 let colours: Vec<Option<&'static str>> = match settings.colour.as_deref() {
-                    None => enabled.iter().map(|provider| Some(provider.descriptor().colour)).collect(),
+                    None => enabled.iter().map(|provider| Some(provider_colour(provider))).collect(),
                     Some(_) => bars.iter().map(|_| None).collect(),
                 };
                 Content::Rundown { bars, rows: settings.style == TrayIconStyle::Bar, colours }
@@ -1017,6 +1017,35 @@ pub const ICON_COLOURS: [(&str, [[u8; 3]; 2]); 8] = [
     ("pink", [[244, 114, 182], [219, 39, 119]]),
 ];
 
+/// The colours providers wear, as configured -- the settings' overrides
+/// over the descriptors' defaults. Set from the settings whenever they
+/// load or change, by the tray and by the panel alike.
+static PROVIDER_COLOURS: std::sync::RwLock<std::collections::BTreeMap<crate::providers::ProviderId, &'static str>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// Take the provider colours from the settings.
+pub fn configure_provider_colours(settings: &crate::app_settings::SettingsFile) {
+    let mut map = PROVIDER_COLOURS.write().unwrap_or_else(|e| e.into_inner());
+    map.clear();
+    for provider in ProviderId::ALL {
+        let chosen = settings.provider_colour(provider);
+        // Only a name the palette knows; anything else keeps the default.
+        if let Some((name, _)) = ICON_COLOURS.iter().find(|(name, _)| *name == chosen) {
+            map.insert(provider, *name);
+        }
+    }
+}
+
+/// The palette name a provider wears on the tray.
+pub fn provider_colour(provider: ProviderId) -> &'static str {
+    PROVIDER_COLOURS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&provider)
+        .copied()
+        .unwrap_or(provider.descriptor().colour)
+}
+
 /// The RGB for a named colour, on a dark taskbar (`light` foreground) or a
 /// light one. An unknown name is nobody's colour: monotone.
 pub fn icon_colour_rgb(name: &str, light_foreground: bool) -> Option<[u8; 3]> {
@@ -1338,6 +1367,16 @@ mod tests {
         }
         let distinct: std::collections::BTreeSet<&str> = crate::providers::PROVIDER_DESCRIPTORS.iter().map(|d| d.colour).collect();
         assert_eq!(distinct.len(), crate::providers::PROVIDER_DESCRIPTORS.len(), "every provider its own colour");
+        // A chosen colour replaces the shipped one everywhere the provider's
+        // colour is asked for; an unknown name keeps the default.
+        let mut settings = crate::app_settings::SettingsFile::default();
+        settings.provider_colours.insert("codex".into(), "violet".into());
+        settings.provider_colours.insert("grok".into(), "not-a-colour".into());
+        configure_provider_colours(&settings);
+        assert_eq!(provider_colour(ProviderId::Codex), "violet");
+        assert_eq!(provider_colour(ProviderId::Grok), "red");
+        configure_provider_colours(&crate::app_settings::SettingsFile::default());
+        assert_eq!(provider_colour(ProviderId::Codex), "teal");
     }
 
     #[test]

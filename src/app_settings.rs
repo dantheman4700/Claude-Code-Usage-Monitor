@@ -309,6 +309,11 @@ pub struct SettingsFile {
     /// default user.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub wsl_users: BTreeMap<String, String>,
+    /// A provider's colour on the tray, by provider key and palette name,
+    /// when not the one it ships with. Every icon and rundown bar that
+    /// wears "the provider's colour" follows this.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_colours: BTreeMap<String, String>,
     /// Keys this build does not know, carried through a save untouched so a
     /// newer build's settings survive a round trip through this one.
     #[serde(flatten)]
@@ -354,6 +359,7 @@ impl Default for SettingsFile {
             credential_paths: BTreeMap::new(),
             wsl_distros: None,
             wsl_users: BTreeMap::new(),
+            provider_colours: BTreeMap::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -432,6 +438,15 @@ impl SettingsFile {
         for provider in ProviderId::ALL {
             self.set_provider_enabled(provider, providers.contains(provider));
         }
+    }
+
+    /// The colour a provider wears on the tray: the chosen one, else the
+    /// one it ships with.
+    pub fn provider_colour(&self, provider: ProviderId) -> String {
+        self.provider_colours
+            .get(provider.descriptor().key)
+            .cloned()
+            .unwrap_or_else(|| provider.descriptor().colour.to_string())
     }
 
     /// Where a provider sits among the pinned ones, if it is pinned.
@@ -1310,6 +1325,19 @@ mod tests {
         // Nothing changed here: the disk is taken as it is.
         let same = merge_settings(&baseline, &baseline, &disk);
         assert_eq!(settings_json(&same), settings_json(&disk));
+    }
+
+    #[test]
+    fn a_provider_colour_can_be_chosen_and_the_default_is_not_written() {
+        let mut settings = SettingsFile::default();
+        assert_eq!(settings.provider_colour(ProviderId::Claude), "orange");
+        settings.provider_colours.insert("claude".into(), "blue".into());
+        assert_eq!(settings.provider_colour(ProviderId::Claude), "blue");
+        assert_eq!(settings.provider_colour(ProviderId::Codex), "teal");
+        let written = settings_json(&settings);
+        assert_eq!(written["provider_colours"]["claude"], "blue");
+        let loaded = decode_settings(&written.to_string()).ok().unwrap();
+        assert_eq!(loaded.provider_colour(ProviderId::Claude), "blue");
     }
 
     #[test]
