@@ -640,11 +640,14 @@ fn tray_icon_editor(
         });
     }
     setting_separator(ui);
-    setting_row(ui, language.text("Colour"), language.text("Monotone follows the taskbar; a colour is this icon's own"), |ui| {
+    setting_row(ui, language.text("Colour"), language.text("The provider's own by default; monotone follows the taskbar"), |ui| {
         let current = icon.colour.clone().unwrap_or_default();
         Dropdown::from_id_salt(salt("colour")).width(260.0).selected_text(language.text(crate::menu::colour_label(&current))).show_ui(ui, |ui| {
             let mut choice = icon.colour.clone();
-            if dropdown_selectable_value(ui, &mut choice, None, language.text("Monotone")).changed() {
+            if dropdown_selectable_value(ui, &mut choice, None, language.text("The provider's colour")).changed() {
+                changed = true;
+            }
+            if dropdown_selectable_value(ui, &mut choice, Some(crate::app_settings::MONOTONE.to_string()), language.text("Monotone")).changed() {
                 changed = true;
             }
             for (name, _) in crate::tray_paint::ICON_COLOURS {

@@ -29,8 +29,9 @@ pub enum Content {
     Value { percent: f64, style: TrayIconStyle, mark: Mark, label: String },
     /// One entry per enabled provider, in provider order; `None` for one
     /// with nothing current. `rows` lays them out as horizontal rows
-    /// instead of columns.
-    Rundown { bars: Vec<Option<f64>>, rows: bool },
+    /// instead of columns. `colours` is each bar's palette name, or none
+    /// for the icon's single colour.
+    Rundown { bars: Vec<Option<f64>>, rows: bool, colours: Vec<Option<&'static str>> },
 }
 
 /// The text a value icon carries beside its shape: inside a ring, in a
@@ -241,7 +242,13 @@ pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled
                     TrayIconMeasure::Used => bars,
                     TrayIconMeasure::Remaining => bars.into_iter().map(|bar| bar.map(|used| (100.0 - used).max(0.0))).collect(),
                 };
-                Content::Rundown { bars, rows: settings.style == TrayIconStyle::Bar }
+                // Each bar in its provider's colour, unless the icon wears
+                // one colour or none.
+                let colours: Vec<Option<&'static str>> = match settings.colour.as_deref() {
+                    None => enabled.iter().map(|provider| Some(provider.descriptor().colour)).collect(),
+                    Some(_) => bars.iter().map(|_| None).collect(),
+                };
+                Content::Rundown { bars, rows: settings.style == TrayIconStyle::Bar, colours }
             }
         }
     }
@@ -286,12 +293,19 @@ pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3], light_foregro
                 }
             }
         }
-        Content::Rundown { bars, rows } => paint_rundown(&mut canvas, bars, *rows),
+        Content::Rundown { bars, rows, colours } => {
+            let per_bar: Vec<Option<[u8; 3]>> = colours.iter().map(|name| name.and_then(|name| icon_colour_rgb(name, light_foreground))).collect();
+            paint_rundown(&mut canvas, bars, *rows, &per_bar)
+        }
     }
     let rgba = canvas
         .coverage
         .iter()
-        .flat_map(|&cov| [rgb[0], rgb[1], rgb[2], (cov.clamp(0.0, 1.0) * 255.0).round() as u8])
+        .zip(canvas.colours.iter())
+        .flat_map(|(&cov, colour)| {
+            let c = colour.unwrap_or(rgb);
+            [c[0], c[1], c[2], (cov.clamp(0.0, 1.0) * 255.0).round() as u8]
+        })
         .collect();
     Render { size: canvas.size, rgba }
 }
@@ -479,20 +493,18 @@ fn paint_text_bar(canvas: &mut Canvas, percent: f64, text: &str) {
 /// One bar per provider -- columns filling from the bottom, or rows
 /// filling from the left. Small icons hold at most five, the tightest;
 /// a provider with nothing current is a solid dash, not a fainter track.
-fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool) {
+fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool, colours: &[Option<[u8; 3]>]) {
     if bars.is_empty() {
         paint_logo(canvas);
         return;
     }
     let n = canvas.size as f32;
-    let shown: Vec<Option<f64>> = if small(canvas) && bars.len() > 5 {
-        let mut kept: Vec<Option<f64>> = bars.to_vec();
-        kept.sort_by(|a, b| b.unwrap_or(-1.0).total_cmp(&a.unwrap_or(-1.0)));
-        kept.truncate(5);
-        kept
-    } else {
-        bars.to_vec()
-    };
+    let mut paired: Vec<(Option<f64>, Option<[u8; 3]>)> = bars.iter().enumerate().map(|(i, bar)| (*bar, colours.get(i).copied().flatten())).collect();
+    if small(canvas) && paired.len() > 5 {
+        paired.sort_by(|a, b| b.0.unwrap_or(-1.0).total_cmp(&a.0.unwrap_or(-1.0)));
+        paired.truncate(5);
+    }
+    let shown: Vec<Option<f64>> = paired.iter().map(|(bar, _)| *bar).collect();
     let count = shown.len() as f32;
     let (near, far) = (1.0, n - 1.0);
     // Across: whole-pixel slots when small (2 px bar, 1 px gap), ratios
@@ -503,11 +515,14 @@ fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool) {
     for (index, bar) in shown.iter().enumerate() {
         let a0 = (first + slot * index as f32).round();
         let a1 = a0 + width;
+        let colour = paired[index].1;
         let fill = |canvas: &mut Canvas, from: f32, to: f32, alpha: f32| {
             if rows {
                 canvas.rect(from, a0, to, a1, alpha);
+                canvas.colour_rect(from, a0, to, a1, colour);
             } else {
                 canvas.rect(a0, from, a1, to, alpha);
+                canvas.colour_rect(a0, from, a1, to, colour);
             }
         };
         match bar {
@@ -568,6 +583,9 @@ struct Canvas {
     coverage: Vec<f32>,
     /// The alpha of a gauge's unfilled track on this taskbar.
     track: f32,
+    /// A colour of its own per pixel, where a part of the icon (a rundown
+    /// bar) wears one; `None` takes the icon's colour.
+    colours: Vec<Option<[u8; 3]>>,
 }
 
 /// Samples per pixel edge for anti-aliasing.
@@ -575,7 +593,19 @@ const SUPERSAMPLE: usize = 4;
 
 impl Canvas {
     fn new(size: usize, track: f32) -> Self {
-        Self { size, coverage: vec![0.0; size * size], track }
+        Self { size, coverage: vec![0.0; size * size], track, colours: vec![None; size * size] }
+    }
+
+    /// Give a whole-pixel rectangle a colour of its own.
+    fn colour_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, colour: Option<[u8; 3]>) {
+        let Some(colour) = colour else {
+            return;
+        };
+        for y in (y0.max(0.0) as usize)..(y1.min(self.size as f32).ceil() as usize) {
+            for x in (x0.max(0.0) as usize)..(x1.min(self.size as f32).ceil() as usize) {
+                self.colours[y * self.size + x] = Some(colour);
+            }
+        }
     }
 
     /// Wipe a whole-pixel rectangle back to nothing, so a track drawn
@@ -928,7 +958,7 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
         ("ring-cl-3", Content::Value { percent: 3.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CL".into() }),
         ("bar-3", Content::Value { percent: 3.0, style: TrayIconStyle::Bar, mark: Mark::None, label: String::new() }),
         ("number-3", Content::Value { percent: 3.0, style: TrayIconStyle::Number, mark: Mark::None, label: String::new() }),
-        ("rundown-low", Content::Rundown { bars: vec![Some(3.0), Some(0.0), Some(6.0), None], rows: false }),
+        ("rundown-low", Content::Rundown { bars: vec![Some(3.0), Some(0.0), Some(6.0), None], rows: false, colours: Vec::new() }),
         ("textbar-73", Content::Value { percent: 73.0, style: TrayIconStyle::TextBar, mark: Mark::Digits, label: "CL".into() }),
         ("textbar-cl-64", Content::Value { percent: 64.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "CL".into() }),
         ("textbar-opu-30", Content::Value { percent: 30.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "OPU".into() }),
@@ -936,9 +966,10 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
         ("bar-caption-cx-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CX".into() }),
         ("bar-caption-digits-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar, mark: Mark::Digits, label: String::new() }),
         ("number-caption-cl-42", Content::Value { percent: 42.0, style: TrayIconStyle::Number, mark: Mark::Label, label: "CL".into() }),
-        ("rundown-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: false }),
-        ("rundown-8", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0), Some(50.0), None, Some(97.0)], rows: false }),
-        ("rundown-rows-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: true }),
+        ("rundown-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: false, colours: Vec::new() }),
+        ("rundown-8", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0), Some(50.0), None, Some(97.0)], rows: false, colours: Vec::new() }),
+        ("rundown-rows-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: true, colours: Vec::new() }),
+        ("rundown-colours", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: false, colours: vec![Some("orange"), Some("teal"), Some("blue"), Some("violet"), Some("red")] }),
     ];
     for (name, content) in &contents {
         for size in [16usize, 20, 24, 32, 64] {
@@ -947,6 +978,16 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
                 write_composited(dir, &format!("{name}-{size}-{tone}.png"), &render, light)?;
                 written += 1;
             }
+        }
+    }
+    // Every provider's colour on the default style, on both taskbars.
+    for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+        for (tone, light) in [("dark-taskbar", true), ("light-taskbar", false)] {
+            let rgb = icon_colour_rgb(descriptor.colour, light).unwrap_or([255, 255, 255]);
+            let content = Content::Value { percent: 42.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: descriptor.tray_mark.into() };
+            let render = render_tinted(&content, 16, rgb, light);
+            write_composited(dir, &format!("colour-{}-16-{tone}.png", descriptor.key), &render, light)?;
+            written += 1;
         }
     }
     // The alert tints, on both taskbars.
@@ -1068,7 +1109,10 @@ mod tests {
             "a number never carries a second percent"
         );
         let settings = TrayIconSettings { mode: TrayIconMode::Rundown, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), None, Some(80.0)], rows: false });
+        assert_eq!(
+            content(&settings, Some(&data), enabled),
+            Content::Rundown { bars: vec![Some(55.0), None, Some(80.0)], rows: false, colours: vec![Some("orange"), Some("teal"), Some("red")] }
+        );
         assert_eq!(content(&settings, None, enabled), Content::Logo);
         let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("devin".into()), ..Default::default() };
         assert_eq!(content(&settings, Some(&data), enabled), Content::Logo);
@@ -1100,7 +1144,10 @@ mod tests {
         assert_eq!(provider_percent(&monthly, &TrayIconMetric::Monthly), 9.0);
         // A rundown in the bar style is rows; its alert is its worst bar.
         let settings = TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), Some(80.0)], rows: true });
+        assert_eq!(content(&settings, Some(&data), enabled), Content::Rundown { bars: vec![Some(55.0), Some(80.0)], rows: true, colours: vec![Some("orange"), Some("red")] });
+        // One fixed colour for the icon means one colour for every bar.
+        let single = TrayIconSettings { mode: TrayIconMode::Rundown, style: TrayIconStyle::Bar, colour: Some("blue".into()), ..Default::default() };
+        assert!(matches!(content(&single, Some(&data), enabled), Content::Rundown { colours, .. } if colours.iter().all(Option::is_none)));
         assert_eq!(shown_used_percent(&settings, Some(&data), enabled), Some(80.0));
         assert_eq!(shown_used_percent(&TrayIconSettings { mode: TrayIconMode::Logo, ..Default::default() }, Some(&data), enabled), None);
     }
@@ -1178,8 +1225,8 @@ mod tests {
                 value(50.0, TrayIconStyle::TextBar, Mark::Digits, ""),
                 value(50.0, TrayIconStyle::TextBar, Mark::Label, "OPU"),
                 value(50.0, TrayIconStyle::Number, Mark::Label, "CL"),
-                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: false },
-                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: true },
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: false, colours: Vec::new() },
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: true, colours: Vec::new() },
             ] {
                 for light in [true, false] {
                     let render = super::render(&content, size, light);
@@ -1272,20 +1319,42 @@ mod tests {
     }
 
     #[test]
+    fn rundown_bars_wear_their_providers_colours() {
+        let coloured = Content::Rundown { bars: vec![Some(50.0), Some(50.0)], rows: false, colours: vec![Some("orange"), Some("teal")] };
+        let render = render_tinted(&coloured, 32, [255, 255, 255], true);
+        let orange = icon_colour_rgb("orange", true).unwrap();
+        let teal = icon_colour_rgb("teal", true).unwrap();
+        let solid_colours: std::collections::BTreeSet<[u8; 3]> = render
+            .rgba
+            .chunks_exact(4)
+            .filter(|px| px[3] > 200)
+            .map(|px| [px[0], px[1], px[2]])
+            .collect();
+        assert!(solid_colours.contains(&orange) && solid_colours.contains(&teal), "{solid_colours:?}");
+        assert!(!solid_colours.contains(&[255, 255, 255]), "no bar is left in the base colour");
+        // Every provider has a colour the palette knows.
+        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+            assert!(icon_colour_rgb(descriptor.colour, true).is_some(), "{}", descriptor.key);
+        }
+        let distinct: std::collections::BTreeSet<&str> = crate::providers::PROVIDER_DESCRIPTORS.iter().map(|d| d.colour).collect();
+        assert_eq!(distinct.len(), crate::providers::PROVIDER_DESCRIPTORS.len(), "every provider its own colour");
+    }
+
+    #[test]
     fn a_rundown_stays_legible_when_small() {
         let many: Vec<Option<f64>> = vec![Some(3.0), Some(0.0), Some(6.0), None, Some(88.0), Some(50.0), Some(97.0), Some(12.0)];
-        let small = super::render(&Content::Rundown { bars: many.clone(), rows: false }, 16, true);
+        let small = super::render(&Content::Rundown { bars: many.clone(), rows: false, colours: Vec::new() }, 16, true);
         // Five two-pixel bars with one-pixel gaps: fourteen lit columns at most, never a hairline.
         let (min, max) = lit_columns(&small);
         assert!(max - min <= 14, "{min}..{max}");
         // A provider with nothing to read is a solid dash, not a ghost.
-        let missing = super::render(&Content::Rundown { bars: vec![None, Some(0.0)], rows: false }, 16, true);
+        let missing = super::render(&Content::Rundown { bars: vec![None, Some(0.0)], rows: false, colours: Vec::new() }, 16, true);
         assert!(solid(&missing) >= 2, "the dash is solid: {}", solid(&missing));
         // 3 % and 0 % differ; the whole set differs at 100 %.
-        let low = super::render(&Content::Rundown { bars: vec![Some(3.0), Some(0.0)], rows: false }, 16, true);
-        let none = super::render(&Content::Rundown { bars: vec![Some(0.0), Some(0.0)], rows: false }, 16, true);
+        let low = super::render(&Content::Rundown { bars: vec![Some(3.0), Some(0.0)], rows: false, colours: Vec::new() }, 16, true);
+        let none = super::render(&Content::Rundown { bars: vec![Some(0.0), Some(0.0)], rows: false, colours: Vec::new() }, 16, true);
         assert_ne!(low.rgba, none.rgba);
-        assert!(lit(&super::render(&Content::Rundown { bars: many, rows: false }, 32, true)) > 0);
+        assert!(lit(&super::render(&Content::Rundown { bars: many, rows: false, colours: Vec::new() }, 32, true)) > 0);
     }
 
     #[test]

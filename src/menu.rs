@@ -87,7 +87,8 @@ pub enum TrayIconChange {
     Metric(TrayIconMetric),
     /// The n-th per-model cap the icon's provider reports.
     ScopedWindow(usize),
-    /// A named colour from the painter's palette; `None` is monotone.
+    /// A colour: `None` is the provider's own, `Some("monotone")` the
+    /// taskbar tone, any palette name a fixed colour.
     Colour(Option<&'static str>),
     Measure(TrayIconMeasure),
     Style(TrayIconStyle),
@@ -131,8 +132,9 @@ impl TrayIconChange {
             CMD_TRAY_METRIC_CREDITS => Self::Metric(TrayIconMetric::Credits),
             id if (CMD_TRAY_SCOPED_FIRST..=CMD_TRAY_SCOPED_LAST).contains(&id) => Self::ScopedWindow((id - CMD_TRAY_SCOPED_FIRST) as usize),
             CMD_TRAY_COLOUR_FIRST => Self::Colour(None),
-            id if (CMD_TRAY_COLOUR_FIRST + 1..CMD_TRAY_COLOUR_FIRST + 1 + crate::tray_paint::ICON_COLOURS.len() as u16).contains(&id) => {
-                Self::Colour(Some(crate::tray_paint::ICON_COLOURS[(id - CMD_TRAY_COLOUR_FIRST - 1) as usize].0))
+            id if id == CMD_TRAY_COLOUR_FIRST + 1 => Self::Colour(Some(crate::app_settings::MONOTONE)),
+            id if (CMD_TRAY_COLOUR_FIRST + 2..CMD_TRAY_COLOUR_FIRST + 2 + crate::tray_paint::ICON_COLOURS.len() as u16).contains(&id) => {
+                Self::Colour(Some(crate::tray_paint::ICON_COLOURS[(id - CMD_TRAY_COLOUR_FIRST - 2) as usize].0))
             }
             id => {
                 let index = id.checked_sub(CMD_TRAY_PROVIDER_FIRST)? as usize;
@@ -300,7 +302,8 @@ pub fn colour_label(name: &str) -> &'static str {
         "red" => "Red",
         "violet" => "Violet",
         "pink" => "Pink",
-        _ => "Monotone",
+        crate::app_settings::MONOTONE => "Monotone",
+        _ => "The provider's colour",
     }
 }
 
@@ -549,12 +552,13 @@ fn fill_tray_icon_menu(
     }
     separator(tray);
     submenu(tray, language.text("Colour"), &|colours| {
-        item(colours, checked(icon.colour.is_none()), CMD_TRAY_COLOUR_FIRST, language.text("Monotone"));
+        item(colours, checked(icon.colour.is_none()), CMD_TRAY_COLOUR_FIRST, language.text("The provider's colour"));
+        item(colours, checked(icon.colour.as_deref() == Some(crate::app_settings::MONOTONE)), CMD_TRAY_COLOUR_FIRST + 1, language.text("Monotone"));
         for (index, (name, _)) in crate::tray_paint::ICON_COLOURS.iter().enumerate() {
             item(
                 colours,
                 checked(icon.colour.as_deref() == Some(*name)),
-                CMD_TRAY_COLOUR_FIRST + 1 + index as u16,
+                CMD_TRAY_COLOUR_FIRST + 2 + index as u16,
                 language.text(colour_label(name)),
             );
         }
@@ -646,9 +650,10 @@ mod tests {
 
     #[test]
     fn colours_map_by_place_and_apply() {
-        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST), Some(TrayIconChange::Colour(None)));
-        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST + 1), Some(TrayIconChange::Colour(Some("blue"))));
-        let last = CMD_TRAY_COLOUR_FIRST + crate::tray_paint::ICON_COLOURS.len() as u16;
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST), Some(TrayIconChange::Colour(None)), "the provider's colour");
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST + 1), Some(TrayIconChange::Colour(Some("monotone"))));
+        assert_eq!(TrayIconChange::for_command(CMD_TRAY_COLOUR_FIRST + 2), Some(TrayIconChange::Colour(Some("blue"))));
+        let last = CMD_TRAY_COLOUR_FIRST + 1 + crate::tray_paint::ICON_COLOURS.len() as u16;
         assert_eq!(TrayIconChange::for_command(last), Some(TrayIconChange::Colour(Some("pink"))));
         assert_eq!(TrayIconChange::for_command(last + 1), None);
         let mut icon = TrayIconSettings::default();

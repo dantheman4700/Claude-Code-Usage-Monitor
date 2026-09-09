@@ -428,12 +428,16 @@ pub(crate) fn tray_colour(
     light: bool,
 ) -> [u8; 3] {
     let tone: u8 = if light { 255 } else { 16 };
-    // The chosen colour, when there is one the palette knows.
-    let base = icon
-        .colour
-        .as_deref()
-        .and_then(|name| crate::tray_paint::icon_colour_rgb(name, light))
-        .unwrap_or([tone; 3]);
+    // The icon's colour: the provider's own by default (a fleet icon takes
+    // the tightest provider's), the taskbar tone for "monotone", or a
+    // fixed palette colour.
+    let base = match icon.colour.as_deref() {
+        Some(app_settings::MONOTONE) => [tone; 3],
+        Some(name) => crate::tray_paint::icon_colour_rgb(name, light).unwrap_or([tone; 3]),
+        None => crate::tray_paint::shown_provider(icon, data, enabled)
+            .and_then(|(provider, _)| crate::tray_paint::icon_colour_rgb(provider.descriptor().colour, light))
+            .unwrap_or([tone; 3]),
+    };
     if !icon.alert_colour {
         return base;
     }

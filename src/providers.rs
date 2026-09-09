@@ -38,6 +38,9 @@ pub struct ProviderDescriptor {
     /// Where to get the provider's tool, for the card of a provider that
     /// is not installed yet.
     pub install_url: &'static str,
+    /// The provider's own hue on the tray, by palette name: what says
+    /// "whose" at a glance when several icons sit side by side.
+    pub colour: &'static str,
     /// Every provider is on by default: a provider that is not installed
     /// says so on its own card, and switching one off is the user's call.
     pub default_enabled: bool,
@@ -53,6 +56,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 60,
         tray_mark: "CL",
         install_url: "https://claude.com/claude-code",
+        colour: "orange",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -64,6 +68,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 61,
         tray_mark: "CX",
         install_url: "https://openai.com/codex",
+        colour: "teal",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -75,6 +80,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 62,
         tray_mark: "AG",
         install_url: "https://antigravity.google",
+        colour: "blue",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -86,6 +92,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 63,
         tray_mark: "OC",
         install_url: "https://opencode.ai",
+        colour: "violet",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -97,6 +104,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 64,
         tray_mark: "CU",
         install_url: "https://cursor.com",
+        colour: "pink",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -108,6 +116,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 65,
         tray_mark: "GK",
         install_url: "https://grok.com",
+        colour: "red",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -119,6 +128,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 66,
         tray_mark: "FW",
         install_url: "https://fireworks.ai",
+        colour: "yellow",
         default_enabled: true,
     },
     ProviderDescriptor {
@@ -130,6 +140,7 @@ pub const PROVIDER_DESCRIPTORS: [ProviderDescriptor; 8] = [
         native_menu_command_id: 67,
         tray_mark: "DV",
         install_url: "https://devin.ai",
+        colour: "green",
         default_enabled: true,
     },
 ];
