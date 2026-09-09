@@ -394,7 +394,7 @@ fn sync_tray(hwnd: HWND) {
             app_settings::TrayIconTone::Auto => !taskbar_light,
         };
         let rgb = tray_colour(icon, data.as_ref(), enabled, thresholds, light);
-        let render = crate::tray_paint::render_tinted(&content, size, rgb);
+        let render = crate::tray_paint::render_tinted(&content, size, rgb, light);
         // An icon for one value says that value and nothing else; the
         // logo and a fleet view carry the fleet.
         let tooltip = match content {

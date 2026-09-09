@@ -255,8 +255,8 @@ pub fn style_label(style: TrayIconStyle) -> &'static str {
         TrayIconStyle::Number => "A number",
         TrayIconStyle::Bar => "A bar that fills",
         TrayIconStyle::Ring => "A ring that fills",
-        TrayIconStyle::Column => "A column that fills",
-        TrayIconStyle::Letters => "Letters that fill",
+        TrayIconStyle::Column => "A bar that fills",
+        TrayIconStyle::Letters => "Big text, bar below",
         TrayIconStyle::TextBar => "Big text, bar below",
     }
 }
@@ -271,22 +271,19 @@ pub fn mark_label(mark: TrayIconMark) -> &'static str {
 
 /// Where a style puts its text, for the row's caption.
 pub fn mark_place(style: TrayIconStyle) -> &'static str {
-    match style {
+    match style.effective() {
         TrayIconStyle::Ring => "Inside the ring; two characters fit the smallest icons",
-        TrayIconStyle::Bar => "Above the bar; two characters fit the smallest icons",
-        TrayIconStyle::Column => "Above the column; two characters fit the smallest icons",
         TrayIconStyle::Number => "Above the number; two characters fit the smallest icons",
-        TrayIconStyle::Letters => "Above the letters; two characters fit the smallest icons",
-        TrayIconStyle::TextBar => "What the big text says",
+        TrayIconStyle::TextBar | TrayIconStyle::Letters => "What the big text says",
+        TrayIconStyle::Bar | TrayIconStyle::Column => "Above the bar; two characters fit the smallest icons",
     }
 }
 
 /// The text choices a style offers: a number never carries a second
 /// percent, and the letters never carry themselves again.
 pub fn marks_for(style: TrayIconStyle) -> &'static [TrayIconMark] {
-    match style {
+    match style.effective() {
         TrayIconStyle::Number => &[TrayIconMark::Initials, TrayIconMark::None],
-        TrayIconStyle::Letters => &[TrayIconMark::Digits, TrayIconMark::None],
         TrayIconStyle::TextBar => &[TrayIconMark::Digits, TrayIconMark::Initials],
         _ => &[TrayIconMark::Digits, TrayIconMark::Initials, TrayIconMark::None],
     }
@@ -528,11 +525,9 @@ fn fill_tray_icon_menu(
                 (CMD_TRAY_STYLE_TEXT_BAR, TrayIconStyle::TextBar),
                 (CMD_TRAY_STYLE_RING, TrayIconStyle::Ring),
                 (CMD_TRAY_STYLE_BAR, TrayIconStyle::Bar),
-                (CMD_TRAY_STYLE_COLUMN, TrayIconStyle::Column),
                 (CMD_TRAY_STYLE_NUMBER, TrayIconStyle::Number),
-                (CMD_TRAY_STYLE_LETTERS, TrayIconStyle::Letters),
             ] {
-                item(style_menu, checked(icon.style == style), id, language.text(style_label(style)));
+                item(style_menu, checked(icon.style.effective() == style), id, language.text(style_label(style)));
             }
         });
         let effective = icon.effective_mark();

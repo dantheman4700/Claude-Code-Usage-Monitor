@@ -83,16 +83,31 @@ pub enum TrayIconStyle {
     /// A horizontal bar that fills from the left.
     Bar,
     Ring,
-    /// A vertical bar that fills from the bottom.
+    /// Retired (council, 2026-09-08): read for older files, drawn as `Bar`.
     Column,
-    /// The icon's label, drawn large, filling from the bottom: the one
-    /// style that says whose value it is at sixteen pixels.
+    /// Retired (council, 2026-09-08): a dim copy of `TextBar` with the
+    /// label. Read for older files, drawn and shown as `TextBar`.
     Letters,
     /// Big text -- the percent or the label -- with a bar filling along
     /// the bottom: what a sixteen-pixel square reads best as, and so the
     /// default.
     #[default]
     TextBar,
+}
+
+impl TrayIconStyle {
+    /// The style as drawn and offered: the retired ones fold into what
+    /// replaced them (`Column` into `Bar`, `Letters` into `TextBar`).
+    pub fn effective(self) -> Self {
+        match self {
+            TrayIconStyle::Column => TrayIconStyle::Bar,
+            TrayIconStyle::Letters => TrayIconStyle::TextBar,
+            other => other,
+        }
+    }
+
+    /// The styles a user can pick, in menu order.
+    pub const OFFERED: [TrayIconStyle; 4] = [TrayIconStyle::TextBar, TrayIconStyle::Ring, TrayIconStyle::Bar, TrayIconStyle::Number];
 }
 
 /// Whether the icon shows what is used or what is left.
@@ -169,13 +184,22 @@ impl TrayIconSettings {
     /// again -- a stale choice saved under another style reads as "nothing"
     /// everywhere, the menu and the page included.
     pub fn effective_mark(&self) -> TrayIconMark {
-        match (self.style, self.mark) {
+        match (self.style.effective(), self.mark) {
             (TrayIconStyle::Number, TrayIconMark::Digits) => TrayIconMark::None,
-            (TrayIconStyle::Letters, TrayIconMark::Initials) => TrayIconMark::None,
             // The text is the icon: it has to say something.
             (TrayIconStyle::TextBar, TrayIconMark::None) => TrayIconMark::Digits,
             (_, mark) => mark,
         }
+    }
+
+    /// Fold a retired style into its replacement, keeping what it meant:
+    /// Letters showed the label, so it becomes text-with-bar showing the
+    /// label; Column becomes the bar.
+    pub fn normalize(&mut self) {
+        if self.style == TrayIconStyle::Letters {
+            self.mark = TrayIconMark::Initials;
+        }
+        self.style = self.style.effective();
     }
 
     /// The label as drawn: the icon's own, cut to what the font has and
@@ -350,6 +374,9 @@ impl SettingsFile {
         self.dashboard_height = valid_dashboard_dimension(self.dashboard_height);
         if self.tray_icons.is_empty() {
             self.tray_icons = default_tray_icons();
+        }
+        for icon in &mut self.tray_icons {
+            icon.normalize();
         }
     }
 
@@ -804,13 +831,14 @@ pub fn save_usage_cache(
 /// made the icons one list and let a value name a per-model cap; 6 added
 /// the Letters style and an icon's own label; 7 added the dashboard's
 /// pinned and hidden lists; 8 added an icon's colour; 9 the text-with-bar
-/// style. An older
+/// style; 10 retired the column and letters styles (read, then folded). An
+/// older
 /// build leaves a newer file alone once it holds a variant it cannot
 /// decode (a column style, a scoped value); until then it reads the file,
 /// and a save from it drops the nested icon fields it does not know. A
 /// downgrade costs those, no more -- which is why every shape change bumps
 /// this: an undecodable file at the build's own version is quarantined.
-pub const SETTINGS_SCHEMA: u32 = 9;
+pub const SETTINGS_SCHEMA: u32 = 10;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -1083,10 +1111,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":10,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":11,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(10));
+        assert_eq!(written["schema_version"], serde_json::json!(11));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -1095,8 +1123,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":10,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(10))));
-        assert!(matches!(decode_settings(r#"{"schema_version":9,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":11,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(11))));
+        assert!(matches!(decode_settings(r#"{"schema_version":10,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -1122,9 +1150,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("headroom-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let settings = dir.join("settings.json");
-        std::fs::write(&settings, r#"{"schema_version":10,"poll_interval_ms":"later"}"#).unwrap();
+        std::fs::write(&settings, r#"{"schema_version":11,"poll_interval_ms":"later"}"#).unwrap();
         assert!(load_settings_from(&settings).is_none());
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"schema_version":10,"poll_interval_ms":"later"}"#);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"schema_version":11,"poll_interval_ms":"later"}"#);
         assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("corrupt")));
         let cache = dir.join("usage-cache.json");
         std::fs::write(&cache, r#"{"schema_version":9,"updated_unix":1,"poll_ok":true,"data":{}}"#).unwrap();
@@ -1218,7 +1246,7 @@ mod tests {
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
         assert_eq!(loaded.tray_icons, settings.tray_icons);
-        assert_eq!(loaded.schema_version, 9);
+        assert_eq!(loaded.schema_version, 10);
         assert!(!written.contains("tray_icon\""), "the old key is not written");
 
         // A file from 3 has one `tray_icon`: it becomes the list's only entry,
@@ -1228,7 +1256,7 @@ mod tests {
         assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
         assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
         assert!(!older.tray_icons[0].alert_colour);
-        assert_eq!(older.schema_version, 9);
+        assert_eq!(older.schema_version, 10);
         assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
         // The short-lived first-plus-extras shape folds into the list too.
@@ -1277,6 +1305,16 @@ mod tests {
         // Nothing changed here: the disk is taken as it is.
         let same = merge_settings(&baseline, &baseline, &disk);
         assert_eq!(settings_json(&same), settings_json(&disk));
+    }
+
+    #[test]
+    fn retired_styles_fold_into_their_replacements() {
+        let mut settings = decode_settings(r#"{"schema_version":9,"tray_icons":[{"style":"letters","mark":"none"},{"style":"column","mark":"digits"},{"style":"ring"}]}"#).ok().unwrap();
+        settings.normalize();
+        let styles: Vec<(TrayIconStyle, TrayIconMark)> = settings.tray_icons.iter().map(|icon| (icon.style, icon.mark)).collect();
+        assert_eq!(styles, vec![(TrayIconStyle::TextBar, TrayIconMark::Initials), (TrayIconStyle::Bar, TrayIconMark::Digits), (TrayIconStyle::Ring, TrayIconMark::Digits)]);
+        assert_eq!(TrayIconStyle::Column.effective(), TrayIconStyle::Bar);
+        assert!(!TrayIconStyle::OFFERED.contains(&TrayIconStyle::Letters));
     }
 
     #[test]

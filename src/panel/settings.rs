@@ -494,7 +494,7 @@ fn ensure_preview(ctx: &egui::Context, index: usize, icon: &TrayIconSettings, sc
     };
     let texture = |light: bool, size: usize, name: String| {
         let rgb = crate::tray::tray_colour(icon, scene.usage, scene.enabled, scene.thresholds, light);
-        let render = crate::tray_paint::render_tinted(&content, size, rgb);
+        let render = crate::tray_paint::render_tinted(&content, size, rgb, light);
         let image = egui::ColorImage::from_rgba_unmultiplied([render.size, render.size], &render.rgba);
         ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
     };
@@ -577,8 +577,8 @@ fn tray_icon_editor(
     if matches!(icon.mode, TrayIconMode::Tightest | TrayIconMode::Provider) {
         setting_separator(ui);
         setting_row(ui, language.text("Style"), language.text("How the value is drawn"), |ui| {
-            Dropdown::from_id_salt(salt("style")).width(260.0).selected_text(language.text(style_label(icon.style))).show_ui(ui, |ui| {
-                for style in [TrayIconStyle::TextBar, TrayIconStyle::Ring, TrayIconStyle::Letters, TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Number] {
+            Dropdown::from_id_salt(salt("style")).width(260.0).selected_text(language.text(style_label(icon.style.effective()))).show_ui(ui, |ui| {
+                for style in TrayIconStyle::OFFERED {
                     changed |= dropdown_selectable_value(ui, &mut icon.style, style, language.text(style_label(style))).changed();
                 }
             });
@@ -596,7 +596,7 @@ fn tray_icon_editor(
                 }
             });
         });
-        if icon.style == TrayIconStyle::Letters || icon.mark == TrayIconMark::Initials {
+        if icon.mark == TrayIconMark::Initials {
             setting_separator(ui);
             let provider = icon_provider(icon, scene.enabled).or_else(|| {
                 crate::tray_paint::shown_provider(icon, scene.usage, scene.enabled).map(|(provider, _)| provider)

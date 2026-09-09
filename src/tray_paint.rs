@@ -251,13 +251,17 @@ pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled
 /// taskbar); otherwise in near-black.
 pub fn render(content: &Content, size: usize, light: bool) -> Render {
     let tone: u8 = if light { 255 } else { 16 };
-    render_tinted(content, size, [tone, tone, tone])
+    render_tinted(content, size, [tone, tone, tone], light)
 }
 
-/// Paint `content` at `size` pixels in one colour: the alert tint, or the
-/// tone `render` picks.
-pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3]) -> Render {
-    let mut canvas = Canvas::new(size.max(8));
+/// Paint `content` at `size` pixels in one colour: the alert tint, a chosen
+/// colour, or the tone `render` picks. `light_foreground` says which
+/// taskbar this sits on (a light foreground means a dark taskbar): the
+/// faint track is tuned per taskbar, because dark ink on a light bar reads
+/// weaker than light ink on a dark one at the same alpha.
+pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3], light_foreground: bool) -> Render {
+    let track = if light_foreground { TRACK_ON_DARK } else { TRACK_ON_LIGHT };
+    let mut canvas = Canvas::new(size.max(8), track);
     match content {
         Content::Logo => paint_logo(&mut canvas),
         Content::Value { percent, style, mark, label } => {
@@ -265,27 +269,20 @@ pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3]) -> Render {
             // as an empty shape with "0" beside it.
             let percent = if percent.is_finite() { *percent } else { 0.0 };
             let text = mark_text(*mark, percent, label);
-            match style {
+            match style.effective() {
                 TrayIconStyle::Ring => paint_ring(&mut canvas, percent, &text),
                 TrayIconStyle::TextBar => {
                     let shown = if text.is_empty() { digits_for(percent) } else { text.clone() };
                     paint_text_bar(&mut canvas, percent, &shown)
                 }
-                TrayIconStyle::Letters => {
-                    // Only a digits mark rides above the letters; the band
-                    // choice follows the mark, never a lookalike label.
-                    let band = if *mark == Mark::Digits { paint_caption(&mut canvas, &text) } else { (0.0, canvas.size as f32) };
-                    paint_letters(&mut canvas, percent, label, band)
-                }
-                TrayIconStyle::Number | TrayIconStyle::Bar | TrayIconStyle::Column => {
-                    // A caption above, when it can be read; the shape takes
-                    // the rest of the square.
+                TrayIconStyle::Number => {
                     let band = paint_caption(&mut canvas, &text);
-                    match style {
-                        TrayIconStyle::Number => paint_number(&mut canvas, percent, band),
-                        TrayIconStyle::Bar => paint_bar(&mut canvas, percent, band),
-                        _ => paint_column(&mut canvas, percent, band),
-                    }
+                    paint_number(&mut canvas, percent, band)
+                }
+                // Bar, and the styles folded into it.
+                _ => {
+                    let band = paint_caption(&mut canvas, &text);
+                    paint_bar(&mut canvas, percent, band)
                 }
             }
         }
@@ -299,9 +296,23 @@ pub fn render_tinted(content: &Content, size: usize, rgb: [u8; 3]) -> Render {
     Render { size: canvas.size, rgba }
 }
 
+/// The faint part of a gauge -- the unfilled track -- on a dark taskbar
+/// and on a light one. Below about 0.4 a track is a ghost; light taskbars
+/// need more because dark ink on light reads weaker at equal alpha.
+/// (Council, 2026-09-08: three families, unanimous.)
+const TRACK_ON_DARK: f32 = 0.42;
+const TRACK_ON_LIGHT: f32 = 0.52;
+/// What "nothing to read" is drawn as: a solid dash, never a fainter track.
+const FRAME: f32 = 1.0;
+
 // ---------------------------------------------------------------------------
 // Layouts
 // ---------------------------------------------------------------------------
+//
+// Every layout follows three rules the council settled: frames and caps are
+// solid; at small sizes every edge sits on a whole pixel; and a fill obeys
+// `fill_len` -- any non-zero value shows at least a pixel, any non-full
+// value leaves at least a pixel -- so 3 % and 97 % never pass for the ends.
 
 /// The gauge the app icon is: a three-quarter ring with a sweep, open at the
 /// bottom, and a hub.
@@ -309,7 +320,7 @@ fn paint_logo(canvas: &mut Canvas) {
     let n = canvas.size as f32;
     let (cx, cy) = (n / 2.0, n / 2.0);
     let (r_out, r_in) = (n * 0.46, n * 0.30);
-    canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, 0.38);
+    canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, canvas.track.max(0.38));
     canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 170.0, 1.0);
     canvas.disc(cx, cy, n * 0.09, 1.0);
 }
@@ -323,26 +334,58 @@ fn mark_text(mark: Mark, percent: f64, label: &str) -> String {
     }
 }
 
+/// How much of a linear gauge of interior length `len` is filled: nothing
+/// at 0, everything at 100, and otherwise at least one pixel shown and one
+/// pixel left.
+fn fill_len(len: f32, fraction: f32) -> f32 {
+    if fraction <= 0.0 {
+        0.0
+    } else if fraction >= 1.0 {
+        len
+    } else {
+        (len * fraction).round().clamp(1.0, (len - 1.0).max(1.0))
+    }
+}
+
+/// Small icons are laid out on whole pixels; big ones can afford ratios.
+fn small(canvas: &Canvas) -> bool {
+    canvas.size < 24
+}
+
 fn paint_ring(canvas: &mut Canvas, percent: f64, text: &str) {
     let n = canvas.size as f32;
     let (cx, cy) = (n / 2.0, n / 2.0);
-    // Thin enough that two letters read inside it at sixteen pixels.
-    let (r_out, r_in) = (n * 0.47, n * 0.35);
+    // Below 20 px a 2.5 px stroke is the thinnest that stays a ring; above,
+    // the ratios that leave room for text inside.
+    let (r_out, r_in) = if canvas.size < 20 { (n / 2.0 - 0.75, n / 2.0 - 3.25) } else { (n * 0.47, n * 0.35) };
     let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-    canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, 0.30);
-    if fraction > 0.0 {
-        canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0 * fraction, 1.0);
+    canvas.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, canvas.track);
+    // The sweep keeps at least a pixel of arc at either end.
+    let r_mid = (r_in + r_out) / 2.0;
+    let pixel_deg = (1.0 / r_mid).to_degrees();
+    let span = if fraction <= 0.0 {
+        0.0
+    } else if fraction >= 1.0 {
+        270.0
+    } else {
+        (270.0 * fraction).clamp(pixel_deg, 270.0 - pixel_deg)
+    };
+    if span > 0.0 {
+        canvas.ring_arc(cx, cy, r_in, r_out, 225.0, span, 1.0);
     }
-    // Inside, when a font cell stays above a pixel: two characters read
-    // from sixteen pixels, three digits need more ring than that. The
-    // text block's corners must stay inside the ring's inner edge, so the
-    // scale is capped by the block's own diagonal.
+    // Solid caps at both ends of the scale, so an empty ring is still a
+    // gauge with a start and an end.
+    for angle in [225.0f32, 495.0] {
+        let (sin, cos) = angle.to_radians().sin_cos();
+        canvas.disc(cx + sin * r_mid, cy - cos * r_mid, (r_out - r_in) / 2.0, FRAME);
+    }
+    // Inside, when a font cell stays a whole pixel; the text block's
+    // corners stay inside the ring's inner edge.
     if !text.is_empty() {
-        let count = text.chars().count();
-        let cells = (4 * count.max(2) - 1) as f32;
+        let cells = text_cells(text);
         let corner = ((cells / 2.0).powi(2) + 2.5_f32.powi(2)).sqrt();
-        let inner = 2.0 * r_in * 0.85;
-        let scale = fit_scale(inner, inner * 0.72, count).min(r_in / corner);
+        let inner = 2.0 * r_in * 0.9;
+        let scale = fit_scale(inner, inner * 0.8, cells).min(r_in / corner);
         if scale >= MARK_MIN_SCALE {
             canvas.text(text, cx, cy, scale, 1.0);
         }
@@ -364,67 +407,50 @@ fn snap_text_scale(scale: f32) -> f32 {
     if snapped >= 1.0 { snapped } else { scale }
 }
 
-/// The caption a bar, column or number carries: the mark's text in a band
-/// across the top, when a font cell would stay above a pixel -- which two
-/// characters manage at sixteen pixels. Returns the vertical band left
-/// for the shape.
+/// The caption a bar or number carries: the mark's text in a band across
+/// the top, when a font cell stays a whole pixel. Returns the vertical
+/// band left for the shape.
 fn paint_caption(canvas: &mut Canvas, text: &str) -> (f32, f32) {
     let n = canvas.size as f32;
     let whole = (0.0, n);
     if text.is_empty() {
         return whole;
     }
-    let scale = fit_scale(n * 0.92, n * 0.38, text.chars().count());
+    let scale = fit_scale(n * 0.92, n * 0.38, text_cells(text));
     if scale < MARK_MIN_SCALE {
         return whole;
     }
-    // The caption's true height after the same snapping text applies.
     let height = 5.0 * snap_text_scale(scale);
     let band_top = (height + 1.0).min(n * 0.5);
     canvas.text(text, n / 2.0, band_top / 2.0, scale, 1.0);
     (band_top, n)
 }
 
-/// A horizontal bar across the middle of `band`, filling from the left.
-/// Under a caption the bar takes a third of what is left, never less than
-/// three pixels: a two-pixel bar was the unreadable case.
-fn paint_bar(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
-    let n = canvas.size as f32;
-    let (x0, x1) = (n * 0.06, n * 0.94);
-    let mid = (band.0 + band.1) / 2.0;
-    let mut half = ((band.1 - band.0) * 0.17).clamp(1.5, n * 0.16);
-    if band.0 > 0.0 {
-        half = half.max(((band.1 - band.0) * 0.20).min(n * 0.16)).max(1.5);
+/// A framed gauge box: solid one-pixel frame, the interior a track, the
+/// fill from the left. `x0..x1` and `y0..y1` are whole-pixel bounds.
+fn paint_gauge_box(canvas: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, fraction: f32) {
+    canvas.rect(x0, y0, x1, y1, FRAME);
+    let (ix0, iy0, ix1, iy1) = (x0 + 1.0, y0 + 1.0, x1 - 1.0, y1 - 1.0);
+    if ix1 <= ix0 || iy1 <= iy0 {
+        return;
     }
-    let (y0, y1) = (mid - half, mid + half);
-    let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-    // Track, then the fill from the left.
-    canvas.rect(x0, y0, x1, y1, 0.28);
-    let edge = (n * 0.06).max(1.0).min(half);
-    canvas.rect(x0, y0, x1, y0 + edge, 0.9);
-    canvas.rect(x0, y1 - edge, x1, y1, 0.9);
-    canvas.rect(x0, y0, x0 + edge, y1, 0.9);
-    canvas.rect(x1 - edge, y0, x1, y1, 0.9);
-    if fraction > 0.0 {
-        canvas.rect(x0, y0, x0 + (x1 - x0) * fraction, y1, 1.0);
+    canvas.clear(ix0, iy0, ix1, iy1);
+    canvas.rect(ix0, iy0, ix1, iy1, canvas.track);
+    let fill = fill_len(ix1 - ix0, fraction);
+    if fill > 0.0 {
+        canvas.rect(ix0, iy0, ix0 + fill, iy1, 1.0);
     }
 }
 
-/// The bar stood on end within `band`: fills from the bottom.
-fn paint_column(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
+/// A horizontal bar across the middle of `band`, filling from the left.
+fn paint_bar(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
     let n = canvas.size as f32;
-    let (x0, x1) = (n * 0.32, n * 0.68);
-    let (y0, y1) = (band.0 + n * 0.06, band.1 - n * 0.06);
     let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-    canvas.rect(x0, y0, x1, y1, 0.28);
-    let edge = (n * 0.06).max(1.0);
-    canvas.rect(x0, y0, x1, y0 + edge, 0.9);
-    canvas.rect(x0, y1 - edge, x1, y1, 0.9);
-    canvas.rect(x0, y0, x0 + edge, y1, 0.9);
-    canvas.rect(x1 - edge, y0, x1, y1, 0.9);
-    if fraction > 0.0 {
-        canvas.rect(x0, y1 - (y1 - y0) * fraction, x1, y1, 1.0);
-    }
+    let mid = (band.0 + band.1) / 2.0;
+    let height = if small(canvas) { 6.0 } else { (n * 0.34).round().max(6.0) };
+    let y0 = (mid - height / 2.0).round().max(band.0.ceil());
+    let y1 = (y0 + height).min(n);
+    paint_gauge_box(canvas, 1.0, y0, n - 1.0, y1, fraction);
 }
 
 /// The whole percent, as large as `band` allows -- the full height when a
@@ -434,69 +460,49 @@ fn paint_number(canvas: &mut Canvas, percent: f64, band: (f32, f32)) {
     let text = digits_for(percent);
     let height = band.1 - band.0;
     let headroom = if band.0 > 0.0 { 0.94 } else { 0.80 };
-    let scale = fit_scale(n * 0.92, height * headroom, text.len());
+    let scale = fit_scale(n * 0.96, height * headroom, text_cells(&text));
     canvas.text(&text, n / 2.0, (band.0 + band.1) / 2.0, scale, 1.0);
 }
 
-/// Big text over a bar: the text takes the top of the square as large as
-/// it fits, snapped; the bar along the bottom fills from the left. The
-/// most a sixteen-pixel square can say at a glance.
+/// Big text over a framed gauge along the bottom: the most a small square
+/// can say at a glance. The text takes what the gauge leaves, snapped.
 fn paint_text_bar(canvas: &mut Canvas, percent: f64, text: &str) {
     let n = canvas.size as f32;
-    let bar = (n * 0.19).round().max(3.0);
-    let gap = 1.0;
-    let text_area = n - bar - gap;
-    let scale = fit_scale(n * 0.96, text_area * 0.92, text.chars().count());
+    let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
+    let gauge = if small(canvas) { 4.0 } else { (n * 0.22).round().max(4.0) };
+    let text_area = n - gauge - 1.0;
+    let scale = fit_scale(n * 0.96, text_area * 0.92, text_cells(text));
     canvas.text(text, n / 2.0, (text_area / 2.0).round(), scale, 1.0);
-    let (y0, y1) = (n - bar, n);
-    let (x0, x1) = (0.5, n - 0.5);
-    canvas.rect(x0, y0, x1, y1, 0.30);
-    let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-    if fraction > 0.0 {
-        canvas.rect(x0, y0, x0 + (x1 - x0) * fraction, y1, 1.0);
-    }
+    paint_gauge_box(canvas, 1.0, n - gauge, n - 1.0, n, fraction);
 }
 
-/// The label, as large as its band allows, filling from the bottom with
-/// the percentage: dim letters, solid up to the line. A digits mark rides
-/// above as a caption (painted by the caller), so the letters can also
-/// say how much.
-fn paint_letters(canvas: &mut Canvas, percent: f64, label: &str, band: (f32, f32)) {
-    let n = canvas.size as f32;
-    let letters = if label.is_empty() { digits_for(percent) } else { label.to_string() };
-    let height = band.1 - band.0;
-    let scale = fit_scale(n * 0.92, height * 0.80, letters.chars().count());
-    let (cx, cy) = (n / 2.0, (band.0 + band.1) / 2.0);
-    canvas.text(&letters, cx, cy, scale, 0.30);
-    let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-    if fraction > 0.0 {
-        // The fill line comes from the same snapped geometry the letters
-        // are drawn with, or the fill sits at the wrong height.
-        let drawn = snap_text_scale(scale);
-        let bottom = ((cy - 2.5 * drawn).round() + 5.0 * drawn).max(cy);
-        let line = bottom - 5.0 * drawn * fraction;
-        canvas.text_below(&letters, cx, cy, scale, 1.0, line);
-    }
-}
-
-/// One thin bar per provider -- columns filling from the bottom, or rows
-/// filling from the left; a provider with nothing current is an outline.
+/// One bar per provider -- columns filling from the bottom, or rows
+/// filling from the left. Small icons hold at most five, the tightest;
+/// a provider with nothing current is a solid dash, not a fainter track.
 fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool) {
     if bars.is_empty() {
         paint_logo(canvas);
         return;
     }
     let n = canvas.size as f32;
-    let count = bars.len() as f32;
-    let (near, far) = if rows { (n * 0.08, n * 0.92) } else { (n * 0.10, n * 0.92) };
-    let span = n * 0.90;
-    let first = (n - span) / 2.0;
-    let slot = span / count;
-    let width = (slot * 0.62).max(1.0);
-    for (index, bar) in bars.iter().enumerate() {
-        let a0 = first + slot * index as f32 + (slot - width) / 2.0;
+    let shown: Vec<Option<f64>> = if small(canvas) && bars.len() > 5 {
+        let mut kept: Vec<Option<f64>> = bars.to_vec();
+        kept.sort_by(|a, b| b.unwrap_or(-1.0).total_cmp(&a.unwrap_or(-1.0)));
+        kept.truncate(5);
+        kept
+    } else {
+        bars.to_vec()
+    };
+    let count = shown.len() as f32;
+    let (near, far) = (1.0, n - 1.0);
+    // Across: whole-pixel slots when small (2 px bar, 1 px gap), ratios
+    // otherwise.
+    let (width, gap) = if small(canvas) { (2.0, 1.0) } else { ((n * 0.9 / count * 0.62).floor().max(2.0), 0.0) };
+    let slot = if small(canvas) { width + gap } else { n * 0.9 / count };
+    let first = ((n - (slot * count - gap)) / 2.0).round();
+    for (index, bar) in shown.iter().enumerate() {
+        let a0 = (first + slot * index as f32).round();
         let a1 = a0 + width;
-        // (a0, a1) is the bar's extent across; (near, far) along.
         let fill = |canvas: &mut Canvas, from: f32, to: f32, alpha: f32| {
             if rows {
                 canvas.rect(from, a0, to, a1, alpha);
@@ -506,18 +512,21 @@ fn paint_rundown(canvas: &mut Canvas, bars: &[Option<f64>], rows: bool) {
         };
         match bar {
             Some(percent) => {
-                fill(canvas, near, far, 0.28);
+                fill(canvas, near, far, canvas.track);
                 let fraction = (percent / 100.0).clamp(0.0, 1.0) as f32;
-                if fraction > 0.0 {
-                    let length = (far - near) * fraction;
+                let length = fill_len(far - near, fraction);
+                if length > 0.0 {
                     if rows {
-                        fill(canvas, near, (near + length).min(far), 1.0);
+                        fill(canvas, near, near + length, 1.0);
                     } else {
-                        fill(canvas, (far - length).max(near), far, 1.0);
+                        fill(canvas, far - length, far, 1.0);
                     }
                 }
             }
-            None => fill(canvas, near, far, 0.16),
+            None => {
+                let mid = ((near + far) / 2.0).round();
+                fill(canvas, mid - 1.0, mid + 1.0, FRAME);
+            }
         }
     }
 }
@@ -528,11 +537,24 @@ fn digits_for(percent: f64) -> String {
     value.to_string()
 }
 
-/// The glyph scale (pixels per font cell) so `digits` digits with one-cell
-/// gaps fit in `width` by `height` pixels. A lone digit is sized like one
-/// digit of a pair rather than blown up to the full width.
-fn fit_scale(width: f32, height: f32, digits: usize) -> f32 {
-    let cells = (4 * digits.max(2)).saturating_sub(1) as f32;
+/// The width of `text` in font cells, gaps included: a narrow "1" is one
+/// cell, every other glyph three. A lone character is sized like a pair
+/// rather than blown up to the full width.
+fn text_cells(text: &str) -> f32 {
+    let mut cells = 0.0;
+    let mut glyphs = 0;
+    for c in text.chars() {
+        if glyph(c).is_some() {
+            cells += glyph_width(c) as f32;
+            glyphs += 1;
+        }
+    }
+    (cells + (glyphs.max(1) - 1) as f32).max(7.0)
+}
+
+/// The glyph scale (pixels per font cell) so `cells` cells fit in `width`
+/// by `height` pixels.
+fn fit_scale(width: f32, height: f32, cells: f32) -> f32 {
     (width / cells).min(height / 5.0).max(0.5)
 }
 
@@ -544,14 +566,26 @@ fn fit_scale(width: f32, height: f32, digits: usize) -> f32 {
 struct Canvas {
     size: usize,
     coverage: Vec<f32>,
+    /// The alpha of a gauge's unfilled track on this taskbar.
+    track: f32,
 }
 
 /// Samples per pixel edge for anti-aliasing.
 const SUPERSAMPLE: usize = 4;
 
 impl Canvas {
-    fn new(size: usize) -> Self {
-        Self { size, coverage: vec![0.0; size * size] }
+    fn new(size: usize, track: f32) -> Self {
+        Self { size, coverage: vec![0.0; size * size], track }
+    }
+
+    /// Wipe a whole-pixel rectangle back to nothing, so a track drawn
+    /// inside a frame does not stack on the frame's anti-aliasing.
+    fn clear(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        for y in (y0.max(0.0) as usize)..(y1.min(self.size as f32) as usize) {
+            for x in (x0.max(0.0) as usize)..(x1.min(self.size as f32) as usize) {
+                self.coverage[y * self.size + x] = 0.0;
+            }
+        }
     }
 
     /// Paint everything `inside` says is covered, at `alpha`, over what is there.
@@ -616,12 +650,23 @@ impl Canvas {
     /// whole ones, so a stroke is a crisp pixel instead of two grey ones.
     /// Above three pixels a cell, the eye stops caring and layout wins.
     fn text_below(&mut self, text: &str, cx: f32, cy: f32, scale: f32, alpha: f32, y_from: f32) {
-        let glyphs: Vec<&'static [u8; 5]> = text.chars().filter_map(glyph).collect();
+        // Each glyph with the cell it starts at: a narrow "1" advances one
+        // cell, the rest three, with a one-cell gap between.
+        let mut glyphs: Vec<(&'static [u8; 5], usize, usize)> = Vec::new();
+        let mut cursor = 0usize;
+        for c in text.chars() {
+            if let Some(bits) = glyph(c) {
+                let width = glyph_width(c);
+                glyphs.push((bits, cursor, width));
+                cursor += width + 1;
+            }
+        }
         if glyphs.is_empty() {
             return;
         }
+        let cells = (cursor - 1) as f32;
         let scale = snap_text_scale(scale);
-        let width = (4 * glyphs.len() - 1) as f32 * scale;
+        let width = cells * scale;
         let height = 5.0 * scale;
         let left = (cx - width / 2.0).round();
         let top = (cy - height / 2.0).round();
@@ -633,13 +678,10 @@ impl Canvas {
             if fx < 0.0 || !(0.0..5.0).contains(&fy) {
                 return false;
             }
-            let (glyph_index, col) = ((fx / 4.0) as usize, (fx % 4.0) as usize);
-            if col >= 3 {
-                return false;
-            }
-            glyphs
-                .get(glyph_index)
-                .is_some_and(|glyph| glyph[fy as usize] & (0b100 >> col) != 0)
+            let cell = fx as usize;
+            glyphs.iter().any(|(bits, start, width)| {
+                cell >= *start && cell < start + width && bits[fy as usize] & (0b100 >> (cell - start)) != 0
+            })
         });
     }
 }
@@ -687,10 +729,20 @@ fn glyph(c: char) -> Option<&'static [u8; 5]> {
         [0b101, 0b101, 0b010, 0b010, 0b010], // Y
         [0b111, 0b001, 0b010, 0b100, 0b111], // Z
     ];
+    // A narrow "1": one cell, the left column of the bits.
+    const ONE: [u8; 5] = [0b100; 5];
+    if c == '1' {
+        return Some(&ONE);
+    }
     if let Some(d) = c.to_digit(10) {
         return Some(&DIGITS[d as usize]);
     }
     c.is_ascii_uppercase().then(|| &LETTERS[(c as u8 - b'A') as usize])
+}
+
+/// Cells across a glyph: the narrow "1" is one, everything else three.
+fn glyph_width(c: char) -> usize {
+    if c == '1' { 1 } else { 3 }
 }
 
 /// The application icon: the gauge in white on a black rounded plate, so
@@ -721,7 +773,7 @@ pub fn write_app_icon_weights(dir: &std::path::Path) -> Result<usize, String> {
 }
 
 fn render_app_icon_with(size: usize, r_out_factor: f32, r_in_factor: f32, hub_factor: f32) -> Render {
-    let mut canvas = Canvas::new(size.max(8));
+    let mut canvas = Canvas::new(size.max(8), 0.38);
     let n = canvas.size as f32;
     let radius = n * 0.22;
     // Plate: a rounded square.
@@ -734,7 +786,7 @@ fn render_app_icon_with(size: usize, r_out_factor: f32, r_in_factor: f32, hub_fa
     let plate: Vec<f32> = canvas.coverage.clone();
     // Glyph: the logo at 64% of the plate, painted as its own coverage so
     // the plate stays black underneath.
-    let mut glyph = Canvas::new(canvas.size);
+    let mut glyph = Canvas::new(canvas.size, 0.38);
     let (cx, cy) = (n / 2.0, n / 2.0);
     let (r_out, r_in) = (n * r_out_factor, n * r_in_factor);
     glyph.ring_arc(cx, cy, r_in, r_out, 225.0, 270.0, 0.38);
@@ -865,23 +917,24 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
         ("number-100", Content::Value { percent: 100.0, style: TrayIconStyle::Number, mark: Mark::None, label: String::new() }),
         ("bar-25", Content::Value { percent: 25.0, style: TrayIconStyle::Bar, mark: Mark::None, label: String::new() }),
         ("bar-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar, mark: Mark::None, label: String::new() }),
-        ("column-25", Content::Value { percent: 25.0, style: TrayIconStyle::Column, mark: Mark::None, label: String::new() }),
-        ("column-80", Content::Value { percent: 80.0, style: TrayIconStyle::Column, mark: Mark::None, label: String::new() }),
         ("ring-33", Content::value(33.0, TrayIconStyle::Ring)),
         ("ring-91", Content::value(91.0, TrayIconStyle::Ring)),
         ("ring-cl-64", Content::Value { percent: 64.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CL".into() }),
         ("ring-cx-12", Content::Value { percent: 12.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CX".into() }),
         ("ring-plain-50", Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::None, label: String::new() }),
+        ("textbar-3", Content::Value { percent: 3.0, style: TrayIconStyle::TextBar, mark: Mark::Digits, label: "CL".into() }),
+        ("textbar-cl-3", Content::Value { percent: 3.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "CL".into() }),
+        ("ring-3", Content::Value { percent: 3.0, style: TrayIconStyle::Ring, mark: Mark::Digits, label: String::new() }),
+        ("ring-cl-3", Content::Value { percent: 3.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CL".into() }),
+        ("bar-3", Content::Value { percent: 3.0, style: TrayIconStyle::Bar, mark: Mark::None, label: String::new() }),
+        ("number-3", Content::Value { percent: 3.0, style: TrayIconStyle::Number, mark: Mark::None, label: String::new() }),
+        ("rundown-low", Content::Rundown { bars: vec![Some(3.0), Some(0.0), Some(6.0), None], rows: false }),
         ("textbar-73", Content::Value { percent: 73.0, style: TrayIconStyle::TextBar, mark: Mark::Digits, label: "CL".into() }),
         ("textbar-cl-64", Content::Value { percent: 64.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "CL".into() }),
         ("textbar-opu-30", Content::Value { percent: 30.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "OPU".into() }),
         ("textbar-100", Content::Value { percent: 100.0, style: TrayIconStyle::TextBar, mark: Mark::Digits, label: String::new() }),
-        ("letters-cl-64", Content::Value { percent: 64.0, style: TrayIconStyle::Letters, mark: Mark::Label, label: "CL".into() }),
-        ("letters-opu-30", Content::Value { percent: 30.0, style: TrayIconStyle::Letters, mark: Mark::Label, label: "OPU".into() }),
-        ("letters-gk-95", Content::Value { percent: 95.0, style: TrayIconStyle::Letters, mark: Mark::Label, label: "GK".into() }),
         ("bar-caption-cx-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CX".into() }),
         ("bar-caption-digits-80", Content::Value { percent: 80.0, style: TrayIconStyle::Bar, mark: Mark::Digits, label: String::new() }),
-        ("column-caption-ag-40", Content::Value { percent: 40.0, style: TrayIconStyle::Column, mark: Mark::Label, label: "AG".into() }),
         ("number-caption-cl-42", Content::Value { percent: 42.0, style: TrayIconStyle::Number, mark: Mark::Label, label: "CL".into() }),
         ("rundown-5", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0)], rows: false }),
         ("rundown-8", Content::Rundown { bars: vec![Some(21.0), Some(64.0), Some(4.0), None, Some(88.0), Some(50.0), None, Some(97.0)], rows: false }),
@@ -900,7 +953,7 @@ pub fn write_previews(dir: &std::path::Path) -> Result<usize, String> {
     for (name, rgb) in [("warning", ALERT_WARNING), ("critical", ALERT_CRITICAL)] {
         for size in [16usize, 24, 32] {
             for (tone, light) in [("dark-taskbar", true), ("light-taskbar", false)] {
-                let render = render_tinted(&Content::value(88.0, TrayIconStyle::Ring), size, rgb[usize::from(!light)]);
+                let render = render_tinted(&Content::value(88.0, TrayIconStyle::Ring), size, rgb[usize::from(!light)], light);
                 write_composited(dir, &format!("ring-{name}-{size}-{tone}.png"), &render, light)?;
                 written += 1;
             }
@@ -1077,178 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn every_layout_paints_inside_the_square_at_every_size() {
-        for size in [16usize, 20, 24, 32, 64] {
-            for content in [
-                Content::Logo,
-                Content::value(100.0, TrayIconStyle::Number),
-                Content::value(50.0, TrayIconStyle::Bar),
-                Content::value(50.0, TrayIconStyle::Column),
-                Content::value(50.0, TrayIconStyle::Ring),
-                Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CL".into() },
-                Content::Value { percent: 50.0, style: TrayIconStyle::Letters, mark: Mark::Label, label: "OPU".into() },
-                Content::Value { percent: 50.0, style: TrayIconStyle::TextBar, mark: Mark::Digits, label: String::new() },
-                Content::Value { percent: 50.0, style: TrayIconStyle::TextBar, mark: Mark::Label, label: "OPU".into() },
-                Content::Value { percent: 50.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CL".into() },
-                Content::Value { percent: 50.0, style: TrayIconStyle::Number, mark: Mark::Digits, label: String::new() },
-                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: false },
-                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: true },
-            ] {
-                let render = super::render(&content, size, true);
-                assert_eq!(render.rgba.len(), size * size * 4);
-                assert!(lit(&render) > 0, "{content:?} at {size} painted nothing");
-                let (min, max) = lit_columns(&render);
-                assert!(min < size && max < size, "{content:?} at {size} spilled");
-            }
-        }
-    }
-
-    #[test]
-    fn bars_columns_and_rings_fill_with_the_percentage() {
-        for style in [TrayIconStyle::Bar, TrayIconStyle::Column, TrayIconStyle::Ring, TrayIconStyle::Letters, TrayIconStyle::TextBar] {
-            let low = solid(&super::render(&Content::Value { percent: 20.0, style, mark: Mark::None, label: "CL".into() }, 32, true));
-            let high = solid(&super::render(&Content::Value { percent: 90.0, style, mark: Mark::None, label: "CL".into() }, 32, true));
-            assert!(high > low, "{style:?}: {high} vs {low}");
-        }
-        for rows in [false, true] {
-            let empty = super::render(&Content::Rundown { bars: vec![Some(0.0), Some(0.0)], rows }, 32, true);
-            let full = super::render(&Content::Rundown { bars: vec![Some(100.0), Some(100.0)], rows }, 32, true);
-            assert!(solid(&full) > solid(&empty));
-        }
-        // A column fills upward: the bottom half is solid before the top.
-        let half = super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Column, mark: Mark::None, label: String::new() }, 32, true);
-        let solid_rows: Vec<usize> = (0..32).filter(|y| (0..32).any(|x| half.rgba[(y * 32 + x) * 4 + 3] > 200)).collect();
-        assert!(solid_rows.iter().filter(|y| **y >= 16).count() > solid_rows.iter().filter(|y| **y < 8).count());
-    }
-
-    #[test]
-    fn letters_fill_and_captions_appear_only_where_they_can_be_read() {
-        let letters = |percent, label: &str, mark| super::render(&Content::Value { percent, style: TrayIconStyle::Letters, mark, label: label.into() }, 16, true);
-        // The letters are there dim at 0 %, solid as the value rises.
-        assert!(lit(&letters(0.0, "CL", Mark::None)) > 0);
-        assert!(solid(&letters(0.0, "CL", Mark::None)) == 0, "nothing solid at zero");
-        assert!(solid(&letters(50.0, "CL", Mark::None)) > 0);
-        assert!(solid(&letters(100.0, "CL", Mark::None)) > solid(&letters(50.0, "CL", Mark::None)));
-        // Three letters still span the square at sixteen pixels.
-        let (min, max) = lit_columns(&letters(100.0, "OPU", Mark::None));
-        assert!(max - min >= 10, "{min}..{max}");
-        // A digits mark rides above the letters and costs them height, and
-        // the fill still rises from the bottom of the letters' own band.
-        assert!(lit(&letters(60.0, "CL", Mark::Digits)) > lit(&letters(60.0, "CL", Mark::None)));
-        let captioned = super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Letters, mark: Mark::Digits, label: "CL".into() }, 32, true);
-        let full = super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Letters, mark: Mark::Digits, label: "CL".into() }, 32, true);
-        assert!(solid(&full) > solid(&captioned));
-        // A label that happens to spell the current percent still gets its
-        // caption: the layout differs from the caption-less render.
-        let coincidence = super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Letters, mark: Mark::Digits, label: "50".into() }, 32, true);
-        assert_ne!(coincidence.rgba, super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Letters, mark: Mark::None, label: "50".into() }, 32, true).rgba);
-        // The fill rises from the bottom: at 50 % nothing solid in the top half.
-        let half = super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Letters, mark: Mark::None, label: "CL".into() }, 32, true);
-        let solid_rows: Vec<usize> = (0..32).filter(|y| (0..32).any(|x| half.rgba[(y * 32 + x) * 4 + 3] > 200)).collect();
-        assert!(solid_rows.iter().all(|y| *y >= 16), "{solid_rows:?}");
-
-        // Captions: two characters read from sixteen pixels; the shape gets
-        // what is left. No text, no band.
-        let band = |size, text: &str| paint_caption(&mut Canvas::new(size), text);
-        assert_eq!(band(16, ""), (0.0, 16.0));
-        let (top, bottom) = band(16, "CL");
-        assert!(top > 5.0 && bottom == 16.0, "{top}..{bottom}");
-        assert!(band(24, "CL").0 > 7.0);
-        assert!(band(32, "OPU").0 > 8.0);
-        assert!(band(32, "80").0 > 8.0);
-        // The bar really moves down under its caption, at sixteen too.
-        let top_quarter_lit = |render: &Render| (0..render.size / 4).any(|y| (0..render.size).any(|x| render.rgba[(y * render.size + x) * 4 + 3] > 64));
-        assert!(!top_quarter_lit(&super::render(&Content::Value { percent: 60.0, style: TrayIconStyle::Bar, mark: Mark::None, label: String::new() }, 16, true)));
-        assert!(top_quarter_lit(&super::render(&Content::Value { percent: 60.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CL".into() }, 16, true)));
-        // A reading that is not a number draws as nothing used, caption intact.
-        let nan = super::render(&Content::Value { percent: f64::NAN, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CL".into() }, 24, true);
-        let zero = super::render(&Content::Value { percent: 0.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CL".into() }, 24, true);
-        assert_eq!(nan.rgba, zero.rgba);
-        let negative = super::render(&Content::value(-5.0, TrayIconStyle::Ring), 24, true);
-        assert_eq!(negative.rgba, super::render(&Content::value(0.0, TrayIconStyle::Ring), 24, true).rgba);
-        // A number style never carries a second percent; letters never
-        // carry themselves again.
-        let mut data = AppUsageData::default();
-        data.insert(ProviderId::Claude, usage(30.0, 55.0));
-        let enabled = ProviderSet::from_enabled([ProviderId::Claude]);
-        let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("claude".into()), style: TrayIconStyle::Number, mark: TrayIconMark::Digits, ..Default::default() };
-        assert!(matches!(content(&settings, Some(&data), enabled), Content::Value { mark: Mark::None, .. }));
-        let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("claude".into()), style: TrayIconStyle::Letters, label: Some("opus".into()), mark: TrayIconMark::Initials, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 55.0, style: TrayIconStyle::Letters, mark: Mark::None, label: "OPU".into() });
-        let settings = TrayIconSettings { mode: TrayIconMode::Provider, provider: Some("claude".into()), style: TrayIconStyle::Bar, mark: TrayIconMark::Initials, ..Default::default() };
-        assert_eq!(content(&settings, Some(&data), enabled), Content::Value { percent: 55.0, style: TrayIconStyle::Bar, mark: Mark::Label, label: "CL".into() });
-    }
-
-    #[test]
-    fn text_with_a_bar_uses_the_whole_square_at_sixteen() {
-        let render = |percent, mark, label: &str| super::render(&Content::Value { percent, style: TrayIconStyle::TextBar, mark, label: label.into() }, 16, true);
-        // The digits span most of the width and the bar sits on the bottom rows.
-        let (min, max) = lit_columns(&render(73.0, Mark::Digits, ""));
-        assert!(max - min >= 12, "{min}..{max}");
-        let full = render(100.0, Mark::Digits, "");
-        let bottom_row_lit = (0..16).filter(|x| full.rgba[(15 * 16 + x) * 4 + 3] > 200).count();
-        assert!(bottom_row_lit >= 14, "a full bar runs the width: {bottom_row_lit}");
-        let empty = render(0.0, Mark::Digits, "");
-        let bottom_row_solid = (0..16).filter(|x| empty.rgba[(15 * 16 + x) * 4 + 3] > 200).count();
-        assert_eq!(bottom_row_solid, 0, "an empty bar is only the track");
-        // A label shows as the text; no mark falls back to the percent.
-        assert_ne!(render(50.0, Mark::Label, "CL").rgba, render(50.0, Mark::Digits, "CL").rgba);
-        assert_eq!(render(50.0, Mark::None, "").rgba, render(50.0, Mark::Digits, "").rgba);
-        let settings = TrayIconSettings { style: TrayIconStyle::TextBar, mark: TrayIconMark::None, ..Default::default() };
-        assert_eq!(settings.effective_mark(), TrayIconMark::Digits);
-        assert_eq!(TrayIconSettings::default().style, TrayIconStyle::TextBar, "the readable one is the default");
-    }
-
-    #[test]
-    fn a_ring_carries_its_mark_only_where_it_can_be_read() {
-        let ring = |size, mark, label: &str| solid(&super::render(&Content::Value { percent: 50.0, style: TrayIconStyle::Ring, mark, label: label.into() }, size, true));
-        for size in [16usize, 20, 24, 32] {
-            assert!(ring(size, Mark::Label, "CL") > ring(size, Mark::None, ""), "two letters read inside a {size} px ring");
-        }
-        assert!(ring(16, Mark::Digits, "") > ring(16, Mark::None, ""), "so do two digits");
-        // The text block stays inside the ring: no solid pixel on the
-        // ring's inner-edge diagonal corner.
-        for size in [16usize, 24, 32] {
-            let n = size as f32;
-            let r_in = n * 0.35;
-            let render = super::render(&Content::Value { percent: 0.0, style: TrayIconStyle::Ring, mark: Mark::Label, label: "CL".into() }, size, true);
-            for (dx, dy) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
-                let x = (n / 2.0 + dx * r_in * 0.72) as usize;
-                let y = (n / 2.0 + dy * r_in * 0.72) as usize;
-                // At 0 % the ring track is faint; anything solid here would
-                // be text spilling into the ring.
-                let alpha = render.rgba[(y * size + x) * 4 + 3];
-                assert!(alpha < 200, "{size}: text touches the ring at {x},{y} ({alpha})");
-            }
-        }
-        assert_eq!(
-            solid(&super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Ring, mark: Mark::Digits, label: String::new() }, 16, true)),
-            solid(&super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Ring, mark: Mark::None, label: String::new() }, 16, true)),
-            "three digits do not fit a 16 px ring"
-        );
-        assert!(
-            solid(&super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Ring, mark: Mark::Digits, label: String::new() }, 24, true))
-                > solid(&super::render(&Content::Value { percent: 100.0, style: TrayIconStyle::Ring, mark: Mark::None, label: String::new() }, 24, true)),
-            "they do at 24 px"
-        );
-        // Every provider's mark is made of letters the font has.        // Every provider's mark is made of letters the font has.
-        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
-            assert!(descriptor.tray_mark.chars().all(|c| glyph(c).is_some()), "{}", descriptor.tray_mark);
-            assert!((1..=2).contains(&descriptor.tray_mark.len()));
-        }
-        let tinted = render_tinted(&Content::Logo, 16, [200, 10, 10]);
-        let px = tinted.rgba.chunks_exact(4).find(|px| px[3] > 200).unwrap();
-        assert_eq!(&px[..3], &[200, 10, 10]);
-    }
-
-    #[test]
-    fn three_digits_fit_at_sixteen_pixels() {
-        let render = super::render(&Content::value(100.0, TrayIconStyle::Number), 16, true);
-        let (min, max) = lit_columns(&render);
-        assert!(max - min >= 10, "three digits should span most of the width: {min}..{max}");
-    }
-
-    #[test]
     fn the_app_icon_is_a_black_plate_with_a_white_glyph() {
         let render = render_app_icon(64);
         let px = |x: usize, y: usize| {
@@ -1274,5 +1155,160 @@ mod tests {
         assert_eq!(sample(&dark), Some(16));
         let word = light.bgra_premultiplied()[light.rgba.chunks_exact(4).position(|px| px[3] == 255).unwrap()];
         assert_eq!(word, 0xFFFF_FFFF);
+    }
+
+    fn value(percent: f64, style: TrayIconStyle, mark: Mark, label: &str) -> Content {
+        Content::Value { percent, style, mark, label: label.into() }
+    }
+
+    fn alpha_at(render: &Render, x: usize, y: usize) -> u8 {
+        render.rgba[(y * render.size + x) * 4 + 3]
+    }
+
+    #[test]
+    fn every_layout_paints_inside_the_square_at_every_size() {
+        for size in [16usize, 20, 24, 32, 64] {
+            for content in [
+                Content::Logo,
+                value(100.0, TrayIconStyle::Number, Mark::None, ""),
+                value(50.0, TrayIconStyle::Bar, Mark::None, ""),
+                value(50.0, TrayIconStyle::Bar, Mark::Label, "CL"),
+                value(50.0, TrayIconStyle::Ring, Mark::Digits, ""),
+                value(50.0, TrayIconStyle::Ring, Mark::Label, "CL"),
+                value(50.0, TrayIconStyle::TextBar, Mark::Digits, ""),
+                value(50.0, TrayIconStyle::TextBar, Mark::Label, "OPU"),
+                value(50.0, TrayIconStyle::Number, Mark::Label, "CL"),
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: false },
+                Content::Rundown { bars: vec![Some(10.0), None, Some(90.0), Some(50.0), Some(5.0), Some(70.0), Some(30.0), Some(99.0)], rows: true },
+            ] {
+                for light in [true, false] {
+                    let render = super::render(&content, size, light);
+                    assert_eq!(render.rgba.len(), size * size * 4);
+                    assert!(lit(&render) > 0, "{content:?} at {size} painted nothing");
+                    let (min, max) = lit_columns(&render);
+                    assert!(min < size && max < size, "{content:?} at {size} spilled");
+                }
+            }
+        }
+    }
+
+    /// The council's rule: at sixteen pixels every style shows a shape at
+    /// zero, tells 3 % from 0 %, tells 97 % from 100 %, and its frame is
+    /// solid on both taskbars.
+    #[test]
+    fn every_style_reads_at_the_ends_at_sixteen_pixels() {
+        let styles = [
+            (TrayIconStyle::TextBar, Mark::Digits, ""),
+            (TrayIconStyle::TextBar, Mark::Label, "CL"),
+            (TrayIconStyle::Bar, Mark::None, ""),
+            (TrayIconStyle::Bar, Mark::Label, "CL"),
+            (TrayIconStyle::Ring, Mark::None, ""),
+            (TrayIconStyle::Ring, Mark::Label, "CL"),
+        ];
+        for (style, mark, label) in styles {
+            for light in [true, false] {
+                let at = |percent| super::render(&value(percent, style, mark, label), 16, light);
+                assert!(solid(&at(0.0)) >= 4, "{style:?}/{mark:?}: an empty gauge still has solid frame or caps");
+                assert_ne!(at(0.0).rgba, at(3.0).rgba, "{style:?}/{mark:?}: 3 % must differ from 0 %");
+                assert_ne!(at(97.0).rgba, at(100.0).rgba, "{style:?}/{mark:?}: 97 % must differ from 100 %");
+                assert!(solid(&at(100.0)) > solid(&at(3.0)), "{style:?}/{mark:?}: full has more solid than nearly empty");
+            }
+        }
+        // The track is visible: on both taskbars an unfilled bar's interior is
+        // clearly above the ghost level the old painter used.
+        let empty_dark = super::render(&value(0.0, TrayIconStyle::Bar, Mark::None, ""), 16, true);
+        let empty_light = super::render(&value(0.0, TrayIconStyle::Bar, Mark::None, ""), 16, false);
+        assert!(alpha_at(&empty_dark, 8, 8) >= 100, "track on a dark taskbar: {}", alpha_at(&empty_dark, 8, 8));
+        assert!(alpha_at(&empty_light, 8, 8) > alpha_at(&empty_dark, 8, 8), "a light taskbar gets the stronger track");
+        // The frame is a whole solid pixel, not two grey ones.
+        assert_eq!(alpha_at(&empty_dark, 8, 5), 255, "top frame row");
+        assert_eq!(alpha_at(&empty_dark, 8, 10), 255, "bottom frame row");
+    }
+
+    #[test]
+    fn text_with_a_bar_uses_the_whole_square_at_sixteen() {
+        let render = |percent, mark, label: &str| super::render(&value(percent, TrayIconStyle::TextBar, mark, label), 16, true);
+        let (min, max) = lit_columns(&render(73.0, Mark::Digits, ""));
+        assert!(max - min >= 12, "{min}..{max}");
+        // The gauge is the bottom four rows: frame, two of fill, frame.
+        let full = render(100.0, Mark::Digits, "");
+        assert!((1..15).all(|x| alpha_at(&full, x, 13) == 255 && alpha_at(&full, x, 14) == 255), "a full gauge is solid inside");
+        let empty = render(0.0, Mark::Digits, "");
+        assert!((2..14).all(|x| alpha_at(&empty, x, 13) < 200), "an empty gauge is only track inside");
+        assert_eq!(alpha_at(&empty, 1, 13), 255, "but its frame is solid");
+        // "100" fits at more than a pixel a cell thanks to the narrow one.
+        let hundred = render(100.0, Mark::Digits, "");
+        let (min, max) = lit_columns(&hundred);
+        assert!(max - min >= 12, "100 spans the square: {min}..{max}");
+        let seventy = render(70.0, Mark::Digits, "");
+        assert!(solid(&hundred) > solid(&seventy) / 2, "three digits are not tiny");
+        // A label shows as the text; no mark falls back to the percent.
+        assert_ne!(render(50.0, Mark::Label, "CL").rgba, render(50.0, Mark::Digits, "CL").rgba);
+        assert_eq!(render(50.0, Mark::None, "").rgba, render(50.0, Mark::Digits, "").rgba);
+        assert_eq!(TrayIconSettings::default().style, TrayIconStyle::TextBar, "the readable one is the default");
+    }
+
+    #[test]
+    fn a_ring_has_caps_a_thick_stroke_and_room_for_its_mark() {
+        let ring = |size, percent, mark, label: &str| super::render(&value(percent, TrayIconStyle::Ring, mark, label), size, true);
+        // Caps: an empty ring still has solid pixels (the two ends).
+        assert!(solid(&ring(16, 0.0, Mark::None, "")) >= 2);
+        // A two-character mark reads at every size; three digits fit from 24.
+        for size in [16usize, 20, 24, 32] {
+            assert!(solid(&ring(size, 50.0, Mark::Label, "CL")) > solid(&ring(size, 50.0, Mark::None, "")), "CL inside a {size} px ring");
+        }
+        assert!(solid(&ring(24, 100.0, Mark::Digits, "")) > solid(&ring(24, 100.0, Mark::None, "")), "100 inside a 24 px ring");
+        // The sweep keeps a pixel at either end: 3 % and 97 % are not the ends.
+        assert_ne!(ring(16, 3.0, Mark::None, "").rgba, ring(16, 0.0, Mark::None, "").rgba);
+        assert_ne!(ring(16, 97.0, Mark::None, "").rgba, ring(16, 100.0, Mark::None, "").rgba);
+        // Every provider's mark is made of letters the font has.
+        for descriptor in crate::providers::PROVIDER_DESCRIPTORS {
+            assert!(descriptor.tray_mark.chars().all(|c| glyph(c).is_some()), "{}", descriptor.tray_mark);
+            assert!((1..=2).contains(&descriptor.tray_mark.len()));
+        }
+        let tinted = render_tinted(&Content::Logo, 16, [200, 10, 10], true);
+        let px = tinted.rgba.chunks_exact(4).find(|px| px[3] > 200).unwrap();
+        assert_eq!(&px[..3], &[200, 10, 10]);
+    }
+
+    #[test]
+    fn a_rundown_stays_legible_when_small() {
+        let many: Vec<Option<f64>> = vec![Some(3.0), Some(0.0), Some(6.0), None, Some(88.0), Some(50.0), Some(97.0), Some(12.0)];
+        let small = super::render(&Content::Rundown { bars: many.clone(), rows: false }, 16, true);
+        // Five two-pixel bars with one-pixel gaps: fourteen lit columns at most, never a hairline.
+        let (min, max) = lit_columns(&small);
+        assert!(max - min <= 14, "{min}..{max}");
+        // A provider with nothing to read is a solid dash, not a ghost.
+        let missing = super::render(&Content::Rundown { bars: vec![None, Some(0.0)], rows: false }, 16, true);
+        assert!(solid(&missing) >= 2, "the dash is solid: {}", solid(&missing));
+        // 3 % and 0 % differ; the whole set differs at 100 %.
+        let low = super::render(&Content::Rundown { bars: vec![Some(3.0), Some(0.0)], rows: false }, 16, true);
+        let none = super::render(&Content::Rundown { bars: vec![Some(0.0), Some(0.0)], rows: false }, 16, true);
+        assert_ne!(low.rgba, none.rgba);
+        assert!(lit(&super::render(&Content::Rundown { bars: many, rows: false }, 32, true)) > 0);
+    }
+
+    #[test]
+    fn captions_appear_only_where_they_can_be_read_and_the_narrow_one_is_narrow() {
+        let band = |size, text: &str| paint_caption(&mut Canvas::new(size, 0.42), text);
+        assert_eq!(band(16, ""), (0.0, 16.0));
+        let (top, bottom) = band(16, "CL");
+        assert!(top > 5.0 && bottom == 16.0, "{top}..{bottom}");
+        assert!(band(32, "OPU").0 > 8.0);
+        assert_eq!(text_cells("100"), 9.0, "1 + gap + 3 + gap + 3");
+        assert_eq!(text_cells("CL"), 7.0);
+        assert_eq!(text_cells("7"), 7.0, "a lone character is sized like a pair");
+        assert_eq!(glyph_width('1'), 1);
+        // The bar really moves down under its caption, at sixteen too.
+        let top_quarter_lit = |render: &Render| (0..render.size / 4).any(|y| (0..render.size).any(|x| alpha_at(render, x, y) > 64));
+        assert!(!top_quarter_lit(&super::render(&value(60.0, TrayIconStyle::Bar, Mark::None, ""), 16, true)));
+        assert!(top_quarter_lit(&super::render(&value(60.0, TrayIconStyle::Bar, Mark::Label, "CL"), 16, true)));
+        // A reading that is not a number draws as nothing used, caption intact.
+        let nan = super::render(&value(f64::NAN, TrayIconStyle::Bar, Mark::Label, "CL"), 24, true);
+        let zero = super::render(&value(0.0, TrayIconStyle::Bar, Mark::Label, "CL"), 24, true);
+        assert_eq!(nan.rgba, zero.rgba);
+        // Retired styles draw as their replacements.
+        assert_eq!(super::render(&value(40.0, TrayIconStyle::Column, Mark::None, ""), 16, true).rgba, super::render(&value(40.0, TrayIconStyle::Bar, Mark::None, ""), 16, true).rgba);
+        assert_eq!(super::render(&value(40.0, TrayIconStyle::Letters, Mark::Label, "CL"), 16, true).rgba, super::render(&value(40.0, TrayIconStyle::TextBar, Mark::Label, "CL"), 16, true).rgba);
     }
 }
