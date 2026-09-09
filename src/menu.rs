@@ -197,7 +197,7 @@ impl TrayIconChange {
             }
             Self::Metric(metric) => icon.metric = metric,
             Self::Measure(measure) => icon.measure = measure,
-            Self::Style(style) => icon.style = style,
+            Self::Style(style) => icon.style = style.effective(),
             Self::Mark(mark) => icon.mark = mark,
             Self::Tone(tone) => icon.tone = tone,
             Self::ToggleAlertColour => icon.alert_colour = !icon.alert_colour,
@@ -596,8 +596,8 @@ mod tests {
     fn every_tray_command_maps_to_one_change_and_back() {
         let mut icon = TrayIconSettings::default();
         assert!(TrayIconChange::for_command(CMD_TRAY_STYLE_COLUMN).unwrap().apply(&mut icon));
-        assert_eq!(icon.style, TrayIconStyle::Column);
-        assert!(!TrayIconChange::for_command(CMD_TRAY_STYLE_COLUMN).unwrap().apply(&mut icon), "same again is no change");
+        assert_eq!(icon.style, TrayIconStyle::Bar, "a retired style lands as its replacement");
+        assert!(!TrayIconChange::for_command(CMD_TRAY_STYLE_BAR).unwrap().apply(&mut icon), "same again is no change");
         // Picking a provider also switches the icon to that provider.
         let grok = ProviderId::ALL.iter().position(|p| *p == ProviderId::Grok).unwrap() as u16;
         assert!(TrayIconChange::for_command(CMD_TRAY_PROVIDER_FIRST + grok).unwrap().apply(&mut icon));
@@ -646,6 +646,38 @@ mod tests {
         assert_eq!(icons[0].metric, TrayIconMetric::Scoped("Fable".into()));
         assert!(!TrayIconChange::ScopedWindow(3).apply_to(&mut icons, 0, enabled, Some(&data)), "no such cap");
         assert_eq!(TrayIconChange::for_command(CMD_TRAY_METRIC_CREDITS), Some(TrayIconChange::Metric(TrayIconMetric::Credits)));
+    }
+
+    #[test]
+    fn every_menu_command_id_is_unique() {
+        let mut ids: Vec<u16> = vec![
+            CMD_OPEN, CMD_REFRESH, CMD_STARTUP, CMD_UPDATES, CMD_EXIT, CMD_SETTINGS,
+            CMD_FREQ_1MIN, CMD_FREQ_5MIN, CMD_FREQ_15MIN, CMD_FREQ_1HOUR,
+            CMD_TRAY_MODE_LOGO, CMD_TRAY_MODE_TIGHTEST, CMD_TRAY_MODE_PROVIDER, CMD_TRAY_MODE_RUNDOWN,
+            CMD_TRAY_STYLE_NUMBER, CMD_TRAY_STYLE_BAR, CMD_TRAY_STYLE_RING, CMD_TRAY_STYLE_COLUMN, CMD_TRAY_STYLE_LETTERS, CMD_TRAY_STYLE_TEXT_BAR,
+            CMD_TRAY_TONE_AUTO, CMD_TRAY_TONE_LIGHT, CMD_TRAY_TONE_DARK,
+            CMD_APPEARANCE_AUTO, CMD_APPEARANCE_DARK, CMD_APPEARANCE_LIGHT,
+            CMD_TRAY_METRIC_TIGHTEST, CMD_TRAY_METRIC_SESSION, CMD_TRAY_METRIC_WEEKLY, CMD_TRAY_METRIC_MONTHLY, CMD_TRAY_METRIC_CREDITS,
+            CMD_TRAY_MEASURE_USED, CMD_TRAY_MEASURE_REMAINING,
+            CMD_TRAY_MARK_DIGITS, CMD_TRAY_MARK_INITIALS, CMD_TRAY_MARK_NONE,
+            CMD_TRAY_ALERT_COLOUR, CMD_TRAY_ADD, CMD_TRAY_REMOVE, CMD_TRAY_ICONS_PAGE,
+        ];
+        ids.extend(PROVIDER_DESCRIPTORS.iter().map(|d| d.native_menu_command_id));
+        ids.extend((0..ProviderId::ALL.len() as u16).map(|i| CMD_TRAY_PROVIDER_FIRST + i));
+        ids.extend(CMD_TRAY_SCOPED_FIRST..=CMD_TRAY_SCOPED_LAST);
+        ids.extend((0..2 + crate::tray_paint::ICON_COLOURS.len() as u16).map(|i| CMD_TRAY_COLOUR_FIRST + i));
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "a menu command id is used twice");
+        assert!(ids.iter().all(|id| *id != 0), "zero means 'nothing chosen'");
+        // Every id resolves to exactly one kind of command.
+        for id in ids {
+            let kinds = usize::from(TrayIconChange::for_command(id).is_some())
+                + usize::from(appearance_for_command(id).is_some())
+                + usize::from(provider_for_command(id).is_some());
+            assert!(kinds <= 1, "command {id} means more than one thing");
+        }
     }
 
     #[test]

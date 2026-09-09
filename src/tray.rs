@@ -419,8 +419,8 @@ fn sync_tray(hwnd: HWND) {
     }
 }
 
-/// The icon's colour: its tone, or the alert tint when it asks for one and
-/// what it shows has crossed a line.
+/// The icon's colour, resolved by the painter (one place for the tray and
+/// the panel's previews).
 pub(crate) fn tray_colour(
     icon: &app_settings::TrayIconSettings,
     data: Option<&crate::models::AppUsageData>,
@@ -428,29 +428,7 @@ pub(crate) fn tray_colour(
     thresholds: crate::insights::Thresholds,
     light: bool,
 ) -> [u8; 3] {
-    let tone: u8 = if light { 255 } else { 16 };
-    // The icon's colour: the provider's own by default (a fleet icon takes
-    // the tightest provider's), the taskbar tone for "monotone", or a
-    // fixed palette colour.
-    let base = match icon.colour.as_deref() {
-        Some(app_settings::MONOTONE) => [tone; 3],
-        Some(name) => crate::tray_paint::icon_colour_rgb(name, light).unwrap_or([tone; 3]),
-        None => crate::tray_paint::shown_provider(icon, data, enabled)
-            .and_then(|(provider, _)| crate::tray_paint::icon_colour_rgb(crate::tray_paint::provider_colour(provider), light))
-            .unwrap_or([tone; 3]),
-    };
-    if !icon.alert_colour {
-        return base;
-    }
-    let Some(used) = crate::tray_paint::shown_used_percent(icon, data, enabled) else {
-        return base;
-    };
-    let on = usize::from(!light);
-    match crate::insights::Severity::of(used, thresholds) {
-        crate::insights::Severity::Critical => crate::tray_paint::ALERT_CRITICAL[on],
-        crate::insights::Severity::Warning => crate::tray_paint::ALERT_WARNING[on],
-        crate::insights::Severity::Normal => base,
-    }
+    crate::tray_paint::icon_rgb(icon, data, enabled, thresholds, light)
 }
 
 /// The hover text for an icon that shows one value: whose, which window,
@@ -611,7 +589,12 @@ fn short_duration(duration: std::time::Duration) -> String {
 
 /// The panel saved settings; pick up what changed.
 fn reload_settings(hwnd: HWND) {
-    let settings = load_settings();
+    // A file that cannot be read right now (mid-write, or newer than this
+    // build) must not reset the tray to defaults; keep what is running.
+    let Some(settings) = app_settings::load_settings_if_readable() else {
+        diagnose::log("settings not reloaded: the file could not be read right now; keeping the running state");
+        return;
+    };
     // "Where to look" may have changed: apply it, forget the cached distro
     // list, and give every backed-off provider another go.
     poller::configure_credentials(&settings);

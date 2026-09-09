@@ -852,7 +852,9 @@ pub fn save_usage_cache(
 /// the Letters style and an icon's own label; 7 added the dashboard's
 /// pinned and hidden lists; 8 added an icon's colour; 9 the text-with-bar
 /// style; 10 retired the column and letters styles (read, then folded); 11
-/// made an absent colour mean the provider's own. An older
+/// made an absent colour mean the provider's own -- deliberately also for
+/// older files, which had no colour and now gain one (owner ruling
+/// 2026-09-09; "monotone" is one click away). An older
 /// build leaves a newer file alone once it holds a variant it cannot
 /// decode (a column style, a scoped value); until then it reads the file,
 /// and a save from it drops the nested icon fields it does not know. A

@@ -248,7 +248,7 @@ pub fn content(settings: &TrayIconSettings, data: Option<&AppUsageData>, enabled
                     None => enabled.iter().map(|provider| Some(provider_colour(provider))).collect(),
                     Some(_) => bars.iter().map(|_| None).collect(),
                 };
-                Content::Rundown { bars, rows: settings.style == TrayIconStyle::Bar, colours }
+                Content::Rundown { bars, rows: settings.style.effective() == TrayIconStyle::Bar, colours }
             }
         }
     }
@@ -1046,6 +1046,40 @@ pub fn provider_colour(provider: ProviderId) -> &'static str {
         .unwrap_or(provider.descriptor().colour)
 }
 
+/// The one resolver for what colour an icon wears: the alert tint when it
+/// asks for one and what it shows has crossed a line; else the provider's
+/// own colour (a fleet icon takes the tightest provider's), the taskbar
+/// tone for "monotone", or a fixed palette colour. The tray and the
+/// panel's previews both come here.
+pub fn icon_rgb(
+    icon: &TrayIconSettings,
+    data: Option<&AppUsageData>,
+    enabled: ProviderSet,
+    thresholds: crate::insights::Thresholds,
+    light: bool,
+) -> [u8; 3] {
+    let tone: u8 = if light { 255 } else { 16 };
+    let base = match icon.colour.as_deref() {
+        Some(crate::app_settings::MONOTONE) => [tone; 3],
+        Some(name) => icon_colour_rgb(name, light).unwrap_or([tone; 3]),
+        None => shown_provider(icon, data, enabled)
+            .and_then(|(provider, _)| icon_colour_rgb(provider_colour(provider), light))
+            .unwrap_or([tone; 3]),
+    };
+    if !icon.alert_colour {
+        return base;
+    }
+    let Some(used) = shown_used_percent(icon, data, enabled) else {
+        return base;
+    };
+    let on = usize::from(!light);
+    match crate::insights::Severity::of(used, thresholds) {
+        crate::insights::Severity::Critical => ALERT_CRITICAL[on],
+        crate::insights::Severity::Warning => ALERT_WARNING[on],
+        crate::insights::Severity::Normal => base,
+    }
+}
+
 /// The RGB for a named colour, on a dark taskbar (`light` foreground) or a
 /// light one. An unknown name is nobody's colour: monotone.
 pub fn icon_colour_rgb(name: &str, light_foreground: bool) -> Option<[u8; 3]> {
@@ -1294,8 +1328,16 @@ mod tests {
         // clearly above the ghost level the old painter used.
         let empty_dark = super::render(&value(0.0, TrayIconStyle::Bar, Mark::None, ""), 16, true);
         let empty_light = super::render(&value(0.0, TrayIconStyle::Bar, Mark::None, ""), 16, false);
-        assert!(alpha_at(&empty_dark, 8, 8) >= 100, "track on a dark taskbar: {}", alpha_at(&empty_dark, 8, 8));
-        assert!(alpha_at(&empty_light, 8, 8) > alpha_at(&empty_dark, 8, 8), "a light taskbar gets the stronger track");
+        assert_eq!(alpha_at(&empty_dark, 8, 8), (TRACK_ON_DARK * 255.0).round() as u8, "the dark-taskbar track is exactly the constant");
+        assert_eq!(alpha_at(&empty_light, 8, 8), (TRACK_ON_LIGHT * 255.0).round() as u8, "the light-taskbar track is exactly the constant");
+        assert!(TRACK_ON_DARK >= 0.42 && TRACK_ON_LIGHT >= 0.52, "the council's floor: never lower these");
+        // The number style and the rundown tell the ends apart too.
+        let number = |p| super::render(&value(p, TrayIconStyle::Number, Mark::None, ""), 16, true);
+        assert_ne!(number(97.0).rgba, number(100.0).rgba);
+        assert_ne!(number(0.0).rgba, number(3.0).rgba);
+        let rundown = |p| super::render(&Content::Rundown { bars: vec![Some(p), Some(50.0)], rows: false, colours: Vec::new() }, 16, true);
+        assert_ne!(rundown(97.0).rgba, rundown(100.0).rgba);
+        assert_ne!(rundown(0.0).rgba, rundown(3.0).rgba);
         // The frame is a whole solid pixel, not two grey ones.
         assert_eq!(alpha_at(&empty_dark, 8, 5), 255, "top frame row");
         assert_eq!(alpha_at(&empty_dark, 8, 10), 255, "bottom frame row");
