@@ -149,6 +149,8 @@ pub fn run(open_dashboard_on_start: bool) {
             provider_backoff: Default::default(),
             manual_retry_unix: Default::default(),
             last_fetch_all_unix: 0,
+            update_check_failures: 0,
+            last_update_attempt_unix: 0,
             tray_icons: settings.tray_icons.clone(),
             thresholds: thresholds_of(&settings),
             appearance: settings.appearance,
@@ -197,7 +199,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let _ = KillTimer(hwnd, TIMER_DUE);
                     request_poll(hwnd);
                 }
-                TIMER_UPDATE_CHECK => begin_update_check(hwnd, false),
+                TIMER_UPDATE_CHECK => {
+                    // One shot: a Win32 timer repeats until it is killed, and
+                    // this one is re-armed only when a check has finished.
+                    let _ = KillTimer(hwnd, TIMER_UPDATE_CHECK);
+                    begin_update_check(hwnd, false);
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -237,7 +244,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             dashboard::show(hwnd);
             LRESULT(0)
         }
-        WM_APP_UPDATE_CHECK_COMPLETE => LRESULT(0),
+        WM_APP_UPDATE_CHECK_COMPLETE => {
+            // A check has finished, well or badly: arm the next one from
+            // here, never from the timer that started this one.
+            schedule_auto_update_check(hwnd);
+            LRESULT(0)
+        }
         WM_APP_QUIT | WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -750,8 +762,34 @@ fn update_check_interval() -> std::time::Duration {
     std::time::Duration::from_secs(24 * 60 * 60)
 }
 
+/// The shortest wait before an automatic check: a check that is due (or
+/// overdue, or has never happened) runs soon after startup, never at once.
+/// Win32 rounds a tiny interval up to ten milliseconds and repeats it, which
+/// is how a due check once became sixteen thousand GitHub calls an hour.
+const UPDATE_CHECK_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+/// After a failed check: an hour, doubling per failure, never past a day.
+const UPDATE_CHECK_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// No automatic check starts within this of the previous attempt, whatever
+/// the timers do.
+const UPDATE_CHECK_MIN_GAP_SECS: u64 = 60;
+
+/// How long to wait before the next automatic check, from when the last one
+/// succeeded (`None` = never), how many have failed since, and now. Always
+/// between the floor and a day.
+fn next_update_check_delay(last_success_unix: Option<u64>, failures: u32, now_unix: u64) -> std::time::Duration {
+    let interval = update_check_interval();
+    let delay = if failures > 0 {
+        let doubling = failures.saturating_sub(1).min(8);
+        UPDATE_CHECK_BACKOFF_BASE.saturating_mul(1u32 << doubling).min(interval)
+    } else {
+        let elapsed = now_unix.saturating_sub(last_success_unix.unwrap_or(0));
+        std::time::Duration::from_secs(interval.as_secs().saturating_sub(elapsed))
+    };
+    delay.clamp(UPDATE_CHECK_MIN_DELAY, interval)
+}
+
 fn schedule_auto_update_check(hwnd: HWND) {
-    let delay_ms = {
+    let delay = {
         let state = lock_state();
         let Some(s) = state.as_ref() else {
             return;
@@ -759,13 +797,14 @@ fn schedule_auto_update_check(hwnd: HWND) {
         if matches!(s.install_channel, InstallChannel::Store) {
             return;
         }
-        let elapsed = now_unix_secs().saturating_sub(s.last_update_check_unix.unwrap_or(0));
-        let remaining = update_check_interval().as_secs().saturating_sub(elapsed);
-        (remaining.saturating_mul(1_000)).min(u32::MAX as u64) as u32
+        next_update_check_delay(s.last_update_check_unix, s.update_check_failures, now_unix_secs())
     };
+    // A Win32 timer takes milliseconds in a u32 and caps at 0x7FFF_FFFF.
+    let delay_ms = delay.as_millis().min(0x7FFF_FFFF) as u32;
+    diagnose::log(format!("next automatic update check in {}s", delay.as_secs()));
     unsafe {
         let _ = KillTimer(hwnd, TIMER_UPDATE_CHECK);
-        SetTimer(hwnd, TIMER_UPDATE_CHECK, delay_ms.max(1), None);
+        SetTimer(hwnd, TIMER_UPDATE_CHECK, delay_ms, None);
     }
 }
 
@@ -786,6 +825,16 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
             }
             return;
         }
+        // Belt and braces: whatever a timer does, automatic checks never
+        // come closer together than the gap. A person asking is different.
+        let now = now_unix_secs();
+        if !interactive && now.saturating_sub(s.last_update_attempt_unix) < UPDATE_CHECK_MIN_GAP_SECS {
+            diagnose::log("automatic update check skipped: one ran less than a minute ago");
+            drop(state);
+            schedule_auto_update_check(hwnd);
+            return;
+        }
+        s.last_update_attempt_unix = now;
         s.update_status = UpdateStatus::Checking;
         strings
     };
@@ -797,6 +846,7 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                 if let Some(s) = lock_state().as_mut() {
                     s.update_status = UpdateStatus::UpToDate;
                     s.last_update_check_unix = Some(checked_at);
+                    s.update_check_failures = 0;
                 }
                 save_state_settings();
                 if interactive {
@@ -810,6 +860,7 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     if let Some(s) = state.as_mut() {
                         s.update_status = UpdateStatus::Available(release.clone());
                         s.last_update_check_unix = Some(checked_at);
+                        s.update_check_failures = 0;
                     }
                     channel.unwrap_or(InstallChannel::Portable)
                 };
@@ -825,7 +876,9 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
             Err(error) => {
                 if let Some(s) = lock_state().as_mut() {
                     s.update_status = UpdateStatus::Idle;
+                    s.update_check_failures = s.update_check_failures.saturating_add(1);
                 }
+                diagnose::log(format!("update check failed: {error}"));
                 if interactive {
                     show_info_message(hwnd, strings.updates, &error);
                 }
@@ -1025,6 +1078,49 @@ fn current_exe_path() -> Option<String> {
         let mut buffer = vec![0u16; 32_768];
         let len = GetModuleFileNameW(None, &mut buffer) as usize;
         (len > 0).then(|| String::from_utf16_lossy(&buffer[..len]))
+    }
+}
+
+#[cfg(test)]
+mod update_schedule_tests {
+    use super::*;
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    #[test]
+    fn a_due_check_waits_the_floor_never_zero() {
+        // Never checked, or checked long ago: due -- but not at once, and
+        // never the one millisecond Win32 turns into a ten-millisecond loop.
+        assert_eq!(next_update_check_delay(None, 0, 1_000_000), UPDATE_CHECK_MIN_DELAY);
+        assert_eq!(next_update_check_delay(Some(0), 0, 10 * DAY), UPDATE_CHECK_MIN_DELAY);
+        assert_eq!(next_update_check_delay(Some(1_000_000 - DAY), 0, 1_000_000), UPDATE_CHECK_MIN_DELAY);
+        assert!(next_update_check_delay(None, 0, 0).as_millis() >= 10, "above Win32's minimum");
+    }
+
+    #[test]
+    fn a_recent_check_waits_out_the_day() {
+        let now = 1_000_000;
+        assert_eq!(next_update_check_delay(Some(now), 0, now), update_check_interval());
+        assert_eq!(next_update_check_delay(Some(now - 3600), 0, now), std::time::Duration::from_secs(DAY - 3600));
+        // A clock that went backwards still yields at most a day.
+        assert_eq!(next_update_check_delay(Some(now + 999_999), 0, now), update_check_interval());
+    }
+
+    #[test]
+    fn failures_back_off_by_the_hour_and_cap_at_a_day() {
+        let now = 1_000_000;
+        assert_eq!(next_update_check_delay(None, 1, now), std::time::Duration::from_secs(3600));
+        assert_eq!(next_update_check_delay(None, 2, now), std::time::Duration::from_secs(2 * 3600));
+        assert_eq!(next_update_check_delay(None, 3, now), std::time::Duration::from_secs(4 * 3600));
+        assert_eq!(next_update_check_delay(None, 5, now), std::time::Duration::from_secs(16 * 3600));
+        assert_eq!(next_update_check_delay(None, 6, now), update_check_interval());
+        assert_eq!(next_update_check_delay(None, 40, now), update_check_interval());
+        // A failure never shortens the wait below the floor either.
+        for failures in 0..50 {
+            let delay = next_update_check_delay(Some(now), failures, now);
+            assert!(delay >= UPDATE_CHECK_MIN_DELAY && delay <= update_check_interval(), "{failures}: {delay:?}");
+            assert!(delay.as_millis() <= 0x7FFF_FFFF, "fits a Win32 timer");
+        }
     }
 }
 

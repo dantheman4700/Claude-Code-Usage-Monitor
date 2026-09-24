@@ -127,6 +127,12 @@ pub struct AppState {
     /// When each provider was last retried by hand, for the cooldown.
     pub manual_retry_unix: HashMap<ProviderId, u64>,
     pub last_fetch_all_unix: u64,
+    /// Consecutive failed automatic update checks, for the backoff; reset
+    /// by a check that reaches GitHub.
+    pub update_check_failures: u32,
+    /// When an automatic update check last started, so nothing can start
+    /// another within the minute whatever the timers do.
+    pub last_update_attempt_unix: u64,
     /// What the tray icons show: the primary first, then the extras.
     pub tray_icons: Vec<crate::app_settings::TrayIconSettings>,
     /// The warning and critical lines, for icons that tint at them.
