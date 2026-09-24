@@ -338,6 +338,7 @@ pub fn detected_wsl_distros() -> Vec<String> {
 /// Housekeeping at startup: sweep temp files a crash may have left.
 pub fn startup_cleanup() {
     cursor::cleanup_state_copies();
+    crate::app_settings::sweep_temp_files();
 }
 
 /// Drop the cached WSL distro list so a manual retry sees a distro that was
@@ -490,17 +491,36 @@ fn unix_to_system_time(unix_secs: Option<i64>) -> Option<SystemTime> {
 
 /// Parse an ISO 8601 timestamp string into a SystemTime.
 fn parse_iso8601(s: Option<&str>) -> Option<SystemTime> {
-    let s = s?;
-    // Strip timezone offset to get "YYYY-MM-DDTHH:MM:SS" or with fractional seconds
-    // The API returns formats like "2026-03-05T08:00:00.321598+00:00"
-    let datetime_part = s.split('+').next().unwrap_or(s);
-    let datetime_part = datetime_part.split('Z').next().unwrap_or(datetime_part);
-
-    // Try parsing with and without fractional seconds
+    let s = s?.trim();
+    // "2026-03-05T08:00:00.321598+00:00", "...Z", "...-05:00": split the
+    // offset off the time part and apply it, sign and all.
+    let t = s.find('T')?;
+    let (datetime_part, offset_secs) = match s[t..].find(['+', '-', 'Z']) {
+        Some(at) => {
+            let at = t + at;
+            let offset = &s[at..];
+            let secs: i64 = if offset.starts_with('Z') {
+                0
+            } else {
+                let sign = if offset.starts_with('-') { -1 } else { 1 };
+                let digits: String = offset[1..].chars().filter(char::is_ascii_digit).collect();
+                if digits.len() < 2 {
+                    return None;
+                }
+                let hours: i64 = digits[..2].parse().ok()?;
+                let minutes: i64 = digits.get(2..4).and_then(|m| m.parse().ok()).unwrap_or(0);
+                sign * (hours * 3600 + minutes * 60)
+            };
+            (&s[..at], secs)
+        }
+        None => (s, 0),
+    };
     let formats = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"];
     for fmt in &formats {
         if let Ok(secs) = parse_datetime_to_unix(datetime_part, fmt) {
-            return UNIX_EPOCH.checked_add(Duration::from_secs(secs));
+            // Local time minus its offset is UTC.
+            let utc = (secs as i64).checked_sub(offset_secs)?;
+            return UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(utc).ok()?));
         }
     }
     None
@@ -562,6 +582,23 @@ fn parse_datetime_to_unix(s: &str, _fmt: &str) -> Result<u64, ()> {
 
 fn is_leap(y: u64) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod iso_offset_tests {
+    use super::*;
+
+    #[test]
+    fn offsets_are_applied_with_their_sign() {
+        let at = |s: &str| parse_iso8601(Some(s)).map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_secs());
+        let utc = at("2026-03-05T08:00:00Z").unwrap();
+        assert_eq!(at("2026-03-05T08:00:00+00:00"), Some(utc));
+        assert_eq!(at("2026-03-05T08:00:00.321598+00:00"), Some(utc));
+        assert_eq!(at("2026-03-05T10:00:00+02:00"), Some(utc), "local minus a positive offset");
+        assert_eq!(at("2026-03-05T03:00:00-05:00"), Some(utc), "a negative offset parses too");
+        assert_eq!(at("2026-03-05T08:00:00"), Some(utc), "no offset is UTC");
+        assert_eq!(at("not a date"), None);
+    }
 }
 
 #[cfg(test)]

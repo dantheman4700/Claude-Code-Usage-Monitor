@@ -265,7 +265,10 @@ pub fn collect_constraints(
 pub fn burn_rate(series: &[(u64, Reading)], window: Window) -> Option<f64> {
     let value = |reading: &Reading| match window {
         Window::Session => Some(reading.session),
-        Window::Weekly | Window::Monthly => Some(reading.weekly),
+        Window::Weekly => Some(reading.weekly),
+        // History keeps no monthly series; borrowing the weekly one would
+        // project a monthly cap off an unrelated rate.
+        Window::Monthly => None,
         Window::Credits => reading.credits,
     };
 

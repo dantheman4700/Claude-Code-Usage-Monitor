@@ -61,3 +61,11 @@ mod tests {
         });
     }
 }
+
+/// Whether a number field's edit is finished: a drag that just ended, or a
+/// change that was not part of a drag (typing, a click). Saving on every
+/// frame of a drag rewrote the settings file and asked the tray for a new
+/// round each time.
+pub(crate) fn committed(response: &egui::Response) -> bool {
+    response.drag_stopped() || (response.changed() && !response.dragged())
+}

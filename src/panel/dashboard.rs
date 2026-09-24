@@ -172,7 +172,7 @@ impl PanelApp {
     }
 
     fn usage_updated_phrase(&self) -> Option<String> {
-        let cache = crate::app_settings::load_usage_cache_metadata()?;
+        let cache = self.usage_updated_unix?;
         let ago = crate::state::now_unix_secs().saturating_sub(cache);
         Some(if ago < 60 {
             self.language().text("updated just now").to_string()

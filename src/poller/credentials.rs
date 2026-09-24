@@ -144,15 +144,26 @@ pub fn expand_native_path(entry: &str) -> PathBuf {
         }
         expanded = expanded.replace("$HOME", &home.display().to_string());
     }
-    while let Some(start) = expanded.find('%') {
-        let Some(end) = expanded[start + 1..].find('%') else {
+    PathBuf::from(expand_percent_vars(&expanded, |name| std::env::var(name).ok()))
+}
+
+/// `%NAME%` expansion in one pass, left to right: a value is inserted as it
+/// is and never expanded again, so %A% with A=%A% (or a pair that name each
+/// other) cannot spin.
+fn expand_percent_vars(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let Some(end) = rest[start + 1..].find('%') else {
             break;
         };
-        let name = &expanded[start + 1..start + 1 + end];
-        let value = std::env::var(name).unwrap_or_default();
-        expanded = format!("{}{}{}", &expanded[..start], value, &expanded[start + 2 + end..]);
+        out.push_str(&rest[..start]);
+        let name = &rest[start + 1..start + 1 + end];
+        out.push_str(&lookup(name).unwrap_or_default());
+        rest = &rest[start + 2 + end..];
     }
-    PathBuf::from(expanded)
+    out.push_str(rest);
+    out
 }
 
 impl fmt::Display for Source {
@@ -682,6 +693,23 @@ pub fn env_value(content: &str, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn environment_expansion_is_one_pass_and_cannot_spin() {
+        let lookup = |name: &str| match name {
+            "SELF" => Some("%SELF%".to_string()),
+            "A" => Some("%B%".to_string()),
+            "B" => Some("%A%".to_string()),
+            "DIR" => Some("C:\\x".to_string()),
+            _ => None,
+        };
+        // Returns at all (the old loop never did), with the value inserted as is.
+        assert_eq!(expand_percent_vars("%SELF%\\a", lookup), "%SELF%\\a");
+        assert_eq!(expand_percent_vars("%A%", lookup), "%B%");
+        assert_eq!(expand_percent_vars("%DIR%\\auth.json", lookup), "C:\\x\\auth.json");
+        assert_eq!(expand_percent_vars("%NOPE%\\x", lookup), "\\x", "an unset name is empty");
+        assert_eq!(expand_percent_vars("100% sure", lookup), "100% sure", "a lone percent is text");
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;

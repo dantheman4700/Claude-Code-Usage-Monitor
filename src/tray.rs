@@ -299,7 +299,7 @@ fn handle_command(hwnd: HWND, id: u16, icon: usize) {
         menu::CMD_SETTINGS => dashboard::show_settings(hwnd),
         menu::CMD_TRAY_ICONS_PAGE => dashboard::show_tray_icons(hwnd),
         menu::CMD_REFRESH => manual_retry(hwnd, None),
-        menu::CMD_STARTUP => set_startup_enabled(!is_startup_enabled()),
+        menu::CMD_STARTUP => toggle_startup_from_tray(),
         menu::CMD_UPDATES => {
             let (channel, release) = lock_state()
                 .as_ref()
@@ -607,14 +607,28 @@ fn reload_settings(hwnd: HWND) {
         diagnose::log("settings not reloaded: the file could not be read right now; keeping the running state");
         return;
     };
-    // "Where to look" may have changed: apply it, forget the cached distro
-    // list, and give every backed-off provider another go.
-    poller::configure_credentials(&settings);
     crate::tray_paint::configure_provider_colours(&settings);
-    poller::invalidate_wsl_caches();
-    if let Some(s) = lock_state().as_mut() {
-        for entry in s.provider_backoff.values_mut() {
-            entry.next_attempt_unix = 0;
+    // Only a change to where logins are read from, or to which providers
+    // are on, is worth a fresh round with every backoff cleared. A colour,
+    // a threshold or a pin is not: a save is not a way around the backoff.
+    let signature = format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        settings.credential_paths, settings.wsl_distros, settings.wsl_users, settings.enabled_providers()
+    );
+    static LAST_SIGNATURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let locations_changed = {
+        let mut last = LAST_SIGNATURE.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = last.as_deref().is_some_and(|previous| previous != signature);
+        *last = Some(signature);
+        changed
+    };
+    if locations_changed {
+        poller::configure_credentials(&settings);
+        poller::invalidate_wsl_caches();
+        if let Some(s) = lock_state().as_mut() {
+            for entry in s.provider_backoff.values_mut() {
+                entry.next_attempt_unix = 0;
+            }
         }
     }
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
@@ -636,8 +650,9 @@ fn reload_settings(hwnd: HWND) {
     unsafe {
         SetTimer(hwnd, TIMER_POLL, settings.poll_interval_ms, None);
     }
-    let _ = providers_changed;
-    request_poll(hwnd);
+    if locations_changed || providers_changed {
+        request_poll(hwnd);
+    }
     sync_tray(hwnd);
 }
 
@@ -713,8 +728,23 @@ pub fn manual_retry(hwnd: HWND, target: Option<ProviderId>) {
                     false
                 } else {
                     s.last_fetch_all_unix = now;
-                    for entry in s.provider_backoff.values_mut() {
-                        entry.next_attempt_unix = 0;
+                    // Each backed-off provider under its own manual cooldown,
+                    // as a single retry would be: a mashed fetch-all is not a
+                    // way around the credential protection.
+                    let due: Vec<ProviderId> = s
+                        .provider_backoff
+                        .iter()
+                        .filter(|(provider, entry)| {
+                            let last = s.manual_retry_unix.get(provider).copied().unwrap_or(0);
+                            now.saturating_sub(last) >= manual_retry_cooldown_secs(Some(entry))
+                        })
+                        .map(|(provider, _)| *provider)
+                        .collect();
+                    for provider in due {
+                        s.manual_retry_unix.insert(provider, now);
+                        if let Some(entry) = s.provider_backoff.get_mut(&provider) {
+                            entry.next_attempt_unix = 0;
+                        }
                     }
                     true
                 }
@@ -848,7 +878,8 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     s.last_update_check_unix = Some(checked_at);
                     s.update_check_failures = 0;
                 }
-                save_state_settings();
+                save_last_update_check(checked_at);
+                post_update_check_complete(hwnd);
                 if interactive {
                     show_info_message(hwnd, strings.updates, strings.up_to_date);
                 }
@@ -864,7 +895,8 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     }
                     channel.unwrap_or(InstallChannel::Portable)
                 };
-                save_state_settings();
+                save_last_update_check(checked_at);
+                post_update_check_complete(hwnd);
                 if interactive && show_update_prompt(hwnd, strings, &release) {
                     match channel {
                         InstallChannel::Portable => begin_update_apply(hwnd, release),
@@ -879,15 +911,34 @@ fn begin_update_check(hwnd: HWND, interactive: bool) {
                     s.update_check_failures = s.update_check_failures.saturating_add(1);
                 }
                 diagnose::log(format!("update check failed: {error}"));
+                post_update_check_complete(hwnd);
                 if interactive {
                     show_info_message(hwnd, strings.updates, &error);
                 }
             }
         }
-        unsafe {
-            let _ = PostMessageW(hwnd, WM_APP_UPDATE_CHECK_COMPLETE, WPARAM(0), LPARAM(0));
-        }
     });
+}
+
+/// The check is done: the window thread arms the next one. Posted before
+/// any dialog, so an unanswered box never stops automatic checks.
+fn post_update_check_complete(hwnd: HWND) {
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_APP_UPDATE_CHECK_COMPLETE, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Record when the last check ran, and nothing else: rewriting the tray's
+/// whole view of the settings here could undo a change the panel made a
+/// moment ago.
+fn save_last_update_check(checked_at: u64) {
+    let Some(mut persisted) = app_settings::load_settings_if_readable() else {
+        return;
+    };
+    persisted.last_update_check_unix = Some(checked_at);
+    if let Err(error) = save_settings(&persisted) {
+        diagnose::log(format!("unable to save the update-check time: {error}"));
+    }
 }
 
 fn begin_update_apply(hwnd: HWND, release: ReleaseDescriptor) {
@@ -939,27 +990,35 @@ fn begin_winget_update(hwnd: HWND) {
 
 fn show_update_prompt(hwnd: HWND, strings: Strings, release: &ReleaseDescriptor) -> bool {
     let message = strings.update_prompt_now.replace("{version}", &release.latest_version);
-    unsafe {
-        let title = wide_str(strings.update_available);
-        let text = wide_str(&message);
-        MessageBoxW(hwnd, PCWSTR::from_raw(text.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_YESNO | MB_ICONQUESTION)
-            == IDYES
-    }
+    message_box(hwnd, strings.update_available, &message, MB_YESNO | MB_ICONQUESTION) == IDYES
 }
 
 fn show_info_message(hwnd: HWND, title: &str, message: &str) {
-    unsafe {
-        let title = wide_str(title);
-        let text = wide_str(message);
-        let _ = MessageBoxW(hwnd, PCWSTR::from_raw(text.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_OK | MB_ICONINFORMATION);
-    }
+    let _ = message_box(hwnd, title, message, MB_OK | MB_ICONINFORMATION);
 }
 
 fn show_error_message(hwnd: HWND, title: &str, message: &str) {
+    let _ = message_box(hwnd, title, message, MB_OK | MB_ICONERROR);
+}
+
+/// A message box owned by the tray window only when shown from the tray's
+/// own thread. From a worker, an owner on another thread couples the two
+/// threads' input and can stall the tray; there the box has no owner and
+/// comes to the front on its own.
+fn message_box(
+    hwnd: HWND,
+    title: &str,
+    message: &str,
+    style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
+) -> windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_RESULT {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, MB_SETFOREGROUND, MB_TOPMOST};
+    let same_thread = unsafe { GetWindowThreadProcessId(hwnd, None) == GetCurrentThreadId() };
+    let (owner, style) = if same_thread { (hwnd, style) } else { (HWND::default(), style | MB_SETFOREGROUND | MB_TOPMOST) };
     unsafe {
         let title = wide_str(title);
         let text = wide_str(message);
-        let _ = MessageBoxW(hwnd, PCWSTR::from_raw(text.as_ptr()), PCWSTR::from_raw(title.as_ptr()), MB_OK | MB_ICONERROR);
+        MessageBoxW(owner, PCWSTR::from_raw(text.as_ptr()), PCWSTR::from_raw(title.as_ptr()), style)
     }
 }
 
@@ -978,6 +1037,48 @@ fn store_startup_task() -> Option<windows::ApplicationModel::StartupTask> {
         .ok()
 }
 
+/// The Store startup task's state as last read: 0 unknown, 1 off, 2 on.
+/// The tray's menu reads this; the WinRT call behind it runs on a worker.
+static STARTUP_CACHE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether Headroom starts with Windows, without blocking the tray's thread.
+pub fn startup_enabled_cached() -> bool {
+    if !matches!(updater::current_install_channel(), InstallChannel::Store) {
+        return is_startup_enabled();
+    }
+    match STARTUP_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            refresh_startup_cache_async();
+            false
+        }
+        value => value == 2,
+    }
+}
+
+fn refresh_startup_cache_async() {
+    std::thread::spawn(|| {
+        let on = is_startup_enabled();
+        STARTUP_CACHE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// Flip startup from the tray: the Store's request runs on a worker.
+pub fn toggle_startup_from_tray() {
+    let enable = !startup_enabled_cached();
+    if matches!(updater::current_install_channel(), InstallChannel::Store) {
+        STARTUP_CACHE.store(if enable { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(move || {
+            set_startup_enabled(enable);
+            let on = is_startup_enabled();
+            STARTUP_CACHE.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+        });
+    } else {
+        set_startup_enabled(enable);
+    }
+}
+
+/// Blocking: asks the Store for a packaged install. Not for the tray's
+/// window thread -- use `startup_enabled_cached` there.
 pub fn is_startup_enabled() -> bool {
     if matches!(updater::current_install_channel(), InstallChannel::Store) {
         use windows::ApplicationModel::StartupTaskState;

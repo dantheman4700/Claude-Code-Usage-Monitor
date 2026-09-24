@@ -348,7 +348,7 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
         .and_then(ProviderId::from_key)
         .or_else(|| providers.iter().next())
         .and_then(|provider| data.as_ref()?.get(provider).cloned());
-    let startup = crate::tray::is_startup_enabled();
+    let startup = crate::tray::startup_enabled_cached();
 
     unsafe {
         let menu = CreatePopupMenu().ok()?;
@@ -361,7 +361,9 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
             if let Ok(child) = CreatePopupMenu() {
                 fill(child);
                 let wide = wide_str(label);
-                let _ = AppendMenuW(parent, MF_POPUP, child.0 as usize, PCWSTR::from_raw(wide.as_ptr()));
+                if AppendMenuW(parent, MF_POPUP, child.0 as usize, PCWSTR::from_raw(wide.as_ptr())).is_err() {
+                    let _ = DestroyMenu(child);
+                }
             }
         };
         let separator = |menu| {

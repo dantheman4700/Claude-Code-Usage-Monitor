@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{build_agent, credentials, parse_iso8601, wsl, PollError};
+use super::{build_agent, credentials, parse_iso8601, spend_allowed, wsl, PollError};
 use crate::providers::ProviderId;
 use crate::diagnose;
 use crate::models::{CreditsSection, Detail, LimitWindow, ScopedLimit, UsageData, UsageSection};
@@ -261,6 +261,11 @@ fn renew(entry: &GrokEntry) -> Result<Renewed, PollError> {
         diagnose::log("Grok: the store has no refresh token; run `grok login`");
         return Err(PollError::AuthRequired);
     };
+    // The same ration every other refresh runs under: at most one renewal
+    // every ten minutes, whatever the backoff above does.
+    if !spend_allowed("grok-renew") {
+        return Err(PollError::RequestFailed);
+    }
     let agent = build_agent()?;
     let url = format!("{}{TOKEN_ENDPOINT_PATH}", entry.issuer.trim_end_matches('/'));
     let response = agent

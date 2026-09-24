@@ -62,6 +62,10 @@ pub(crate) struct PanelApp {
     pub(crate) settings_tab: super::settings::SettingsTab,
     /// The dashboard's edit mode: pin, order and hide cards.
     pub(crate) customizing: bool,
+    /// The tray that launched this panel is gone; close on the next frame.
+    close_requested: bool,
+    /// When the readings on screen were taken, from the cache last read.
+    pub(crate) usage_updated_unix: Option<u64>,
     /// The settings as last read from or written to the file, so a save can
     /// tell which keys this panel changed and fold them onto whatever the
     /// tray wrote in between.
@@ -198,6 +202,8 @@ impl PanelApp {
             text_edit_active: false,
             settings_tab: Default::default(),
             customizing: false,
+            close_requested: false,
+            usage_updated_unix: crate::app_settings::load_usage_cache_metadata(),
             settings_baseline,
             hwnd,
             dark,
@@ -355,6 +361,13 @@ impl PanelApp {
             return;
         }
         self.last_cache_read = Instant::now();
+        // A panel outlives nothing: if the tray that launched it is gone
+        // (crashed or killed), close, so a restarted tray opens a fresh
+        // panel wired to it instead of focusing an orphan.
+        if self.owner != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(HWND(self.owner as *mut _)) }.as_bool() {
+            crate::diagnose::log("panel closing: its tray window is gone");
+            self.close_requested = true;
+        }
         self.refresh_appearance_from_windows_tick();
         self.reload_settings_if_changed();
         // A stat per second is nothing; a parse per second of a file that
@@ -407,6 +420,7 @@ impl PanelApp {
     }
 
     fn update_usage_cache(&mut self, cache: UsageCache) {
+        self.usage_updated_unix = Some(cache.updated_unix);
         let poll_ok = cache.poll_ok;
         let failures = failures_by_provider(&cache);
         let changed = self.usage.as_ref() != Some(&cache.data) || self.usage_poll_ok != poll_ok || self.failures != failures;
@@ -497,6 +511,9 @@ impl eframe::App for PanelApp {
         }
         self.text_edit_active = ui.ctx().memory(|memory| memory.focused().is_some());
         self.refresh_usage_cache();
+        if self.close_requested {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.refresh_appearance(ui.ctx());
         egui::Frame::new()
             .fill(menu_surface())

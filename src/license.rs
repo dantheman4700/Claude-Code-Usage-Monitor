@@ -56,7 +56,21 @@ pub fn invalidate() {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Whether the trial is over, from the last reading only: never blocks.
+/// The UI thread asks this; `refresh` keeps the reading current from a
+/// worker.
 pub fn is_expired() -> bool {
+    cached() == Some(LicenseState::Expired)
+}
+
+/// Re-read the licence if the last reading is old. Blocks on the Store; call
+/// it from a worker thread.
+pub fn refresh() {
+    let _ = state();
+}
+
+#[allow(dead_code)]
+fn is_expired_blocking() -> bool {
     state() == LicenseState::Expired
 }
 
@@ -119,7 +133,7 @@ fn windows_date_to_system(date: windows::Foundation::DateTime) -> Option<SystemT
     if unix_ticks < 0 {
         return None;
     }
-    Some(std::time::UNIX_EPOCH + Duration::from_nanos(unix_ticks as u64 * 100))
+    std::time::UNIX_EPOCH.checked_add(Duration::from_nanos((unix_ticks as u64).checked_mul(100)?))
 }
 
 #[cfg(test)]

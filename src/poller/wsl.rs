@@ -184,6 +184,10 @@ pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &s
     let Some(output) = run_with_timeout(
         wsl_command(distro, user)
             .arg("--")
+            // Inside the distro too: killing wsl.exe at the Windows-side
+            // timeout would leave the shell running in the distro.
+            .arg("timeout")
+            .arg("4")
             .arg("sh")
             .arg("-lc")
             .arg(script)
@@ -224,6 +228,10 @@ pub(super) fn path_watch_signature(distro: &str, user: Option<&str>, key: &str, 
     let output = run_with_timeout(
         wsl_command(distro, user)
             .arg("--")
+            // Inside the distro too: killing wsl.exe at the Windows-side
+            // timeout would leave the shell running in the distro.
+            .arg("timeout")
+            .arg("4")
             .arg("sh")
             .arg("-lc")
             .arg(script)

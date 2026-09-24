@@ -318,9 +318,12 @@ pub(super) fn codex_usage_from_response(
 
     data.credits = credits.and_then(|credits| {
         let previous = app_settings::load_codex_credits();
+        let before = previous.clone();
         let (state, section) = codex_credits(previous, &credits, details.limit_reached, account_id);
-        if let Err(error) = app_settings::save_codex_credits(&state) {
-            diagnose::log(format!("unable to persist Codex credit baseline: {error}"));
+        if before.as_ref() != Some(&state) {
+            if let Err(error) = app_settings::save_codex_credits(&state) {
+                diagnose::log(format!("unable to persist Codex credit baseline: {error}"));
+            }
         }
         section
     });

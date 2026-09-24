@@ -276,19 +276,19 @@ impl PanelApp {
     fn limits_tab(&mut self, ui: &mut egui::Ui, language: LanguageId, changed: &Cell<bool>) {
         card(ui, None, |_| {}, |ui| {
             setting_row(ui, language.text("Warn at"), language.text("Usage at or above this is shown as a warning"), |ui| {
-                if NumberField::new(&mut self.settings.warn_percent).range(1..=99).speed(1).suffix("%").show(ui, 110.0).changed() {
+                if crate::ui::components::number_field::committed(&NumberField::new(&mut self.settings.warn_percent).range(1..=99).speed(1).suffix("%").show(ui, 110.0)) {
                     changed.set(true);
                 }
             });
             setting_separator(ui);
             setting_row(ui, language.text("Critical at"), language.text("Usage at or above this is shown as critical"), |ui| {
-                if NumberField::new(&mut self.settings.critical_percent).range(2..=100).speed(1).suffix("%").show(ui, 110.0).changed() {
+                if crate::ui::components::number_field::committed(&NumberField::new(&mut self.settings.critical_percent).range(2..=100).speed(1).suffix("%").show(ui, 110.0)) {
                     changed.set(true);
                 }
             });
             setting_separator(ui);
             setting_row(ui, language.text("Keep history for"), language.text("How far back burn rate and the history view can look"), |ui| {
-                if NumberField::new(&mut self.settings.history_retention_days).range(1..=90).speed(1).suffix(" days").show(ui, 110.0).changed() {
+                if crate::ui::components::number_field::committed(&NumberField::new(&mut self.settings.history_retention_days).range(1..=90).speed(1).suffix(" days").show(ui, 110.0)) {
                     changed.set(true);
                 }
             });

@@ -186,7 +186,12 @@ pub(super) fn fetch_antigravity_usage(token: &str) -> Result<UsageData, PollErro
     for base_url in ANTIGRAVITY_ENDPOINTS {
         match fetch_antigravity_usage_from_endpoint(base_url, token) {
             Ok(data) => return Ok(data),
-            Err(PollError::AuthRequired) => auth_error = true,
+            // Every endpoint shares the same sign-in: one rejection is the
+            // answer, not a reason to ask the other two.
+            Err(PollError::AuthRequired) => {
+                auth_error = true;
+                break;
+            }
             Err(error) => last_error = error,
         }
     }

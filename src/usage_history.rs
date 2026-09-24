@@ -21,7 +21,9 @@ pub const DEFAULT_RETENTION_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 /// Hard ceiling on stored samples, so a fast poll interval cannot grow the
 /// file without bound even inside the retention window.
-pub const MAX_SAMPLES: usize = 4_000;
+/// Ninety days at one sample per five minutes, the longest retention the
+/// settings offer.
+pub const MAX_SAMPLES: usize = 26_000;
 
 /// Samples closer together than this are collapsed, keeping the file small
 /// when polling is frequent while staying dense enough to see a trend.

@@ -137,7 +137,9 @@ fn poll_dashboard(credentials: &DashboardCredentials) -> Result<UsageData, PollE
 fn section_from_window(window: &UsageWindow, now: SystemTime) -> UsageSection {
     UsageSection {
         percentage: window.usage_percent.clamp(0.0, 100.0),
-        resets_at: now.checked_add(Duration::from_secs(window.reset_in_sec.max(0) as u64)),
+        // A countdown at or below zero is "renewing about now", which every
+        // response would repeat; it is no renewal time at all.
+        resets_at: (window.reset_in_sec > 0).then(|| now.checked_add(Duration::from_secs(window.reset_in_sec as u64))).flatten(),
     }
 }
 
@@ -318,6 +320,17 @@ fn valid_cookie(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_countdown_at_or_below_zero_is_no_renewal_time() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(section_from_window(&UsageWindow { usage_percent: 40.0, reset_in_sec: 0 }, now).resets_at, None);
+        assert_eq!(section_from_window(&UsageWindow { usage_percent: 40.0, reset_in_sec: -30 }, now).resets_at, None);
+        assert_eq!(
+            section_from_window(&UsageWindow { usage_percent: 40.0, reset_in_sec: 3600 }, now).resets_at,
+            Some(now + Duration::from_secs(3600))
+        );
+    }
+
     use super::*;
 
     #[test]

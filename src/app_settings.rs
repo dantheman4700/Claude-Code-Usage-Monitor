@@ -920,11 +920,15 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = parent.join(format!(".{file_name}.{}-{sequence}.tmp", std::process::id()));
     let json = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    {
+    let written = (|| {
         use std::io::Write;
-        let mut file = std::fs::File::create(&temporary).map_err(|error| error.to_string())?;
-        file.write_all(&json).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&json)?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
     }
     let source = wide_path(&temporary);
     let destination = wide_path(path);
@@ -940,6 +944,22 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
         return Err("Unable to replace the settings file".into());
     }
     Ok(())
+}
+
+/// Remove temp files an interrupted write left in the app's folder. Run by
+/// the instance that holds the single-instance lock, so no temp here is
+/// another live writer's.
+pub fn sweep_temp_files() {
+    let Ok(entries) = std::fs::read_dir(app_data_directory()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn wide_path(path: &Path) -> Vec<u16> {

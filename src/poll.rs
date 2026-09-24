@@ -139,7 +139,12 @@ pub(crate) fn apply_failures(
             });
         // A different kind of failure, or credentials that just changed,
         // starts the ladder over: a fresh sign-in deserves the short step.
-        if entry.error != failure.error || credentials_changed.contains(failure.provider) {
+        // A moved credential file earns an immediate retry (above), but not a
+        // fresh ladder: a file that moves for reasons of its own (Cursor's
+        // whole state database) would otherwise keep a failing provider on
+        // the shortest step forever. A real sign-in succeeds and clears it.
+        let _ = &credentials_changed;
+        if entry.error != failure.error {
             entry.misses = 0;
         }
         entry.misses = entry.misses.saturating_add(1);
@@ -182,6 +187,12 @@ pub(crate) fn next_due_unix(
 fn do_poll_once(send_hwnd: SendHwnd) {
     let hwnd = send_hwnd.to_hwnd();
     let now = now_unix_secs();
+    // The licence is read here, on the worker, so the window thread's gate
+    // in request_poll only ever looks at the cached reading.
+    crate::license::refresh();
+    if crate::license::is_expired() {
+        return;
+    }
 
     let (enabled, backoff, previously_available) = {
         let state = lock_state();
@@ -307,6 +318,23 @@ fn do_poll_once(send_hwnd: SendHwnd) {
     }
 }
 
+/// The least time between two rounds that the scheduler starts on its own.
+/// A renewal time a provider keeps sliding forward, or a backoff that keeps
+/// expiring, can never make rounds closer than this.
+pub(crate) const MIN_EARLY_ROUND_SECS: u64 = 60;
+
+/// How long to wait for the next early round, in milliseconds, or 0 for
+/// none before the regular tick: never under the floor above.
+pub(crate) fn early_delay_ms(due: Option<u64>, now: u64, poll_interval_ms: u32) -> u64 {
+    match due {
+        Some(due) => {
+            let wait = due.saturating_sub(now).max(MIN_EARLY_ROUND_SECS) * 1_000;
+            if wait < u64::from(poll_interval_ms) { wait } else { 0 }
+        }
+        None => 0,
+    }
+}
+
 /// Tell the window thread when to run the next round early. Zero means
 /// nothing is due before the regular tick.
 fn schedule_next(send_hwnd: SendHwnd) {
@@ -316,12 +344,7 @@ fn schedule_next(send_hwnd: SendHwnd) {
         let Some(s) = state.as_ref() else {
             return;
         };
-        match next_due_unix(s.providers, &s.provider_backoff, s.data.as_ref(), now) {
-            Some(due) if (due - now) * 1_000 < u64::from(s.poll_interval_ms) => {
-                ((due - now) * 1_000).max(1_000)
-            }
-            _ => 0,
-        }
+        early_delay_ms(next_due_unix(s.providers, &s.provider_backoff, s.data.as_ref(), now), now, s.poll_interval_ms)
     };
     unsafe {
         let _ = PostMessageW(
@@ -335,6 +358,21 @@ fn schedule_next(send_hwnd: SendHwnd) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn early_rounds_never_come_closer_than_the_floor() {
+        let now = 1_000_000;
+        // A renewal "due now" or a second away still waits the floor.
+        assert_eq!(super::early_delay_ms(Some(now), now, 300_000), super::MIN_EARLY_ROUND_SECS * 1_000);
+        assert_eq!(super::early_delay_ms(Some(now + 1), now, 300_000), super::MIN_EARLY_ROUND_SECS * 1_000);
+        assert_eq!(super::early_delay_ms(Some(now - 50), now, 300_000), super::MIN_EARLY_ROUND_SECS * 1_000);
+        // Further out is honoured; past the regular tick is left to it.
+        assert_eq!(super::early_delay_ms(Some(now + 120), now, 300_000), 120_000);
+        assert_eq!(super::early_delay_ms(Some(now + 600), now, 300_000), 0);
+        assert_eq!(super::early_delay_ms(None, now, 300_000), 0);
+        // With a one-minute interval the floor equals the tick: no early round at all.
+        assert_eq!(super::early_delay_ms(Some(now + 5), now, 60_000), 0);
+    }
+
     use super::*;
 
     fn empty_set() -> ProviderSet {
@@ -387,16 +425,18 @@ mod tests {
     /// Credentials that changed restart the ladder so a fresh sign-in that
     /// still fails is asked again soon, not after the accumulated step.
     #[test]
-    fn a_credential_change_restarts_the_ladder_but_a_plain_repeat_climbs_it() {
+    /// A moved credential file earns a retry, not a fresh ladder: a file that
+    /// moves on its own would otherwise pin a failing provider to the
+    /// shortest step. A different kind of failure does start over.
+    fn a_credential_change_keeps_climbing_but_a_new_kind_of_failure_starts_over() {
         let mut backoff = HashMap::new();
         backoff.insert(ProviderId::Codex, ProviderBackoff { misses: 3, next_attempt_unix: 0, error: PollError::AuthRequired, watch: None, report: None });
         let failures = [PollFailure { provider: ProviderId::Codex, error: PollError::AuthRequired }];
         let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), set(&[ProviderId::Codex]), 1_000);
-        assert_eq!(ladders, vec![(ProviderId::Codex, PollError::AuthRequired, 1)]);
-        assert_eq!(backoff[&ProviderId::Codex].next_attempt_unix, 1_000 + 5 * 60);
-        let ladders = apply_failures(&mut backoff, &failures, HashMap::new(), empty_set(), 2_000);
-        assert_eq!(ladders[0].2, 2);
-        assert_eq!(backoff[&ProviderId::Codex].next_attempt_unix, 2_000 + 10 * 60);
+        assert_eq!(ladders, vec![(ProviderId::Codex, PollError::AuthRequired, 4)]);
+        let other = [PollFailure { provider: ProviderId::Codex, error: PollError::RequestFailed }];
+        let ladders = apply_failures(&mut backoff, &other, HashMap::new(), empty_set(), 2_000);
+        assert_eq!(ladders[0].2, 1);
     }
 
     /// A manual retry zeroes the deadline but keeps the miss count, so a

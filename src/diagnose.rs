@@ -20,6 +20,10 @@ pub fn init_append() -> Result<PathBuf, String> {
 
 fn init_file(append: bool) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join("headroom.log");
+    // Appending forever is how a loop fills a disk: past a few megabytes the
+    // log starts over.
+    const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
+    let append = append && std::fs::metadata(&path).map(|meta| meta.len() < MAX_LOG_BYTES).unwrap_or(true);
     let mut options = OpenOptions::new();
     options.create(true);
     if append {
