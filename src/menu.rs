@@ -71,6 +71,53 @@ pub const CMD_TRAY_STYLE_LETTERS: u16 = 58;
 pub const CMD_TRAY_STYLE_TEXT_BAR: u16 = 59;
 /// Monotone, then the palette in order; 100..=108.
 const CMD_TRAY_COLOUR_FIRST: u16 = 100;
+pub const CMD_NOTIFY_SIGN_IN: u16 = 110;
+pub const CMD_NOTIFY_USAGE_OFF: u16 = 111;
+pub const CMD_NOTIFY_USAGE_CRITICAL: u16 = 112;
+pub const CMD_NOTIFY_USAGE_WARNING: u16 = 113;
+pub const CMD_NOTIFY_QUIET: u16 = 114;
+
+/// What a menu command changes about notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationChange {
+    ToggleSignIn,
+    Usage(crate::app_settings::UsageAlerts),
+    ToggleQuiet,
+}
+
+impl NotificationChange {
+    pub fn for_command(id: u16) -> Option<Self> {
+        use crate::app_settings::UsageAlerts;
+        Some(match id {
+            CMD_NOTIFY_SIGN_IN => Self::ToggleSignIn,
+            CMD_NOTIFY_USAGE_OFF => Self::Usage(UsageAlerts::Off),
+            CMD_NOTIFY_USAGE_CRITICAL => Self::Usage(UsageAlerts::Critical),
+            CMD_NOTIFY_USAGE_WARNING => Self::Usage(UsageAlerts::Warning),
+            CMD_NOTIFY_QUIET => Self::ToggleQuiet,
+            _ => return None,
+        })
+    }
+
+    /// Apply; true when something changed.
+    pub fn apply(self, settings: &mut crate::app_settings::NotificationSettings) -> bool {
+        let before = settings.clone();
+        match self {
+            Self::ToggleSignIn => settings.sign_in = !settings.sign_in,
+            Self::Usage(level) => settings.usage_alerts = level,
+            Self::ToggleQuiet => settings.enabled = !settings.enabled,
+        }
+        *settings != before
+    }
+}
+
+/// The names the Settings page and the menu share.
+pub fn usage_alerts_label(level: crate::app_settings::UsageAlerts) -> &'static str {
+    match level {
+        crate::app_settings::UsageAlerts::Off => "Off",
+        crate::app_settings::UsageAlerts::Critical => "At the critical line",
+        crate::app_settings::UsageAlerts::Warning => "At the warning and critical lines",
+    }
+}
 const CMD_TRAY_PROVIDER_FIRST: u16 = 70;
 /// A per-model cap of the icon's provider, by its place in the provider's
 /// list; resolved to its label when applied.
@@ -326,6 +373,7 @@ pub fn appearance_label(appearance: Appearance) -> &'static str {
 /// Show the menu at the cursor and return the chosen command, if any.
 /// `icon` is the tray icon that was right-clicked; the icon submenu is its.
 pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
+    let notifications = lock_state().as_ref().map(|s| s.notifications.clone()).unwrap_or_default();
     let (language, interval, providers, install_channel, icon, icon_count, appearance, data) = {
         let state = lock_state();
         let s = state.as_ref()?;
@@ -409,6 +457,25 @@ pub fn show(hwnd: HWND, icon: usize) -> Option<u16> {
             }
         });
 
+        submenu(menu, language.text("Notifications"), &|notify| {
+            use crate::app_settings::UsageAlerts;
+            let on = notifications.enabled;
+            let flags = |checked_now: bool| {
+                let base = if checked_now { MF_STRING | MF_CHECKED } else { MF_STRING };
+                if on { base } else { base | windows::Win32::UI::WindowsAndMessaging::MF_GRAYED }
+            };
+            item(notify, flags(notifications.sign_in), CMD_NOTIFY_SIGN_IN, language.text("Sign-in problems"));
+            separator(notify);
+            for (id, level) in [
+                (CMD_NOTIFY_USAGE_OFF, UsageAlerts::Off),
+                (CMD_NOTIFY_USAGE_CRITICAL, UsageAlerts::Critical),
+                (CMD_NOTIFY_USAGE_WARNING, UsageAlerts::Warning),
+            ] {
+                item(notify, flags(notifications.usage_alerts == level), id, &format!("{} {}", language.text("Usage alerts:"), language.text(usage_alerts_label(level))));
+            }
+            separator(notify);
+            item(notify, checked(!on), CMD_NOTIFY_QUIET, language.text("Quiet (no notifications)"));
+        });
         item(menu, checked(startup), CMD_STARTUP, language.text("Start with Windows"));
         if !matches!(install_channel, InstallChannel::Store) {
             item(menu, MF_STRING, CMD_UPDATES, language.text("Check for updates"));
@@ -668,6 +735,7 @@ mod tests {
         ids.extend((0..ProviderId::ALL.len() as u16).map(|i| CMD_TRAY_PROVIDER_FIRST + i));
         ids.extend(CMD_TRAY_SCOPED_FIRST..=CMD_TRAY_SCOPED_LAST);
         ids.extend((0..2 + crate::tray_paint::ICON_COLOURS.len() as u16).map(|i| CMD_TRAY_COLOUR_FIRST + i));
+        ids.extend([CMD_NOTIFY_SIGN_IN, CMD_NOTIFY_USAGE_OFF, CMD_NOTIFY_USAGE_CRITICAL, CMD_NOTIFY_USAGE_WARNING, CMD_NOTIFY_QUIET]);
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -677,7 +745,8 @@ mod tests {
         for id in ids {
             let kinds = usize::from(TrayIconChange::for_command(id).is_some())
                 + usize::from(appearance_for_command(id).is_some())
-                + usize::from(provider_for_command(id).is_some());
+                + usize::from(provider_for_command(id).is_some())
+                + usize::from(NotificationChange::for_command(id).is_some());
             assert!(kinds <= 1, "command {id} means more than one thing");
         }
     }

@@ -49,8 +49,8 @@ cannot be seen from the WSL side.
   so several icons can be told apart by colour as well as by label.
 - **Per-icon click action.** Open the panel (today), or open that provider's
   detail view, or copy the value.
-- **Balloon on crossing a line.** Once per window per crossing: "Claude
-  weekly at 75 %".
+- ~~**Balloon on crossing a line.**~~ Shipped 2026-09-24: Settings →
+  Notifications (usage alerts, sign-in problems, per-provider mutes, quiet).
 
 ## Providers
 

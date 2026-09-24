@@ -154,6 +154,8 @@ pub fn run(open_dashboard_on_start: bool) {
             tray_icons: settings.tray_icons.clone(),
             thresholds: thresholds_of(&settings),
             appearance: settings.appearance,
+            notifications: settings.notifications.clone(),
+            alert_memory: Default::default(),
         });
     }
 
@@ -238,6 +240,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             if wparam.0 > 0 {
                 SetTimer(hwnd, TIMER_DUE, wparam.0.min(u32::MAX as usize) as u32, None);
             }
+            LRESULT(0)
+        }
+        m if m == crate::native_interop::WM_APP_TEST_NOTIFICATION => {
+            let enabled = lock_state().as_ref().is_some_and(|s| s.notifications.enabled);
+            let body = if enabled {
+                "This is how Headroom tells you about a limit or a sign-in."
+            } else {
+                "Notifications are switched off (quiet), so nothing else will appear."
+            };
+            tray_icon::notify_balloon(hwnd, "Headroom notification test", body);
             LRESULT(0)
         }
         WM_APP_OPEN_DASHBOARD => {
@@ -359,6 +371,11 @@ fn handle_command(hwnd: HWND, id: u16, icon: usize) {
                 if changed {
                     save_state_settings();
                     sync_tray(hwnd);
+                }
+            } else if let Some(change) = menu::NotificationChange::for_command(id) {
+                let changed = lock_state().as_mut().is_some_and(|s| change.apply(&mut s.notifications));
+                if changed {
+                    save_state_settings();
                 }
             } else if let Some(appearance) = menu::appearance_for_command(id) {
                 let changed = lock_state()
@@ -645,6 +662,7 @@ fn reload_settings(hwnd: HWND) {
         s.tray_icons = settings.tray_icons.clone();
         s.thresholds = thresholds_of(&settings);
         s.appearance = settings.appearance;
+        s.notifications = settings.notifications.clone();
         changed
     };
     unsafe {
@@ -674,6 +692,7 @@ fn save_state_settings() {
             s.last_update_check_unix,
             s.tray_icons.clone(),
             s.appearance,
+            s.notifications.clone(),
         )
     };
     let Some(mut persisted) = app_settings::load_settings_if_readable() else {
@@ -686,6 +705,7 @@ fn save_state_settings() {
     persisted.last_update_check_unix = owned.3;
     persisted.tray_icons = owned.4;
     persisted.appearance = owned.5;
+    persisted.notifications = owned.6;
     if let Err(error) = save_settings(&persisted) {
         diagnose::log(format!("unable to save settings: {error}"));
     }

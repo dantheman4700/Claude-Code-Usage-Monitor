@@ -267,8 +267,10 @@ fn do_poll_once(send_hwnd: SendHwnd) {
                     (EventKind::NoCredentials, format!("{name}: no credentials found"))
                 }
                 PollError::AuthRequired | PollError::TokenExpired => {
-                    let (title, body) = s.language.provider_auth_error(provider);
-                    balloons.push((title.to_string(), body.to_string()));
+                    if s.notifications.sign_in_for(provider) {
+                        let (title, body) = s.language.provider_auth_error(provider);
+                        balloons.push((title.to_string(), body.to_string()));
+                    }
                     (
                         EventKind::AuthRequired,
                         format!("{name} rejected its credentials; sign in again"),
@@ -290,6 +292,13 @@ fn do_poll_once(send_hwnd: SendHwnd) {
             .any(|provider| merged.get(provider).is_some_and(|usage| !usage.stale));
         s.data = Some(merged.clone());
         s.last_poll_ok = poll_ok;
+        // Usage alerts: a limit that crossed a line since the last round.
+        let level = s.notifications.usage_level();
+        let constraints = crate::insights::collect_constraints(&merged, enabled, s.thresholds);
+        let news = crate::alerts::usage_alerts(&mut s.alert_memory, &constraints, level);
+        if let Some(balloon) = crate::alerts::balloon(&news) {
+            balloons.push(balloon);
+        }
         // What the panel says about every enabled provider without a
         // current reading.
         let failed: std::collections::BTreeMap<ProviderId, crate::models::ProviderFailure> = enabled

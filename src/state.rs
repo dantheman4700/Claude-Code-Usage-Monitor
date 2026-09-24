@@ -139,6 +139,10 @@ pub struct AppState {
     pub thresholds: crate::insights::Thresholds,
     /// The panel's palette, mirrored so the menu can show and set it.
     pub appearance: crate::app_settings::Appearance,
+    /// What the tray may raise as a Windows notification.
+    pub notifications: crate::app_settings::NotificationSettings,
+    /// What the usage alerts have already said.
+    pub alert_memory: crate::alerts::AlertMemory,
 }
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);

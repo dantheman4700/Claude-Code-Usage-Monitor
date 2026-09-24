@@ -18,6 +18,8 @@ pub const WM_APP_SCHEDULE_DUE: u32 = WM_APP + 10;
 /// Posted by the panel: WPARAM = `ProviderId as usize + 1`, or 0 for every
 /// provider. A manual retry, subject to the tray's cooldown.
 pub const WM_APP_RETRY_PROVIDER: u32 = WM_APP + 11;
+/// The panel asks the tray to show a test notification.
+pub const WM_APP_TEST_NOTIFICATION: u32 = WM_APP + 12;
 
 /// A NUL-terminated UTF-16 copy of `s`, for Win32 string parameters.
 pub fn wide_str(s: &str) -> Vec<u16> {

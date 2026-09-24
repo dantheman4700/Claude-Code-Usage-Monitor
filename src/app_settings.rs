@@ -41,6 +41,52 @@ pub enum Appearance {
     Light,
 }
 
+/// When usage alone is worth a notification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageAlerts {
+    Off,
+    /// A limit crossing the critical line.
+    #[default]
+    Critical,
+    /// A limit crossing the warning line, and again at the critical one.
+    Warning,
+}
+
+/// The notifications Headroom raises from the tray.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationSettings {
+    /// The master switch: off is quiet, whatever the rest say.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// A provider rejecting its saved sign-in.
+    #[serde(default = "default_true")]
+    pub sign_in: bool,
+    /// Providers whose sign-in problems stay quiet, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign_in_muted: Vec<String>,
+    #[serde(default)]
+    pub usage_alerts: UsageAlerts,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self { enabled: true, sign_in: true, sign_in_muted: Vec::new(), usage_alerts: UsageAlerts::default() }
+    }
+}
+
+impl NotificationSettings {
+    /// Whether a sign-in problem with `provider` is worth a notification.
+    pub fn sign_in_for(&self, provider: ProviderId) -> bool {
+        self.enabled && self.sign_in && !self.sign_in_muted.iter().any(|key| key == provider.descriptor().key)
+    }
+
+    /// The usage alert level in force: off when the master switch is.
+    pub fn usage_level(&self) -> UsageAlerts {
+        if self.enabled { self.usage_alerts } else { UsageAlerts::Off }
+    }
+}
+
 /// What the tray icon shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -309,6 +355,9 @@ pub struct SettingsFile {
     /// default user.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub wsl_users: BTreeMap<String, String>,
+    /// What the tray may raise as a Windows notification.
+    #[serde(default)]
+    pub notifications: NotificationSettings,
     /// A provider's colour on the tray, by provider key and palette name,
     /// when not the one it ships with. Every icon and rundown bar that
     /// wears "the provider's colour" follows this.
@@ -360,6 +409,7 @@ impl Default for SettingsFile {
             wsl_distros: None,
             wsl_users: BTreeMap::new(),
             provider_colours: BTreeMap::new(),
+            notifications: NotificationSettings::default(),
             unknown: BTreeMap::new(),
         }
     }
@@ -854,13 +904,14 @@ pub fn save_usage_cache(
 /// style; 10 retired the column and letters styles (read, then folded); 11
 /// made an absent colour mean the provider's own -- deliberately also for
 /// older files, which had no colour and now gain one (owner ruling
-/// 2026-09-09; "monotone" is one click away). An older
+/// 2026-09-09; "monotone" is one click away); 12 added notifications. An
+/// older
 /// build leaves a newer file alone once it holds a variant it cannot
 /// decode (a column style, a scoped value); until then it reads the file,
 /// and a save from it drops the nested icon fields it does not know. A
 /// downgrade costs those, no more -- which is why every shape change bumps
 /// this: an undecodable file at the build's own version is quarantined.
-pub const SETTINGS_SCHEMA: u32 = 11;
+pub const SETTINGS_SCHEMA: u32 = 12;
 /// Readings cache.
 pub const CACHE_SCHEMA: u32 = 1;
 /// History samples.
@@ -1153,10 +1204,10 @@ mod tests {
     /// A newer file's unknown keys and version come back out of a save.
     #[test]
     fn a_newer_file_keeps_its_keys_and_version_through_a_save() {
-        let mut settings = decode_settings(r#"{"schema_version":12,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
+        let mut settings = decode_settings(r#"{"schema_version":13,"future_knob":{"a":1},"providers":{"codex":false}}"#).ok().unwrap();
         settings.toggle_provider(ProviderId::Grok);
         let written = settings_json(&settings);
-        assert_eq!(written["schema_version"], serde_json::json!(12));
+        assert_eq!(written["schema_version"], serde_json::json!(13));
         assert_eq!(written["future_knob"]["a"], serde_json::json!(1));
         assert_eq!(written["providers"]["codex"], serde_json::Value::Bool(false));
     }
@@ -1165,8 +1216,8 @@ mod tests {
     /// version is corrupt.
     #[test]
     fn a_newer_undecodable_file_is_left_alone() {
-        assert!(matches!(decode_settings(r#"{"schema_version":12,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(12))));
-        assert!(matches!(decode_settings(r#"{"schema_version":11,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
+        assert!(matches!(decode_settings(r#"{"schema_version":13,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Newer(13))));
+        assert!(matches!(decode_settings(r#"{"schema_version":12,"poll_interval_ms":"later"}"#), Err(SettingsDecodeError::Corrupt(_))));
         assert!(matches!(decode_settings("not json"), Err(SettingsDecodeError::Corrupt(_))));
     }
 
@@ -1192,9 +1243,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("headroom-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let settings = dir.join("settings.json");
-        std::fs::write(&settings, r#"{"schema_version":12,"poll_interval_ms":"later"}"#).unwrap();
+        std::fs::write(&settings, r#"{"schema_version":13,"poll_interval_ms":"later"}"#).unwrap();
         assert!(load_settings_from(&settings).is_none());
-        assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"schema_version":12,"poll_interval_ms":"later"}"#);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"schema_version":13,"poll_interval_ms":"later"}"#);
         assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("corrupt")));
         let cache = dir.join("usage-cache.json");
         std::fs::write(&cache, r#"{"schema_version":9,"updated_unix":1,"poll_ok":true,"data":{}}"#).unwrap();
@@ -1288,7 +1339,7 @@ mod tests {
         let written = settings_json(&settings).to_string();
         let loaded = decode_settings(&written).ok().unwrap();
         assert_eq!(loaded.tray_icons, settings.tray_icons);
-        assert_eq!(loaded.schema_version, 11);
+        assert_eq!(loaded.schema_version, 12);
         assert!(!written.contains("tray_icon\""), "the old key is not written");
 
         // A file from 3 has one `tray_icon`: it becomes the list's only entry,
@@ -1298,7 +1349,7 @@ mod tests {
         assert_eq!(older.tray_icons[0].style, TrayIconStyle::Bar);
         assert_eq!(older.tray_icons[0].measure, TrayIconMeasure::Used);
         assert!(!older.tray_icons[0].alert_colour);
-        assert_eq!(older.schema_version, 11);
+        assert_eq!(older.schema_version, 12);
         assert!(!settings_json(&older).to_string().contains("\"tray_icon\""), "nor carried as an unknown");
 
         // The short-lived first-plus-extras shape folds into the list too.
@@ -1347,6 +1398,28 @@ mod tests {
         // Nothing changed here: the disk is taken as it is.
         let same = merge_settings(&baseline, &baseline, &disk);
         assert_eq!(settings_json(&same), settings_json(&disk));
+    }
+
+    #[test]
+    fn notifications_default_on_and_the_master_switch_wins() {
+        let settings = SettingsFile::default();
+        assert!(settings.notifications.sign_in_for(ProviderId::Claude));
+        assert_eq!(settings.notifications.usage_level(), UsageAlerts::Critical);
+        let mut quiet = settings.notifications.clone();
+        quiet.enabled = false;
+        assert!(!quiet.sign_in_for(ProviderId::Claude));
+        assert_eq!(quiet.usage_level(), UsageAlerts::Off);
+        let mut muted = settings.notifications.clone();
+        muted.sign_in_muted.push("grok".into());
+        assert!(!muted.sign_in_for(ProviderId::Grok) && muted.sign_in_for(ProviderId::Codex));
+        // An older file without the block gets the defaults; a written one round-trips.
+        let older = decode_settings(r#"{"schema_version":11}"#).ok().unwrap();
+        assert_eq!(older.notifications, NotificationSettings::default());
+        let mut chosen = SettingsFile::default();
+        chosen.notifications = muted;
+        chosen.notifications.usage_alerts = UsageAlerts::Warning;
+        let loaded = decode_settings(&settings_json(&chosen).to_string()).ok().unwrap();
+        assert_eq!(loaded.notifications, chosen.notifications);
     }
 
     #[test]

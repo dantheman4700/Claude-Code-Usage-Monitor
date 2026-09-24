@@ -9,7 +9,12 @@ every limit each provider reports, which one bites first, how fast each window
 is filling, and where there is still room to send the next job. It is the page
 to leave open: pin the providers you watch to the top in your order, hide the
 rest. Right-click the icon for the menu, which mirrors Settings: update
-frequency, providers, the tray icon, appearance, start with Windows.
+frequency, providers, the tray icon, appearance, notifications, start with
+Windows.
+
+Notifications are yours to set: a Windows notification when a limit crosses
+your warning or critical line (once per window, never every refresh), when a
+provider rejects its sign-in (mutable per provider), or nothing at all.
 
 The tray icon is yours to shape: the logo, the tightest limit across the
 fleet, any one limit a provider reports (session, weekly, monthly, a per-model

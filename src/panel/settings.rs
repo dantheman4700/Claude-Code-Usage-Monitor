@@ -19,6 +19,7 @@ pub(crate) enum SettingsTab {
     General,
     Providers,
     Limits,
+    Notifications,
     Log,
     About,
 }
@@ -38,6 +39,7 @@ impl PanelApp {
                     (SettingsTab::General, language.text("General")),
                     (SettingsTab::Providers, language.text("Providers")),
                     (SettingsTab::Limits, language.text("Limits")),
+                    (SettingsTab::Notifications, language.text("Notifications")),
                     (SettingsTab::Log, language.text("Log")),
                     (SettingsTab::About, language.text("About")),
                 ],
@@ -47,6 +49,7 @@ impl PanelApp {
                 SettingsTab::General => self.general_tab(ui, language, &changed),
                 SettingsTab::Providers => self.providers_tab(ui, language, &changed),
                 SettingsTab::Limits => self.limits_tab(ui, language, &changed),
+                SettingsTab::Notifications => self.notifications_tab(ui, language, &changed),
                 SettingsTab::Log => {
                     ui.label(
                         egui::RichText::new(language.text(
@@ -270,6 +273,64 @@ impl PanelApp {
                 }
                 changed.set(true);
             }
+        }
+    }
+
+    /// What the tray may raise as a Windows notification.
+    fn notifications_tab(&mut self, ui: &mut egui::Ui, language: LanguageId, changed: &Cell<bool>) {
+        use crate::app_settings::UsageAlerts;
+        ui.label(
+            egui::RichText::new(language.text(
+                "Headroom tells you when a limit crosses one of your lines or a provider rejects its sign-in -- once, not every refresh. Windows' own switch for Headroom (Settings, System, Notifications) still applies on top of these.",
+            ))
+            .color(muted())
+            .size(TYPE_SM),
+        );
+        ui.add_space(12.0);
+        let notifications = &mut self.settings.notifications;
+        card(ui, None, |_| {}, |ui| {
+            setting_row(ui, language.text("Notifications"), language.text("Off is quiet: nothing appears, whatever is set below"), |ui| {
+                if Toggle::new(&mut notifications.enabled).labels(language.text("On"), language.text("Quiet")).show(ui).changed() {
+                    changed.set(true);
+                }
+            });
+            setting_separator(ui);
+            ui.add_enabled_ui(notifications.enabled, |ui| {
+                setting_row(ui, language.text("Usage alerts"), language.text("When a limit crosses a line; again only after it renews or drops back"), |ui| {
+                    Dropdown::from_id_salt("usage_alerts").width(260.0).selected_text(language.text(crate::menu::usage_alerts_label(notifications.usage_alerts))).show_ui(ui, |ui| {
+                        for level in [UsageAlerts::Off, UsageAlerts::Critical, UsageAlerts::Warning] {
+                            if dropdown_selectable_value(ui, &mut notifications.usage_alerts, level, language.text(crate::menu::usage_alerts_label(level))).changed() {
+                                changed.set(true);
+                            }
+                        }
+                    });
+                });
+                setting_separator(ui);
+                setting_row(ui, language.text("Sign-in problems"), language.text("When a provider rejects its saved sign-in"), |ui| {
+                    if Toggle::new(&mut notifications.sign_in).labels(language.text("On"), language.text("Off")).show(ui).changed() {
+                        changed.set(true);
+                    }
+                });
+                if notifications.sign_in {
+                    for descriptor in PROVIDER_DESCRIPTORS {
+                        setting_separator(ui);
+                        let key = descriptor.key.to_string();
+                        let mut on = !notifications.sign_in_muted.contains(&key);
+                        setting_row(ui, language.text(descriptor.display_name), language.text("Sign-in problems from this provider"), |ui| {
+                            if Toggle::new(&mut on).labels(language.text("On"), language.text("Muted")).show(ui).changed() {
+                                notifications.sign_in_muted.retain(|muted| *muted != key);
+                                if !on {
+                                    notifications.sign_in_muted.push(key.clone());
+                                }
+                                changed.set(true);
+                            }
+                        });
+                    }
+                }
+            });
+        });
+        if ui.button(language.text("Send a test notification")).clicked() {
+            self.post_owner(crate::native_interop::WM_APP_TEST_NOTIFICATION);
         }
     }
 

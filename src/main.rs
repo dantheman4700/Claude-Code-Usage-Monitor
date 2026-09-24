@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod activity_log;
+mod alerts;
 mod app_settings;
 mod dashboard;
 mod diagnose;
