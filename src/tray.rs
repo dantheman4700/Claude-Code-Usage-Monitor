@@ -90,6 +90,7 @@ pub fn run(open_dashboard_on_start: bool) {
     let settings = load_settings();
     poller::configure_credentials(&settings);
     crate::tray_paint::configure_provider_colours(&settings);
+    let _ = record_credential_signature(&settings);
     let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
     let language = localization::resolve_language(language_override);
 
@@ -220,6 +221,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_APP_REFRESH_NOW => {
+            // "Refresh" and the panel's "I bought it -- check again" both land
+            // here: re-read the licence on the next round, then fetch.
+            crate::license::invalidate();
             manual_retry(hwnd, None);
             LRESULT(0)
         }
@@ -389,6 +393,23 @@ fn handle_command(hwnd: HWND, id: u16, icon: usize) {
             }
         }
     }
+}
+
+/// What decides where logins are read from and who is asked, as last
+/// applied. Seeded at startup, so the first change after it counts.
+static CREDENTIAL_SIGNATURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record the settings' credential signature; true when it differs from the
+/// one recorded before (never on the first call, which is startup's).
+fn record_credential_signature(settings: &app_settings::SettingsFile) -> bool {
+    let signature = format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        settings.credential_paths, settings.wsl_distros, settings.wsl_users, settings.enabled_providers()
+    );
+    let mut last = CREDENTIAL_SIGNATURE.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = last.as_deref().is_some_and(|previous| previous != signature);
+    *last = Some(signature);
+    changed
 }
 
 fn thresholds_of(settings: &app_settings::SettingsFile) -> crate::insights::Thresholds {
@@ -628,17 +649,7 @@ fn reload_settings(hwnd: HWND) {
     // Only a change to where logins are read from, or to which providers
     // are on, is worth a fresh round with every backoff cleared. A colour,
     // a threshold or a pin is not: a save is not a way around the backoff.
-    let signature = format!(
-        "{:?}|{:?}|{:?}|{:?}",
-        settings.credential_paths, settings.wsl_distros, settings.wsl_users, settings.enabled_providers()
-    );
-    static LAST_SIGNATURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-    let locations_changed = {
-        let mut last = LAST_SIGNATURE.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = last.as_deref().is_some_and(|previous| previous != signature);
-        *last = Some(signature);
-        changed
-    };
+    let locations_changed = record_credential_signature(&settings);
     if locations_changed {
         poller::configure_credentials(&settings);
         poller::invalidate_wsl_caches();
@@ -679,7 +690,13 @@ fn reload_settings(hwnd: HWND) {
 /// Everything else in the file belongs to the panel and is left as loaded;
 /// the panel watches the file, so a change made here shows there.
 /// The values are copied out first; the lock is never held across the disk.
+/// The tray writes settings from two threads (the menu on the window
+/// thread, the update check on its worker); each is load-modify-save, so
+/// they take turns.
+static SETTINGS_SAVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn save_state_settings() {
+    let _turn = SETTINGS_SAVE.lock().unwrap_or_else(|e| e.into_inner());
     let owned = {
         let state = lock_state();
         let Some(s) = state.as_ref() else {
@@ -952,6 +969,7 @@ fn post_update_check_complete(hwnd: HWND) {
 /// whole view of the settings here could undo a change the panel made a
 /// moment ago.
 fn save_last_update_check(checked_at: u64) {
+    let _turn = SETTINGS_SAVE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(mut persisted) = app_settings::load_settings_if_readable() else {
         return;
     };

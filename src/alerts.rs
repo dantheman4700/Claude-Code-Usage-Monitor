@@ -18,17 +18,12 @@ pub struct AlertMemory {
     /// Per limit: the highest severity already announced, and the renewal
     /// time it was announced for.
     said: HashMap<String, (Severity, Option<u64>)>,
-    /// False until the first round has been looked at. That round only
-    /// records: a limit that was already past a line when Headroom started
-    /// is known, not news.
-    seeded: bool,
 }
 
 impl AlertMemory {
     /// Forget everything; the next round records again without announcing.
     pub fn reset(&mut self) {
         self.said.clear();
-        self.seeded = false;
     }
 }
 
@@ -60,37 +55,64 @@ pub fn usage_alerts(memory: &mut AlertMemory, constraints: &[Constraint], level:
         UsageAlerts::Critical => Severity::Critical,
         UsageAlerts::Warning => Severity::Warning,
     };
-    let announce = memory.seeded;
     let mut news: Vec<Constraint> = Vec::new();
     for constraint in constraints.iter().filter(|constraint| !constraint.stale) {
         let key = key(constraint);
+        // A limit seen for the first time is recorded, not announced: at
+        // startup, or when a provider first reports late, its state is
+        // known, not news.
+        let announce = memory.said.contains_key(&key);
         let renews = constraint
             .resets_at
             .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
             .map(|since| since.as_secs());
-        // A renewed window starts clean.
+        // A renewed window starts clean. Renewal times within half an hour
+        // are the same window: a provider that reports a countdown (OpenCode)
+        // gives a slightly different time every poll, and exact equality made
+        // every round look like a new window -- the alert repeated each time.
         let said = match memory.said.get(&key) {
-            Some((severity, at)) if *at == renews => *severity,
+            Some((severity, at)) if same_window(*at, renews) => *severity,
             _ => Severity::Normal,
         };
+        // Follow the window's renewal time as it drifts, so a countdown that
+        // slides a little every poll never adds up to a "new" window.
+        if let Some(entry) = memory.said.get_mut(&key) {
+            if same_window(entry.1, renews) {
+                entry.1 = renews.or(entry.1);
+            }
+        }
         let now = constraint.severity;
         if now == Severity::Normal {
             // Back under the lines: the next crossing is news again.
-            memory.said.insert(key, (Severity::Normal, renews));
+            let at = renews.or(memory.said.get(&key).and_then(|entry| entry.1));
+            memory.said.insert(key, (Severity::Normal, at));
             continue;
         }
         if now >= floor && now > said {
             if announce {
                 news.push(constraint.clone());
             }
-            memory.said.insert(key, (now, renews));
+            let at = renews.or(memory.said.get(&key).and_then(|entry| entry.1));
+            memory.said.insert(key, (now, at));
         } else if said == Severity::Normal || now > said {
-            memory.said.insert(key, (now.max(said), renews));
+            let at = renews.or(memory.said.get(&key).and_then(|entry| entry.1));
+            memory.said.insert(key, (now.max(said), at));
         }
     }
-    memory.seeded = true;
     news.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.percentage.total_cmp(&a.percentage)));
     news
+}
+
+/// Two renewal times name the same window when they are within this.
+const SAME_WINDOW_SECS: u64 = 30 * 60;
+
+fn same_window(a: Option<u64>, b: Option<u64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.abs_diff(b) <= SAME_WINDOW_SECS,
+        // A renewal time that is missing on one side is no evidence of a new
+        // window.
+        _ => true,
+    }
 }
 
 /// One balloon for a round's news: a single limit by name, several counted.
@@ -156,7 +178,7 @@ mod tests {
         assert_eq!(usage_alerts(&mut memory, &crit, UsageAlerts::Warning).len(), 1, "critical is news on top of warning");
         assert!(usage_alerts(&mut memory, &crit, UsageAlerts::Warning).is_empty());
         // Still critical, but the window renewed and filled again: news again.
-        let next_week = [limit(ProviderId::Claude, 91.0, Severity::Critical, 2_000)];
+        let next_week = [limit(ProviderId::Claude, 91.0, Severity::Critical, 1_000 + 7 * 24 * 3600)];
         assert_eq!(usage_alerts(&mut memory, &next_week, UsageAlerts::Warning).len(), 1);
     }
 
@@ -177,6 +199,36 @@ mod tests {
         usage_alerts(&mut memory, &round, UsageAlerts::Warning);
         assert!(usage_alerts(&mut memory, &round, UsageAlerts::Off).is_empty());
         assert!(usage_alerts(&mut memory, &round, UsageAlerts::Warning).is_empty(), "switching on records first");
+    }
+
+    #[test]
+    fn a_countdown_that_drifts_each_poll_is_still_one_window() {
+        let mut memory = AlertMemory::default();
+        usage_alerts(&mut memory, &[limit(ProviderId::OpenCode, 40.0, Severity::Normal, 10_000)], UsageAlerts::Warning);
+        assert_eq!(usage_alerts(&mut memory, &[limit(ProviderId::OpenCode, 80.0, Severity::Warning, 10_003)], UsageAlerts::Warning).len(), 1);
+        // The same window, reported a few seconds off each round: said once.
+        for drift in [10_007u64, 9_998, 10_300, 11_000] {
+            assert!(usage_alerts(&mut memory, &[limit(ProviderId::OpenCode, 81.0, Severity::Warning, drift)], UsageAlerts::Warning).is_empty(), "{drift}");
+        }
+        // A slow slide past half an hour in small steps is still one window.
+        for step in 1..=20u64 {
+            assert!(usage_alerts(&mut memory, &[limit(ProviderId::OpenCode, 81.0, Severity::Warning, 11_000 + step * 600)], UsageAlerts::Warning).is_empty(), "step {step}");
+        }
+        // A missing renewal time on one round is no new window either.
+        let mut none = limit(ProviderId::OpenCode, 81.0, Severity::Warning, 0);
+        none.resets_at = None;
+        assert!(usage_alerts(&mut memory, &[none], UsageAlerts::Warning).is_empty());
+        // A real renewal (hours later) is a new window.
+        assert_eq!(usage_alerts(&mut memory, &[limit(ProviderId::OpenCode, 82.0, Severity::Warning, 11_000 + 20 * 600 + 5 * 3600)], UsageAlerts::Warning).len(), 1);
+    }
+
+    #[test]
+    fn a_provider_that_reports_late_is_recorded_first() {
+        let mut memory = AlertMemory::default();
+        usage_alerts(&mut memory, &[limit(ProviderId::Claude, 40.0, Severity::Normal, 1)], UsageAlerts::Warning);
+        // Codex was failing at startup and first reports already critical.
+        let late = [limit(ProviderId::Claude, 40.0, Severity::Normal, 1), limit(ProviderId::Codex, 95.0, Severity::Critical, 1)];
+        assert!(usage_alerts(&mut memory, &late, UsageAlerts::Warning).is_empty());
     }
 
     #[test]

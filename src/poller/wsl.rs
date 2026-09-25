@@ -180,22 +180,35 @@ pub(super) enum ReadError {
     Failed(String),
 }
 
-pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &str) -> Result<String, ReadError> {
-    let Some(output) = run_with_timeout(
-        wsl_command(distro, user)
-            .arg("--")
-            // Inside the distro too: killing wsl.exe at the Windows-side
-            // timeout would leave the shell running in the distro.
-            .arg("timeout")
-            .arg("4")
+/// Run a short probe script in the distro, bounded inside it by
+/// `timeout` so killing wsl.exe at the Windows-side deadline leaves no
+/// shell behind. A distro without `timeout` (exit 126/127) gets the script
+/// plainly, bounded from outside only.
+fn run_probe(distro: &str, user: Option<&str>, script: &str) -> Option<std::process::Output> {
+    let run = |bounded: bool| {
+        let mut command = wsl_command(distro, user);
+        command.arg("--");
+        if bounded {
+            command.arg("timeout").arg("4");
+        }
+        command
             .arg("sh")
             .arg("-lc")
             .arg(script)
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()),
-        WSL_TIMEOUT,
-    ) else {
+            .stderr(std::process::Stdio::null());
+        run_with_timeout(&mut command, WSL_TIMEOUT)
+    };
+    let output = run(true)?;
+    if matches!(output.status.code(), Some(126) | Some(127)) {
+        return run(false);
+    }
+    Some(output)
+}
+
+pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &str) -> Result<String, ReadError> {
+    let Some(output) = run_probe(distro, user, script) else {
         // A timeout used to look identical to a missing file. It is not: the
         // file may be fine and the machine merely busy, and the difference
         // decides whether the right answer is "sign in" or "wait".
@@ -225,21 +238,7 @@ pub(super) fn read_file(distro: &str, user: Option<&str>, script: &str, what: &s
 /// A cheap fingerprint of a path inside `distro`, used to notice that
 /// credentials were rewritten without reading them back out.
 pub(super) fn path_watch_signature(distro: &str, user: Option<&str>, key: &str, script: &str) -> Option<String> {
-    let output = run_with_timeout(
-        wsl_command(distro, user)
-            .arg("--")
-            // Inside the distro too: killing wsl.exe at the Windows-side
-            // timeout would leave the shell running in the distro.
-            .arg("timeout")
-            .arg("4")
-            .arg("sh")
-            .arg("-lc")
-            .arg(script)
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()),
-        WSL_TIMEOUT,
-    )?;
+    let output = run_probe(distro, user, script)?;
     if !output.status.success() {
         return None;
     }

@@ -997,17 +997,27 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     Ok(())
 }
 
-/// Remove temp files an interrupted write left in the app's folder. Run by
-/// the instance that holds the single-instance lock, so no temp here is
-/// another live writer's.
+/// Remove temp files an interrupted write left in the app's folder. Only
+/// ones an hour old: the panel is another process and may be mid-write, and
+/// a live write's temp lives for milliseconds.
 pub fn sweep_temp_files() {
     let Ok(entries) = std::fs::read_dir(app_data_directory()) else {
         return;
     };
+    let stale = std::time::Duration::from_secs(3600);
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') && name.ends_with(".tmp") {
+        if !(name.starts_with('.') && name.ends_with(".tmp")) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= stale);
+        if old {
             let _ = std::fs::remove_file(entry.path());
         }
     }

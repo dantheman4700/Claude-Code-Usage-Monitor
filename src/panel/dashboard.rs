@@ -77,7 +77,8 @@ impl PanelApp {
 
     pub(super) fn fleet_page(&mut self, ui: &mut egui::Ui) {
         if matches!(crate::license::cached(), Some(crate::license::LicenseState::Expired)) {
-            settings_scroll_area(ui, |ui| trial_over_card(ui, self.language()));
+            let owner = self.owner;
+            settings_scroll_area(ui, |ui| trial_over_card(ui, self.language(), owner));
             return;
         }
         let Some((usage, insights, thresholds, now)) = self.dashboard_inputs() else {
@@ -722,7 +723,7 @@ fn trial_line(ui: &mut egui::Ui, language: LanguageId) {
 
 /// What an expired Store trial shows instead of the fleet: one card, one
 /// button, nothing else stops existing -- readings resume with a licence.
-fn trial_over_card(ui: &mut egui::Ui, language: LanguageId) {
+fn trial_over_card(ui: &mut egui::Ui, language: LanguageId, owner: isize) {
     ui.add_space(24.0);
     egui::Frame::new()
         .fill(section_surface())
@@ -747,10 +748,22 @@ fn trial_over_card(ui: &mut egui::Ui, language: LanguageId) {
                     }
                 }
                 if ui.button(language.text("I bought it — check again")).clicked() {
+                    // This panel's reading, and the tray's (the tray is what
+                    // polls): it re-reads the licence and fetches.
                     crate::license::invalidate();
                     std::thread::spawn(|| {
                         let _ = crate::license::state();
                     });
+                    if owner != 0 {
+                        unsafe {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                windows::Win32::Foundation::HWND(owner as *mut _),
+                                crate::native_interop::WM_APP_REFRESH_NOW,
+                                windows::Win32::Foundation::WPARAM(0),
+                                windows::Win32::Foundation::LPARAM(0),
+                            );
+                        }
+                    }
                 }
             });
         });

@@ -1,6 +1,6 @@
 [package]
 name = "headroom"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "MIT"
 description = "Headroom: how much room is left on every AI coding provider you use"

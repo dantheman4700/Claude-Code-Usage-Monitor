@@ -30,13 +30,9 @@ use crate::tray_icon;
 
 /// Ask for a poll. If one is running, exactly one more follows it.
 pub fn request_poll(hwnd: HWND) {
-    // The one licence gate: a Store trial that ran out stops asking the
-    // providers. Everything else (the panel's card, the tooltip) reads the
-    // same state.
-    if crate::license::is_expired() {
-        crate::diagnose::log("poll skipped: the trial is over");
-        return;
-    }
+    // The licence gate lives in the worker, which re-reads the licence first:
+    // gating here on the cached reading would stop the worker from ever
+    // running again, and an expired trial would never notice a purchase.
     POLL_GENERATION.fetch_add(1, Ordering::AcqRel);
     if POLL_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -191,6 +187,7 @@ fn do_poll_once(send_hwnd: SendHwnd) {
     // in request_poll only ever looks at the cached reading.
     crate::license::refresh();
     if crate::license::is_expired() {
+        crate::diagnose::log("poll skipped: the trial is over");
         return;
     }
 
