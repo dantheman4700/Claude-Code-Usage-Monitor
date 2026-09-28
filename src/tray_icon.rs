@@ -177,11 +177,29 @@ pub fn trim(hwnd: HWND, keep: u32) {
 }
 
 /// A balloon from the first tray icon.
+/// Whether Windows says now is a time for notifications at all: not while a
+/// full-screen game or app has the screen, a presentation is on, or quiet
+/// hours / Do Not Disturb are set. A notification popping over an
+/// exclusive-fullscreen game can minimise it.
+pub fn user_accepts_notifications() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_ACCEPTS_NOTIFICATIONS};
+    match unsafe { SHQueryUserNotificationState() } {
+        Ok(state) => state == QUNS_ACCEPTS_NOTIFICATIONS,
+        // Unknown: let the flag below and Windows decide.
+        Err(_) => true,
+    }
+}
+
 pub fn notify_balloon(hwnd: HWND, title: &str, message: &str) {
+    if !user_accepts_notifications() {
+        crate::diagnose::log(format!("notification held back (game, full screen, presentation or quiet time): {title}"));
+        return;
+    }
     unsafe {
         let mut nid = notify_data(hwnd, FIRST_ICON_ID);
         nid.uFlags = NIF_INFO;
-        nid.dwInfoFlags = NIIF_WARNING;
+        // Windows' own quiet time is respected too.
+        nid.dwInfoFlags = NIIF_WARNING | windows::Win32::UI::Shell::NIIF_RESPECT_QUIET_TIME;
         copy_wide(title, &mut nid.szInfoTitle);
         copy_wide(message, &mut nid.szInfo);
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
